@@ -513,8 +513,8 @@ func (s *Server) processAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	for _, token := range strings.Split(reply, " ") {
-		payload, _ := json.Marshal(map[string]string{"delta": token + " "})
+	for _, chunk := range splitReplyChunks(reply, 12) {
+		payload, _ := json.Marshal(map[string]string{"delta": chunk})
 		_, _ = fmt.Fprintf(w, "data: %s\n\n", payload)
 		flusher.Flush()
 		time.Sleep(20 * time.Millisecond)
@@ -528,6 +528,25 @@ func toRuntimeContents(in []domain.RuntimeContent) []domain.RuntimeContent {
 		return []domain.RuntimeContent{}
 	}
 	return in
+}
+
+func splitReplyChunks(text string, chunkSize int) []string {
+	if chunkSize <= 0 {
+		chunkSize = 12
+	}
+	runes := []rune(text)
+	if len(runes) == 0 {
+		return []string{""}
+	}
+	out := make([]string, 0, (len(runes)+chunkSize-1)/chunkSize)
+	for i := 0; i < len(runes); i += chunkSize {
+		end := i + chunkSize
+		if end > len(runes) {
+			end = len(runes)
+		}
+		out = append(out, string(runes[i:end]))
+	}
+	return out
 }
 
 func (s *Server) listCronJobs(w http.ResponseWriter, _ *http.Request) {
