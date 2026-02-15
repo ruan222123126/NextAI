@@ -23,6 +23,12 @@ const chatSpec = schemas.ChatSpec;
 const runtimeContent = schemas.RuntimeContent;
 const agentInputMessage = schemas.AgentInputMessage;
 const agentProcessRequest = schemas.AgentProcessRequest;
+const cronScheduleSpec = schemas.CronScheduleSpec;
+const cronDispatchTarget = schemas.CronDispatchTarget;
+const cronRuntimeSpec = schemas.CronRuntimeSpec;
+const cronJobSpec = schemas.CronJobSpec;
+const cronJobState = schemas.CronJobState;
+const cronJobView = schemas.CronJobView;
 const modelSlotConfig = schemas.ModelSlotConfig;
 
 expect(spec?.openapi === "3.0.3", "openapi 版本必须是 3.0.3");
@@ -53,6 +59,29 @@ expect(hasRequired(agentProcessRequest, "session_id"), "AgentProcessRequest.requ
 expect(hasRequired(agentProcessRequest, "user_id"), "AgentProcessRequest.required 必须包含 user_id");
 expect(hasRequired(agentProcessRequest, "channel"), "AgentProcessRequest.required 必须包含 channel");
 expect(hasRequired(agentProcessRequest, "stream"), "AgentProcessRequest.required 必须包含 stream");
+
+expect(Array.isArray(cronScheduleSpec?.properties?.type?.enum), "CronScheduleSpec.type 必须声明 enum");
+expect(cronScheduleSpec?.properties?.type?.enum?.includes("interval"), "CronScheduleSpec.type enum 必须包含 interval");
+expect(cronScheduleSpec?.properties?.type?.enum?.includes("cron"), "CronScheduleSpec.type enum 必须包含 cron");
+expect(hasRequired(cronScheduleSpec, "cron"), "CronScheduleSpec.required 必须包含 cron");
+
+expect(hasRequired(cronDispatchTarget, "user_id"), "CronDispatchTarget.required 必须包含 user_id");
+expect(hasRequired(cronDispatchTarget, "session_id"), "CronDispatchTarget.required 必须包含 session_id");
+
+expect(cronRuntimeSpec?.properties?.max_concurrency?.minimum === 1, "CronRuntimeSpec.max_concurrency 必须设置 minimum=1");
+expect(cronRuntimeSpec?.properties?.timeout_seconds?.minimum === 1, "CronRuntimeSpec.timeout_seconds 必须设置 minimum=1");
+expect(cronRuntimeSpec?.properties?.misfire_grace_seconds?.minimum === 0, "CronRuntimeSpec.misfire_grace_seconds 必须设置 minimum=0");
+
+expect(hasRequired(cronJobSpec, "schedule"), "CronJobSpec.required 必须包含 schedule");
+expect(hasRequired(cronJobSpec, "task_type"), "CronJobSpec.required 必须包含 task_type");
+expect(hasRequired(cronJobSpec, "dispatch"), "CronJobSpec.required 必须包含 dispatch");
+expect(hasRequired(cronJobSpec, "runtime"), "CronJobSpec.required 必须包含 runtime");
+
+expect(Array.isArray(cronJobState?.properties?.last_status?.enum), "CronJobState.last_status 必须声明 enum");
+expect(cronJobState?.properties?.last_status?.enum?.includes("succeeded"), "CronJobState.last_status enum 必须包含 succeeded");
+expect(cronJobState?.properties?.paused?.type === "boolean", "CronJobState.paused 必须是 boolean");
+expect(hasRequired(cronJobView, "spec"), "CronJobView.required 必须包含 spec");
+expect(hasRequired(cronJobView, "state"), "CronJobView.required 必须包含 state");
 
 expect(modelSlotConfig?.properties?.provider_id?.minLength === 1, "ModelSlotConfig.provider_id 必须设置 minLength=1");
 expect(modelSlotConfig?.properties?.model?.minLength === 1, "ModelSlotConfig.model 必须设置 minLength=1");

@@ -3,6 +3,7 @@ package app
 import (
 	"archive/zip"
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,6 +20,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	cronv3 "github.com/robfig/cron/v3"
 
 	"copaw-next/apps/gateway/internal/channel"
 	"copaw-next/apps/gateway/internal/config"
@@ -50,7 +52,12 @@ type Server struct {
 
 	cronStop  chan struct{}
 	cronDone  chan struct{}
-	closeOnce sync.Once
+	cronWG    sync.WaitGroup
+	cronRunMu sync.Mutex
+	cronRuns  map[string]int
+
+	cronTaskExecutor func(context.Context, domain.CronJobSpec) error
+	closeOnce        sync.Once
 }
 
 func NewServer(cfg config.Config) (*Server, error) {
@@ -65,6 +72,7 @@ func NewServer(cfg config.Config) (*Server, error) {
 		console:  channel.NewConsoleChannel(),
 		cronStop: make(chan struct{}),
 		cronDone: make(chan struct{}),
+		cronRuns: map[string]int{},
 	}
 	srv.startCronScheduler()
 	return srv, nil
@@ -74,6 +82,7 @@ func (s *Server) Close() {
 	s.closeOnce.Do(func() {
 		close(s.cronStop)
 		<-s.cronDone
+		s.cronWG.Wait()
 	})
 }
 
@@ -170,10 +179,14 @@ func (s *Server) startCronScheduler() {
 	}()
 }
 
+type dueCronExecution struct {
+	JobID string
+}
+
 func (s *Server) cronSchedulerTick() {
 	now := time.Now().UTC()
 	stateUpdates := map[string]domain.CronJobState{}
-	dueJobIDs := make([]string, 0)
+	dueJobs := make([]dueCronExecution, 0)
 	s.store.Read(func(st *repo.State) {
 		for id, job := range st.CronJobs {
 			current := st.CronStates[id]
@@ -186,7 +199,7 @@ func (s *Server) cronSchedulerTick() {
 				continue
 			}
 
-			interval, err := cronInterval(job)
+			nextRunAt, dueAt, err := resolveCronNextRunAt(job, next.NextRunAt, now)
 			if err != nil {
 				msg := err.Error()
 				next.LastError = &msg
@@ -197,15 +210,21 @@ func (s *Server) cronSchedulerTick() {
 				continue
 			}
 
-			nextRunAt, due := resolveNextRunAt(next.NextRunAt, interval, now)
 			nextRun := nextRunAt.Format(time.RFC3339)
 			next.NextRunAt = &nextRun
 			next.LastError = nil
+			if dueAt != nil && cronMisfireExceeded(dueAt, cronRuntimeSpec(job), now) {
+				failed := cronStatusFailed
+				msg := fmt.Sprintf("misfire skipped: scheduled_at=%s", dueAt.Format(time.RFC3339))
+				next.LastStatus = &failed
+				next.LastError = &msg
+				dueAt = nil
+			}
 			if !cronStateEqual(current, next) {
 				stateUpdates[id] = next
 			}
-			if due {
-				dueJobIDs = append(dueJobIDs, id)
+			if dueAt != nil {
+				dueJobs = append(dueJobs, dueCronExecution{JobID: id})
 			}
 		}
 	})
@@ -224,10 +243,14 @@ func (s *Server) cronSchedulerTick() {
 		}
 	}
 
-	for _, jobID := range dueJobIDs {
-		if err := s.executeCronJob(jobID); err != nil && !errors.Is(err, errCronJobNotFound) {
-			log.Printf("cron job %s execute failed: %v", jobID, err)
-		}
+	for _, due := range dueJobs {
+		s.cronWG.Add(1)
+		go func(jobID string) {
+			defer s.cronWG.Done()
+			if err := s.executeCronJob(jobID); err != nil && !errors.Is(err, errCronJobNotFound) {
+				log.Printf("cron job %s execute failed: %v", jobID, err)
+			}
+		}(due.JobID)
 	}
 }
 
@@ -681,6 +704,20 @@ func (s *Server) updateCronStatus(w http.ResponseWriter, id, status string) {
 
 func (s *Server) executeCronJob(id string) error {
 	var job domain.CronJobSpec
+	found := false
+	s.store.Read(func(st *repo.State) {
+		job, found = st.CronJobs[id]
+	})
+	if !found {
+		return errCronJobNotFound
+	}
+
+	runtime := cronRuntimeSpec(job)
+	if !s.tryAcquireCronSlot(id, runtime.MaxConcurrency) {
+		return s.markCronExecutionSkipped(id, fmt.Sprintf("max_concurrency limit reached (%d)", runtime.MaxConcurrency))
+	}
+	defer s.releaseCronSlot(id)
+
 	startedAt := nowISO()
 	running := cronStatusRunning
 
@@ -700,7 +737,13 @@ func (s *Server) executeCronJob(id string) error {
 		return err
 	}
 
-	execErr := s.executeCronTask(job)
+	execCtx, cancel := context.WithTimeout(context.Background(), time.Duration(runtime.TimeoutSeconds)*time.Second)
+	defer cancel()
+	execErr := s.executeCronTask(execCtx, job)
+	if errors.Is(execErr, context.DeadlineExceeded) {
+		execErr = fmt.Errorf("cron execution timeout after %ds", runtime.TimeoutSeconds)
+	}
+
 	finalStatus := cronStatusSucceeded
 	var finalErr *string
 	if execErr != nil {
@@ -721,7 +764,15 @@ func (s *Server) executeCronJob(id string) error {
 	})
 }
 
-func (s *Server) executeCronTask(job domain.CronJobSpec) error {
+func (s *Server) executeCronTask(ctx context.Context, job domain.CronJobSpec) error {
+	if s.cronTaskExecutor != nil {
+		return s.cronTaskExecutor(ctx, job)
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
 	if job.TaskType == "text" && strings.TrimSpace(job.Text) != "" {
 		s.console.SendText(job.Dispatch.Target.UserID, job.Dispatch.Target.SessionID, job.Text)
 	}
@@ -733,7 +784,7 @@ func alignCronStateForMutation(job domain.CronJobSpec, state domain.CronJobState
 		state.NextRunAt = nil
 		return state
 	}
-	interval, err := cronInterval(job)
+	nextRunAt, _, err := resolveCronNextRunAt(job, nil, now)
 	if err != nil {
 		msg := err.Error()
 		state.LastError = &msg
@@ -741,8 +792,8 @@ func alignCronStateForMutation(job domain.CronJobSpec, state domain.CronJobState
 		return state
 	}
 
-	nextRunAt := now.Add(interval).Format(time.RFC3339)
-	state.NextRunAt = &nextRunAt
+	nextRunAtText := nextRunAt.Format(time.RFC3339)
+	state.NextRunAt = &nextRunAtText
 	state.LastError = nil
 	return state
 }
@@ -773,9 +824,68 @@ func cronJobSchedulable(job domain.CronJobSpec, state domain.CronJobState) bool 
 	return job.Enabled && !state.Paused
 }
 
-func cronInterval(job domain.CronJobSpec) (time.Duration, error) {
+func (s *Server) tryAcquireCronSlot(jobID string, maxConcurrency int) bool {
+	if maxConcurrency <= 0 {
+		maxConcurrency = 1
+	}
+	s.cronRunMu.Lock()
+	defer s.cronRunMu.Unlock()
+	if s.cronRuns[jobID] >= maxConcurrency {
+		return false
+	}
+	s.cronRuns[jobID]++
+	return true
+}
+
+func (s *Server) releaseCronSlot(jobID string) {
+	s.cronRunMu.Lock()
+	defer s.cronRunMu.Unlock()
+	n := s.cronRuns[jobID] - 1
+	if n <= 0 {
+		delete(s.cronRuns, jobID)
+		return
+	}
+	s.cronRuns[jobID] = n
+}
+
+func (s *Server) markCronExecutionSkipped(id, message string) error {
+	failed := cronStatusFailed
+	return s.store.Write(func(st *repo.State) error {
+		if _, ok := st.CronJobs[id]; !ok {
+			return errCronJobNotFound
+		}
+		state := normalizeCronPausedState(st.CronStates[id])
+		state.LastStatus = &failed
+		state.LastError = &message
+		st.CronStates[id] = state
+		return nil
+	})
+}
+
+func cronRuntimeSpec(job domain.CronJobSpec) domain.CronRuntimeSpec {
+	out := job.Runtime
+	if out.MaxConcurrency <= 0 {
+		out.MaxConcurrency = 1
+	}
+	if out.TimeoutSeconds <= 0 {
+		out.TimeoutSeconds = 30
+	}
+	if out.MisfireGraceSeconds < 0 {
+		out.MisfireGraceSeconds = 0
+	}
+	return out
+}
+
+func cronScheduleType(job domain.CronJobSpec) string {
 	scheduleType := strings.ToLower(strings.TrimSpace(job.Schedule.Type))
-	if scheduleType != "" && scheduleType != "interval" {
+	if scheduleType == "" {
+		return "interval"
+	}
+	return scheduleType
+}
+
+func cronInterval(job domain.CronJobSpec) (time.Duration, error) {
+	if cronScheduleType(job) != "interval" {
 		return 0, fmt.Errorf("unsupported schedule.type=%q", job.Schedule.Type)
 	}
 
@@ -797,24 +907,110 @@ func cronInterval(job domain.CronJobSpec) (time.Duration, error) {
 	return parsed, nil
 }
 
-func resolveNextRunAt(current *string, interval time.Duration, now time.Time) (time.Time, bool) {
+func resolveCronNextRunAt(job domain.CronJobSpec, current *string, now time.Time) (time.Time, *time.Time, error) {
+	switch cronScheduleType(job) {
+	case "interval":
+		interval, err := cronInterval(job)
+		if err != nil {
+			return time.Time{}, nil, err
+		}
+		next, dueAt := resolveIntervalNextRunAt(current, interval, now)
+		return next, dueAt, nil
+	case "cron":
+		schedule, loc, err := cronExpression(job)
+		if err != nil {
+			return time.Time{}, nil, err
+		}
+		next, dueAt := resolveExpressionNextRunAt(current, schedule, loc, now)
+		return next, dueAt, nil
+	default:
+		return time.Time{}, nil, fmt.Errorf("unsupported schedule.type=%q", job.Schedule.Type)
+	}
+}
+
+func cronExpression(job domain.CronJobSpec) (cronv3.Schedule, *time.Location, error) {
+	raw := strings.TrimSpace(job.Schedule.Cron)
+	if raw == "" {
+		return nil, nil, errors.New("schedule.cron is required for cron jobs")
+	}
+
+	loc := time.UTC
+	if tz := strings.TrimSpace(job.Schedule.Timezone); tz != "" {
+		nextLoc, err := time.LoadLocation(tz)
+		if err != nil {
+			return nil, nil, fmt.Errorf("invalid schedule.timezone=%q", job.Schedule.Timezone)
+		}
+		loc = nextLoc
+	}
+
+	parser := cronv3.NewParser(cronv3.SecondOptional | cronv3.Minute | cronv3.Hour | cronv3.Dom | cronv3.Month | cronv3.Dow | cronv3.Descriptor)
+	schedule, err := parser.Parse(raw)
+	if err != nil {
+		return nil, nil, fmt.Errorf("invalid cron expression: %w", err)
+	}
+	return schedule, loc, nil
+}
+
+func resolveIntervalNextRunAt(current *string, interval time.Duration, now time.Time) (time.Time, *time.Time) {
 	next := now.Add(interval)
 	if current == nil {
-		return next, false
+		return next, nil
 	}
 
 	parsed, err := time.Parse(time.RFC3339, strings.TrimSpace(*current))
 	if err != nil {
-		return next, false
+		return next, nil
 	}
 	if parsed.After(now) {
-		return parsed, false
+		return parsed, nil
 	}
 
+	dueAt := parsed
 	for !parsed.After(now) {
 		parsed = parsed.Add(interval)
 	}
-	return parsed, true
+	return parsed, &dueAt
+}
+
+func resolveExpressionNextRunAt(current *string, schedule cronv3.Schedule, loc *time.Location, now time.Time) (time.Time, *time.Time) {
+	nowInLoc := now.In(loc)
+	next := schedule.Next(nowInLoc).UTC()
+	if current == nil {
+		return next, nil
+	}
+
+	parsed, err := time.Parse(time.RFC3339, strings.TrimSpace(*current))
+	if err != nil {
+		return next, nil
+	}
+	if parsed.After(now) {
+		return parsed, nil
+	}
+
+	dueAt := parsed
+	cursor := parsed.In(loc)
+	for i := 0; i < 2048 && !cursor.After(nowInLoc); i++ {
+		nextCursor := schedule.Next(cursor)
+		if !nextCursor.After(cursor) {
+			return schedule.Next(nowInLoc).UTC(), &dueAt
+		}
+		cursor = nextCursor
+	}
+	if !cursor.After(nowInLoc) {
+		cursor = schedule.Next(nowInLoc)
+	}
+	return cursor.UTC(), &dueAt
+}
+
+func cronMisfireExceeded(dueAt *time.Time, runtime domain.CronRuntimeSpec, now time.Time) bool {
+	if dueAt == nil {
+		return false
+	}
+	if runtime.MisfireGraceSeconds <= 0 {
+		return false
+	}
+	grace := time.Duration(runtime.MisfireGraceSeconds) * time.Second
+	return now.Sub(dueAt.UTC()) > grace
 }
 
 func (s *Server) listProviders(w http.ResponseWriter, _ *http.Request) {

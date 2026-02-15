@@ -64,7 +64,7 @@
 - [x] `ci-fast.yml`（PR 快检模板）。
 - [x] `ci-full.yml`（主分支全检模板）。
 - [x] `nightly-live.yml`（夜间 live 占位模板）。
-- [ ] 将 CI 改为真实分层门禁（非占位命令）。
+- [x] 将 CI 改为真实分层门禁（非占位命令）。
 - [ ] 增加缓存策略与失败重试策略。
 - [ ] 增加发布流水线（tag -> artifact -> release notes）。
 

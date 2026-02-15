@@ -77,7 +77,13 @@ paths:
   /cron/jobs:
     get:
       responses:
-        '200': { description: ok }
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/CronJobSpec' }
     post:
       requestBody:
         required: true
@@ -85,7 +91,11 @@ paths:
           application/json:
             schema: { $ref: '#/components/schemas/CronJobSpec' }
       responses:
-        '200': { description: ok }
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CronJobSpec' }
   /cron/jobs/{job_id}:
     parameters:
       - in: path
@@ -94,7 +104,11 @@ paths:
         schema: { type: string }
     get:
       responses:
-        '200': { description: ok }
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CronJobView' }
     put:
       requestBody:
         required: true
@@ -102,7 +116,11 @@ paths:
           application/json:
             schema: { $ref: '#/components/schemas/CronJobSpec' }
       responses:
-        '200': { description: ok }
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CronJobSpec' }
     delete:
       responses:
         '200': { description: ok }
@@ -114,7 +132,11 @@ paths:
           required: true
           schema: { type: string }
       responses:
-        '200': { description: ok }
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CronBoolResult' }
   /cron/jobs/{job_id}/resume:
     post:
       parameters:
@@ -123,7 +145,11 @@ paths:
           required: true
           schema: { type: string }
       responses:
-        '200': { description: ok }
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CronBoolResult' }
   /cron/jobs/{job_id}/run:
     post:
       parameters:
@@ -132,7 +158,15 @@ paths:
           required: true
           schema: { type: string }
       responses:
-        '200': { description: ok }
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  started: { type: boolean }
+                required: [started]
   /cron/jobs/{job_id}/state:
     get:
       parameters:
@@ -141,7 +175,11 @@ paths:
           required: true
           schema: { type: string }
       responses:
-        '200': { description: ok }
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CronJobState' }
   /models:
     get:
       responses:
@@ -333,9 +371,71 @@ components:
         id: { type: string, minLength: 1 }
         name: { type: string, minLength: 1 }
         enabled: { type: boolean }
-        task_type: { type: string }
+        schedule: { $ref: '#/components/schemas/CronScheduleSpec' }
+        task_type: { type: string, minLength: 1 }
         text: { type: string }
-      required: [id, name]
+        request:
+          type: object
+          additionalProperties: true
+        dispatch: { $ref: '#/components/schemas/CronDispatchSpec' }
+        runtime: { $ref: '#/components/schemas/CronRuntimeSpec' }
+        meta:
+          type: object
+          additionalProperties: true
+          default: {}
+      required: [id, name, enabled, schedule, task_type, dispatch, runtime]
+    CronScheduleSpec:
+      type: object
+      properties:
+        type: { type: string, enum: [interval, cron] }
+        cron: { type: string, minLength: 1 }
+        timezone: { type: string }
+      required: [cron]
+    CronDispatchTarget:
+      type: object
+      properties:
+        user_id: { type: string, minLength: 1 }
+        session_id: { type: string, minLength: 1 }
+      required: [user_id, session_id]
+    CronDispatchSpec:
+      type: object
+      properties:
+        type: { type: string }
+        channel: { type: string }
+        target: { $ref: '#/components/schemas/CronDispatchTarget' }
+        mode: { type: string }
+        meta:
+          type: object
+          additionalProperties: true
+          default: {}
+      required: [target]
+    CronRuntimeSpec:
+      type: object
+      properties:
+        max_concurrency: { type: integer, minimum: 1, default: 1 }
+        timeout_seconds: { type: integer, minimum: 1, default: 30 }
+        misfire_grace_seconds: { type: integer, minimum: 0, default: 0 }
+    CronJobState:
+      type: object
+      properties:
+        next_run_at: { type: string, format: date-time, nullable: true }
+        last_run_at: { type: string, format: date-time, nullable: true }
+        last_status:
+          type: string
+          enum: [paused, resumed, running, succeeded, failed]
+          nullable: true
+        last_error: { type: string, nullable: true }
+        paused: { type: boolean }
+    CronJobView:
+      type: object
+      properties:
+        spec: { $ref: '#/components/schemas/CronJobSpec' }
+        state: { $ref: '#/components/schemas/CronJobState' }
+      required: [spec, state]
+    CronBoolResult:
+      type: object
+      additionalProperties:
+        type: boolean
     ModelSlotConfig:
       type: object
       properties:

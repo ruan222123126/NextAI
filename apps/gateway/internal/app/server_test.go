@@ -3,6 +3,7 @@ package app
 import (
 	"archive/zip"
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"mime/multipart"
@@ -10,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -244,6 +246,200 @@ func TestCronSchedulerRecoversPersistedDueJob(t *testing.T) {
 	})
 	if got, _ := state["last_status"].(string); got != cronStatusSucceeded {
 		t.Fatalf("expected last_status=%q, got=%v", cronStatusSucceeded, state["last_status"])
+	}
+}
+
+func TestCronSchedulerRunsCronExpressionJob(t *testing.T) {
+	srv := newTestServer(t)
+	createReq := `{
+		"id":"job-cron",
+		"name":"job-cron",
+		"enabled":true,
+		"schedule":{"type":"cron","cron":"*/1 * * * * *","timezone":"UTC"},
+		"task_type":"text",
+		"text":"hello cron expr",
+		"dispatch":{"target":{"user_id":"u1","session_id":"s1"}}
+	}`
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/cron/jobs", strings.NewReader(createReq)))
+	if w.Code != http.StatusOK {
+		t.Fatalf("create cron status=%d body=%s", w.Code, w.Body.String())
+	}
+
+	state := waitForCronState(t, srv, "job-cron", 6*time.Second, func(v map[string]interface{}) bool {
+		_, ok := v["last_run_at"].(string)
+		return ok
+	})
+	if got, _ := state["last_status"].(string); got != cronStatusSucceeded {
+		t.Fatalf("expected last_status=%q, got=%v", cronStatusSucceeded, state["last_status"])
+	}
+	if _, ok := state["next_run_at"].(string); !ok {
+		t.Fatalf("expected next_run_at to be set: %+v", state)
+	}
+}
+
+func TestCronSchedulerSkipsMisfireOutsideGrace(t *testing.T) {
+	dir, err := os.MkdirTemp("", "copaw-next-gateway-misfire-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+
+	store, err := repo.NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	past := time.Now().UTC().Add(-15 * time.Second).Format(time.RFC3339)
+	if err := store.Write(func(state *repo.State) error {
+		state.CronJobs["job-misfire"] = domain.CronJobSpec{
+			ID:      "job-misfire",
+			Name:    "job-misfire",
+			Enabled: true,
+			Schedule: domain.CronScheduleSpec{
+				Type: "interval",
+				Cron: "1s",
+			},
+			TaskType: "text",
+			Text:     "misfire",
+			Runtime: domain.CronRuntimeSpec{
+				MisfireGraceSeconds: 1,
+			},
+			Dispatch: domain.CronDispatchSpec{
+				Target: domain.CronDispatchTarget{
+					UserID:    "u1",
+					SessionID: "s1",
+				},
+			},
+		}
+		state.CronStates["job-misfire"] = domain.CronJobState{NextRunAt: &past}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	srv, err := NewServer(config.Config{Host: "127.0.0.1", Port: "0", DataDir: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { srv.Close() })
+
+	state := waitForCronState(t, srv, "job-misfire", 5*time.Second, func(v map[string]interface{}) bool {
+		msg, _ := v["last_error"].(string)
+		return strings.Contains(msg, "misfire skipped")
+	})
+	if got, _ := state["last_status"].(string); got != cronStatusFailed {
+		t.Fatalf("expected last_status=%q, got=%v", cronStatusFailed, state["last_status"])
+	}
+	if _, ok := state["last_run_at"]; ok {
+		t.Fatalf("expected last_run_at to be empty for misfire skip: %+v", state)
+	}
+}
+
+func TestExecuteCronJobRespectsMaxConcurrency(t *testing.T) {
+	srv := newTestServer(t)
+	if err := srv.store.Write(func(st *repo.State) error {
+		st.CronJobs["job-max-concurrency"] = domain.CronJobSpec{
+			ID:       "job-max-concurrency",
+			Name:     "job-max-concurrency",
+			Enabled:  false,
+			TaskType: "text",
+			Schedule: domain.CronScheduleSpec{Type: "interval", Cron: "60s"},
+			Runtime: domain.CronRuntimeSpec{
+				MaxConcurrency: 1,
+				TimeoutSeconds: 5,
+			},
+		}
+		st.CronStates["job-max-concurrency"] = domain.CronJobState{}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	release := make(chan struct{})
+	entered := make(chan struct{}, 2)
+	var calls atomic.Int32
+	srv.cronTaskExecutor = func(ctx context.Context, _ domain.CronJobSpec) error {
+		calls.Add(1)
+		entered <- struct{}{}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-release:
+			return nil
+		}
+	}
+
+	err1Ch := make(chan error, 1)
+	go func() {
+		err1Ch <- srv.executeCronJob("job-max-concurrency")
+	}()
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first execution did not start in time")
+	}
+
+	err2Ch := make(chan error, 1)
+	go func() {
+		err2Ch <- srv.executeCronJob("job-max-concurrency")
+	}()
+
+	select {
+	case err := <-err2Ch:
+		if err != nil {
+			t.Fatalf("second execution failed: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("second execution did not return in time")
+	}
+
+	close(release)
+	if err := <-err1Ch; err != nil {
+		t.Fatalf("first execution failed: %v", err)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("expected only one task execution, got=%d", got)
+	}
+}
+
+func TestExecuteCronJobRespectsTimeout(t *testing.T) {
+	srv := newTestServer(t)
+	if err := srv.store.Write(func(st *repo.State) error {
+		st.CronJobs["job-timeout"] = domain.CronJobSpec{
+			ID:       "job-timeout",
+			Name:     "job-timeout",
+			Enabled:  false,
+			TaskType: "text",
+			Schedule: domain.CronScheduleSpec{Type: "interval", Cron: "60s"},
+			Runtime: domain.CronRuntimeSpec{
+				MaxConcurrency: 1,
+				TimeoutSeconds: 1,
+			},
+		}
+		st.CronStates["job-timeout"] = domain.CronJobState{}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	srv.cronTaskExecutor = func(ctx context.Context, _ domain.CronJobSpec) error {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(3 * time.Second):
+			return nil
+		}
+	}
+
+	if err := srv.executeCronJob("job-timeout"); err != nil {
+		t.Fatalf("execute cron failed: %v", err)
+	}
+	state := getCronState(t, srv, "job-timeout")
+	if got, _ := state["last_status"].(string); got != cronStatusFailed {
+		t.Fatalf("expected last_status=%q, got=%v", cronStatusFailed, state["last_status"])
+	}
+	if errMsg, _ := state["last_error"].(string); !strings.Contains(errMsg, "timeout") {
+		t.Fatalf("expected timeout error, got=%v", state["last_error"])
 	}
 }
 
