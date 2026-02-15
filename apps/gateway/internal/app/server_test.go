@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -187,8 +188,8 @@ func TestCronSchedulerRunsIntervalJob(t *testing.T) {
 	}
 
 	state := waitForCronState(t, srv, "job-interval", 5*time.Second, func(v map[string]interface{}) bool {
-		_, ok := v["last_run_at"].(string)
-		return ok
+		got, _ := v["last_status"].(string)
+		return got == cronStatusSucceeded
 	})
 	if got, _ := state["last_status"].(string); got != cronStatusSucceeded {
 		t.Fatalf("expected last_status=%q, got=%v", cronStatusSucceeded, state["last_status"])
@@ -241,8 +242,8 @@ func TestCronSchedulerRecoversPersistedDueJob(t *testing.T) {
 	t.Cleanup(func() { srv.Close() })
 
 	state := waitForCronState(t, srv, "job-recover", 5*time.Second, func(v map[string]interface{}) bool {
-		_, ok := v["last_run_at"].(string)
-		return ok
+		got, _ := v["last_status"].(string)
+		return got == cronStatusSucceeded
 	})
 	if got, _ := state["last_status"].(string); got != cronStatusSucceeded {
 		t.Fatalf("expected last_status=%q, got=%v", cronStatusSucceeded, state["last_status"])
@@ -267,8 +268,8 @@ func TestCronSchedulerRunsCronExpressionJob(t *testing.T) {
 	}
 
 	state := waitForCronState(t, srv, "job-cron", 6*time.Second, func(v map[string]interface{}) bool {
-		_, ok := v["last_run_at"].(string)
-		return ok
+		got, _ := v["last_status"].(string)
+		return got == cronStatusSucceeded
 	})
 	if got, _ := state["last_status"].(string); got != cronStatusSucceeded {
 		t.Fatalf("expected last_status=%q, got=%v", cronStatusSucceeded, state["last_status"])
@@ -386,8 +387,8 @@ func TestExecuteCronJobRespectsMaxConcurrency(t *testing.T) {
 
 	select {
 	case err := <-err2Ch:
-		if err != nil {
-			t.Fatalf("second execution failed: %v", err)
+		if !errors.Is(err, errCronMaxConcurrencyReached) {
+			t.Fatalf("expected max concurrency error, got: %v", err)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("second execution did not return in time")

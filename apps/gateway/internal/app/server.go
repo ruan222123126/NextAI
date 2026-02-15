@@ -43,6 +43,7 @@ const (
 )
 
 var errCronJobNotFound = errors.New("cron_job_not_found")
+var errCronMaxConcurrencyReached = errors.New("cron_max_concurrency_reached")
 
 type Server struct {
 	cfg     config.Config
@@ -247,7 +248,9 @@ func (s *Server) cronSchedulerTick() {
 		s.cronWG.Add(1)
 		go func(jobID string) {
 			defer s.cronWG.Done()
-			if err := s.executeCronJob(jobID); err != nil && !errors.Is(err, errCronJobNotFound) {
+			if err := s.executeCronJob(jobID); err != nil &&
+				!errors.Is(err, errCronJobNotFound) &&
+				!errors.Is(err, errCronMaxConcurrencyReached) {
 				log.Printf("cron job %s execute failed: %v", jobID, err)
 			}
 		}(due.JobID)
@@ -664,6 +667,10 @@ func (s *Server) runCronJob(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusNotFound, "not_found", "cron job not found", nil)
 			return
 		}
+		if errors.Is(err, errCronMaxConcurrencyReached) {
+			writeErr(w, http.StatusConflict, "cron_busy", "cron job reached max_concurrency", nil)
+			return
+		}
 		writeErr(w, http.StatusInternalServerError, "store_error", err.Error(), nil)
 		return
 	}
@@ -733,7 +740,10 @@ func (s *Server) executeCronJob(id string) error {
 
 	runtime := cronRuntimeSpec(job)
 	if !s.tryAcquireCronSlot(id, runtime.MaxConcurrency) {
-		return s.markCronExecutionSkipped(id, fmt.Sprintf("max_concurrency limit reached (%d)", runtime.MaxConcurrency))
+		if err := s.markCronExecutionSkipped(id, fmt.Sprintf("max_concurrency limit reached (%d)", runtime.MaxConcurrency)); err != nil {
+			return err
+		}
+		return errCronMaxConcurrencyReached
 	}
 	defer s.releaseCronSlot(id)
 
