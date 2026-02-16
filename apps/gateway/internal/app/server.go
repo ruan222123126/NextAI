@@ -56,6 +56,7 @@ type Server struct {
 	store    *repo.Store
 	runner   *runner.Runner
 	channels map[string]plugin.ChannelPlugin
+	tools    map[string]plugin.ToolPlugin
 
 	cronStop chan struct{}
 	cronDone chan struct{}
@@ -75,11 +76,13 @@ func NewServer(cfg config.Config) (*Server, error) {
 		store:    store,
 		runner:   runner.New(),
 		channels: map[string]plugin.ChannelPlugin{},
+		tools:    map[string]plugin.ToolPlugin{},
 		cronStop: make(chan struct{}),
 		cronDone: make(chan struct{}),
 	}
 	srv.registerChannelPlugin(channel.NewConsoleChannel())
 	srv.registerChannelPlugin(channel.NewWebhookChannel())
+	srv.registerToolPlugin(plugin.NewShellTool())
 	srv.startCronScheduler()
 	return srv, nil
 }
@@ -101,6 +104,17 @@ func (s *Server) registerChannelPlugin(ch plugin.ChannelPlugin) {
 		return
 	}
 	s.channels[name] = ch
+}
+
+func (s *Server) registerToolPlugin(tp plugin.ToolPlugin) {
+	if tp == nil {
+		return
+	}
+	name := strings.ToLower(strings.TrimSpace(tp.Name()))
+	if name == "" {
+		return
+	}
+	s.tools[name] = tp
 }
 
 func (s *Server) Handler() http.Handler {
@@ -490,30 +504,46 @@ func (s *Server) processAgent(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "store_error", err.Error(), nil)
 		return
 	}
-	if !providerEnabled(providerSetting) {
-		writeErr(w, http.StatusBadRequest, "provider_disabled", "active provider is disabled", nil)
-		return
-	}
-	resolvedModel, ok := provider.ResolveModelID(activeLLM.ProviderID, activeLLM.Model, providerSetting.ModelAliases)
-	if !ok {
-		writeErr(w, http.StatusBadRequest, "model_not_found", "active model is not available for provider", nil)
-		return
-	}
-	activeLLM.Model = resolvedModel
-
-	reply, err := s.runner.GenerateReply(r.Context(), req, runner.GenerateConfig{
-		ProviderID: activeLLM.ProviderID,
-		Model:      activeLLM.Model,
-		APIKey:     resolveProviderAPIKey(activeLLM.ProviderID, providerSetting),
-		BaseURL:    resolveProviderBaseURL(activeLLM.ProviderID, providerSetting),
-		AdapterID:  provider.ResolveAdapter(activeLLM.ProviderID),
-		Headers:    sanitizeStringMap(providerSetting.Headers),
-		TimeoutMS:  providerSetting.TimeoutMS,
-	})
+	toolCall, hasToolCall, err := parseToolCall(req.BizParams)
 	if err != nil {
-		status, code, message := mapRunnerError(err)
-		writeErr(w, status, code, message, nil)
+		writeErr(w, http.StatusBadRequest, "invalid_tool_request", err.Error(), nil)
 		return
+	}
+
+	reply := ""
+	if hasToolCall {
+		reply, err = s.executeToolCall(toolCall)
+		if err != nil {
+			status, code, message := mapToolError(err)
+			writeErr(w, status, code, message, nil)
+			return
+		}
+	} else {
+		if !providerEnabled(providerSetting) {
+			writeErr(w, http.StatusBadRequest, "provider_disabled", "active provider is disabled", nil)
+			return
+		}
+		resolvedModel, ok := provider.ResolveModelID(activeLLM.ProviderID, activeLLM.Model, providerSetting.ModelAliases)
+		if !ok {
+			writeErr(w, http.StatusBadRequest, "model_not_found", "active model is not available for provider", nil)
+			return
+		}
+		activeLLM.Model = resolvedModel
+
+		reply, err = s.runner.GenerateReply(r.Context(), req, runner.GenerateConfig{
+			ProviderID: activeLLM.ProviderID,
+			Model:      activeLLM.Model,
+			APIKey:     resolveProviderAPIKey(activeLLM.ProviderID, providerSetting),
+			BaseURL:    resolveProviderBaseURL(activeLLM.ProviderID, providerSetting),
+			AdapterID:  provider.ResolveAdapter(activeLLM.ProviderID),
+			Headers:    sanitizeStringMap(providerSetting.Headers),
+			TimeoutMS:  providerSetting.TimeoutMS,
+		})
+		if err != nil {
+			status, code, message := mapRunnerError(err)
+			writeErr(w, status, code, message, nil)
+			return
+		}
 	}
 	assistant := domain.RuntimeMessage{
 		ID:      newID("msg"),
@@ -606,6 +636,17 @@ type channelError struct {
 	Err     error
 }
 
+type toolCall struct {
+	Name  string
+	Input map[string]interface{}
+}
+
+type toolError struct {
+	Code    string
+	Message string
+	Err     error
+}
+
 func (e *channelError) Error() string {
 	if e == nil {
 		return ""
@@ -624,6 +665,95 @@ func (e *channelError) Unwrap() error {
 		return nil
 	}
 	return e.Err
+}
+
+func (e *toolError) Error() string {
+	if e == nil {
+		return ""
+	}
+	if e.Message != "" {
+		return e.Message
+	}
+	if e.Err != nil {
+		return e.Err.Error()
+	}
+	return e.Code
+}
+
+func (e *toolError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
+}
+
+func parseToolCall(bizParams map[string]interface{}) (toolCall, bool, error) {
+	if len(bizParams) == 0 {
+		return toolCall{}, false, nil
+	}
+	raw, ok := bizParams["tool"]
+	if !ok || raw == nil {
+		return toolCall{}, false, nil
+	}
+	toolBody, ok := raw.(map[string]interface{})
+	if !ok {
+		return toolCall{}, false, errors.New("biz_params.tool must be an object")
+	}
+	rawName, ok := toolBody["name"]
+	if !ok {
+		return toolCall{}, false, errors.New("biz_params.tool.name is required")
+	}
+	name, ok := rawName.(string)
+	if !ok {
+		return toolCall{}, false, errors.New("biz_params.tool.name must be a string")
+	}
+	name = strings.ToLower(strings.TrimSpace(name))
+	if name == "" {
+		return toolCall{}, false, errors.New("biz_params.tool.name cannot be empty")
+	}
+
+	input := map[string]interface{}{}
+	if rawInput, ok := toolBody["input"]; ok && rawInput != nil {
+		inputMap, ok := rawInput.(map[string]interface{})
+		if !ok {
+			return toolCall{}, false, errors.New("biz_params.tool.input must be an object")
+		}
+		input = inputMap
+	}
+	return toolCall{Name: name, Input: safeMap(input)}, true, nil
+}
+
+func (s *Server) executeToolCall(call toolCall) (string, error) {
+	plug, ok := s.tools[call.Name]
+	if !ok {
+		return "", &toolError{
+			Code:    "tool_not_supported",
+			Message: fmt.Sprintf("tool %q is not supported", call.Name),
+		}
+	}
+
+	result, err := plug.Invoke(call.Input)
+	if err != nil {
+		return "", &toolError{
+			Code:    "tool_invoke_failed",
+			Message: fmt.Sprintf("tool %q invocation failed", call.Name),
+			Err:     err,
+		}
+	}
+
+	if text, ok := result["text"].(string); ok && strings.TrimSpace(text) != "" {
+		return text, nil
+	}
+
+	encoded, err := json.Marshal(result)
+	if err != nil {
+		return "", &toolError{
+			Code:    "tool_invalid_result",
+			Message: fmt.Sprintf("tool %q returned invalid result", call.Name),
+			Err:     err,
+		}
+	}
+	return string(encoded), nil
 }
 
 func (s *Server) resolveChannel(name string) (plugin.ChannelPlugin, map[string]interface{}, string, error) {
@@ -1933,6 +2063,30 @@ func mapRunnerError(err error) (status int, code string, message string) {
 		}
 	}
 	return http.StatusInternalServerError, "runner_error", "runner execution failed"
+}
+
+func mapToolError(err error) (status int, code string, message string) {
+	var te *toolError
+	if errors.As(err, &te) {
+		switch te.Code {
+		case "tool_not_supported":
+			return http.StatusBadRequest, te.Code, te.Message
+		case "tool_invoke_failed":
+			switch {
+			case errors.Is(te.Err, plugin.ErrShellToolDisabled):
+				return http.StatusForbidden, "tool_disabled", "tool is disabled by server config"
+			case errors.Is(te.Err, plugin.ErrShellToolCommandMissing):
+				return http.StatusBadRequest, "invalid_tool_input", "tool input command is required"
+			default:
+				return http.StatusBadGateway, te.Code, te.Message
+			}
+		case "tool_invalid_result":
+			return http.StatusBadGateway, te.Code, te.Message
+		default:
+			return http.StatusInternalServerError, "tool_error", "tool execution failed"
+		}
+	}
+	return http.StatusInternalServerError, "tool_error", "tool execution failed"
 }
 
 func (s *Server) collectProviderCatalog() ([]domain.ProviderInfo, map[string]string, domain.ModelSlotConfig) {
