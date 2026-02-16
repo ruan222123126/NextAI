@@ -27,6 +27,9 @@ go run ./cmd/gateway
 cd apps/cli
 pnpm build
 node dist/index.js --help
+# 多语言（可选）
+node dist/index.js --locale en-US chats list
+COPAW_LOCALE=en-US node dist/index.js chats list
 ```
 
 3. 单独开发 Web
@@ -35,6 +38,7 @@ node dist/index.js --help
 cd apps/web
 pnpm build
 # 打开 dist/index.html
+# 顶栏 Language 可切换 zh-CN / en-US，自动写入 localStorage
 ```
 
 ## 常用验证命令

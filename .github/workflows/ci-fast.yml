@@ -43,11 +43,11 @@ jobs:
           done
           echo "pnpm install failed after retries" >&2
           exit 1
-      - name: Gateway tests
-        run: cd apps/gateway && go test ./...
+      - name: Gateway coverage gate
+        run: make gateway-coverage
       - name: Smoke e2e tests
         run: cd tests/smoke && pnpm test
-      - name: CLI tests
-        run: cd apps/cli && pnpm test
+      - name: CLI coverage gate
+        run: cd apps/cli && pnpm run test:coverage
       - name: Contract tests
         run: cd tests/contract && pnpm test
