@@ -30,6 +30,7 @@ const cronJobSpec = schemas.CronJobSpec;
 const cronJobState = schemas.CronJobState;
 const cronJobView = schemas.CronJobView;
 const modelSlotConfig = schemas.ModelSlotConfig;
+const apiKeyAuth = spec?.components?.securitySchemes?.ApiKeyAuth;
 
 expect(spec?.openapi === "3.0.3", "openapi 版本必须是 3.0.3");
 expect(typeof spec?.paths === "object", "paths 必须存在");
@@ -87,6 +88,10 @@ expect(modelSlotConfig?.properties?.provider_id?.minLength === 1, "ModelSlotConf
 expect(modelSlotConfig?.properties?.model?.minLength === 1, "ModelSlotConfig.model 必须设置 minLength=1");
 expect(hasRequired(modelSlotConfig, "provider_id"), "ModelSlotConfig.required 必须包含 provider_id");
 expect(hasRequired(modelSlotConfig, "model"), "ModelSlotConfig.required 必须包含 model");
+
+expect(apiKeyAuth?.type === "apiKey", "必须声明 ApiKeyAuth 安全方案");
+expect(apiKeyAuth?.in === "header", "ApiKeyAuth 必须位于 header");
+expect(apiKeyAuth?.name === "X-API-Key", "ApiKeyAuth header 必须为 X-API-Key");
 
 if (failures.length > 0) {
   console.error("OpenAPI lint failed:");

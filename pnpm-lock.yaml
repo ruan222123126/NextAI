@@ -30,7 +30,11 @@ importers:
 
   apps/web: {}
 
-  packages/sdk-ts: {}
+  packages/sdk-ts:
+    dependencies:
+      yaml:
+        specifier: ^2.8.1
+        version: 2.8.2
 
   packages/tooling: {}
 
@@ -39,6 +43,8 @@ importers:
       yaml:
         specifier: ^2.8.1
         version: 2.8.2
+
+  tests/smoke: {}
 
 packages:
 

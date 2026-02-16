@@ -1,5 +1,6 @@
 import { Command } from "commander";
-import { ApiClient } from "../client/api-client.js";
+import { ApiClient, ApiClientError } from "../client/api-client.js";
+import { printResult } from "../io/output.js";
 
 export function registerChatsCommand(program: Command, client: ApiClient): void {
   const chats = program.command("chats").description("chat management");
@@ -13,7 +14,7 @@ export function registerChatsCommand(program: Command, client: ApiClient): void 
       if (opts.userId) qs.set("user_id", opts.userId);
       if (opts.channel) qs.set("channel", opts.channel);
       const suffix = qs.toString() ? `?${qs.toString()}` : "";
-      console.log(JSON.stringify(await client.get(`/chats${suffix}`), null, 2));
+      printResult(await client.get(`/chats${suffix}`));
     });
 
   chats
@@ -30,21 +31,21 @@ export function registerChatsCommand(program: Command, client: ApiClient): void 
         channel: opts.channel,
         meta: {},
       };
-      console.log(JSON.stringify(await client.post("/chats", payload), null, 2));
+      printResult(await client.post("/chats", payload));
     });
 
   chats
     .command("delete")
     .argument("<chatId>")
     .action(async (chatId: string) => {
-      console.log(JSON.stringify(await client.delete(`/chats/${encodeURIComponent(chatId)}`), null, 2));
+      printResult(await client.delete(`/chats/${encodeURIComponent(chatId)}`));
     });
 
   chats
     .command("get")
     .argument("<chatId>")
     .action(async (chatId: string) => {
-      console.log(JSON.stringify(await client.get(`/chats/${encodeURIComponent(chatId)}`), null, 2));
+      printResult(await client.get(`/chats/${encodeURIComponent(chatId)}`));
     });
 
   chats
@@ -63,7 +64,7 @@ export function registerChatsCommand(program: Command, client: ApiClient): void 
         stream: Boolean(opts.stream),
       };
       if (!opts.stream) {
-        console.log(JSON.stringify(await client.post("/agent/process", payload), null, 2));
+        printResult(await client.post("/agent/process", payload));
         return;
       }
       const base = process.env.COPAW_API_BASE ?? "http://127.0.0.1:8088";
@@ -73,7 +74,23 @@ export function registerChatsCommand(program: Command, client: ApiClient): void 
         body: JSON.stringify(payload),
       });
       if (!res.ok || !res.body) {
-        throw new Error(`stream request failed: ${res.status}`);
+        const text = await res.text();
+        let parsed: unknown = {};
+        try {
+          parsed = text ? JSON.parse(text) : {};
+        } catch {
+          parsed = { raw: text };
+        }
+        const code = (parsed as { error?: { code?: string } })?.error?.code ?? "stream_request_failed";
+        const message = (parsed as { error?: { message?: string } })?.error?.message ?? `stream request failed: ${res.status}`;
+        const details = (parsed as { error?: { details?: unknown } })?.error?.details;
+        throw new ApiClientError({
+          status: res.status,
+          code,
+          message,
+          details,
+          payload: parsed,
+        });
       }
       const reader = res.body.getReader();
       const decoder = new TextDecoder();

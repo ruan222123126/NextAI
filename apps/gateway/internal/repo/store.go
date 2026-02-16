@@ -71,6 +71,13 @@ func defaultState(dataDir string) State {
 				"enabled":    true,
 				"bot_prefix": "",
 			},
+			"webhook": {
+				"enabled":         false,
+				"url":             "",
+				"method":          "POST",
+				"headers":         map[string]interface{}{},
+				"timeout_seconds": 5,
+			},
 		},
 	}
 }
@@ -121,7 +128,22 @@ func (s *Store) load() error {
 		state.Skills = map[string]domain.SkillSpec{}
 	}
 	if state.Channels == nil {
-		state.Channels = domain.ChannelConfigMap{"console": {"enabled": true, "bot_prefix": ""}}
+		state.Channels = domain.ChannelConfigMap{}
+	}
+	if _, ok := state.Channels["console"]; !ok {
+		state.Channels["console"] = map[string]interface{}{
+			"enabled":    true,
+			"bot_prefix": "",
+		}
+	}
+	if _, ok := state.Channels["webhook"]; !ok {
+		state.Channels["webhook"] = map[string]interface{}{
+			"enabled":         false,
+			"url":             "",
+			"method":          "POST",
+			"headers":         map[string]interface{}{},
+			"timeout_seconds": 5,
+		}
 	}
 	s.state = state
 	return nil

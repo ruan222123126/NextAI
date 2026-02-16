@@ -33,4 +33,5 @@ test("openapi defines error schema", async () => {
   const spec = parse(raw);
   assert.equal(spec.openapi, "3.0.3");
   assert.ok(spec.components.schemas.ChatSpec);
+  assert.equal(spec.components.securitySchemes.ApiKeyAuth.type, "apiKey");
 });

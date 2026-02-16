@@ -28,6 +28,7 @@ import (
 	"copaw-next/apps/gateway/internal/config"
 	"copaw-next/apps/gateway/internal/domain"
 	"copaw-next/apps/gateway/internal/observability"
+	"copaw-next/apps/gateway/internal/plugin"
 	"copaw-next/apps/gateway/internal/repo"
 	"copaw-next/apps/gateway/internal/runner"
 )
@@ -50,10 +51,10 @@ var errCronJobNotFound = errors.New("cron_job_not_found")
 var errCronMaxConcurrencyReached = errors.New("cron_max_concurrency_reached")
 
 type Server struct {
-	cfg     config.Config
-	store   *repo.Store
-	runner  *runner.Runner
-	console *channel.ConsoleChannel
+	cfg      config.Config
+	store    *repo.Store
+	runner   *runner.Runner
+	channels map[string]plugin.ChannelPlugin
 
 	cronStop chan struct{}
 	cronDone chan struct{}
@@ -72,10 +73,12 @@ func NewServer(cfg config.Config) (*Server, error) {
 		cfg:      cfg,
 		store:    store,
 		runner:   runner.New(),
-		console:  channel.NewConsoleChannel(),
+		channels: map[string]plugin.ChannelPlugin{},
 		cronStop: make(chan struct{}),
 		cronDone: make(chan struct{}),
 	}
+	srv.registerChannelPlugin(channel.NewConsoleChannel())
+	srv.registerChannelPlugin(channel.NewWebhookChannel())
 	srv.startCronScheduler()
 	return srv, nil
 }
@@ -88,11 +91,23 @@ func (s *Server) Close() {
 	})
 }
 
+func (s *Server) registerChannelPlugin(ch plugin.ChannelPlugin) {
+	if ch == nil {
+		return
+	}
+	name := strings.ToLower(strings.TrimSpace(ch.Name()))
+	if name == "" {
+		return
+	}
+	s.channels[name] = ch
+}
+
 func (s *Server) Handler() http.Handler {
 	r := chi.NewRouter()
 	r.Use(middleware.RealIP)
 	r.Use(observability.RequestID)
 	r.Use(observability.Logging)
+	r.Use(observability.APIKey(s.cfg.APIKey))
 	r.Use(cors)
 
 	r.Get("/version", s.handleVersion)
@@ -431,6 +446,14 @@ func (s *Server) processAgent(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "invalid_request", "session_id, user_id, channel are required", nil)
 		return
 	}
+	channelPlugin, channelCfg, channelName, err := s.resolveChannel(req.Channel)
+	if err != nil {
+		status, code, message := mapChannelError(err)
+		writeErr(w, status, code, message, nil)
+		return
+	}
+	req.Channel = channelName
+
 	chatID := ""
 	activeLLM := domain.ModelSlotConfig{}
 	providerSetting := repo.ProviderSetting{}
@@ -501,7 +524,15 @@ func (s *Server) processAgent(w http.ResponseWriter, r *http.Request) {
 		return nil
 	})
 
-	s.console.SendText(req.UserID, req.SessionID, reply)
+	if err := channelPlugin.SendText(r.Context(), req.UserID, req.SessionID, reply, channelCfg); err != nil {
+		status, code, message := mapChannelError(&channelError{
+			Code:    "channel_dispatch_failed",
+			Message: fmt.Sprintf("failed to dispatch message to channel %q", channelName),
+			Err:     err,
+		})
+		writeErr(w, status, code, message, nil)
+		return
+	}
 
 	if !req.Stream {
 		writeJSON(w, http.StatusOK, map[string]string{"reply": reply})
@@ -551,6 +582,125 @@ func splitReplyChunks(text string, chunkSize int) []string {
 		out = append(out, string(runes[i:end]))
 	}
 	return out
+}
+
+type channelError struct {
+	Code    string
+	Message string
+	Err     error
+}
+
+func (e *channelError) Error() string {
+	if e == nil {
+		return ""
+	}
+	if e.Message != "" {
+		return e.Message
+	}
+	if e.Err != nil {
+		return e.Err.Error()
+	}
+	return e.Code
+}
+
+func (e *channelError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
+}
+
+func (s *Server) resolveChannel(name string) (plugin.ChannelPlugin, map[string]interface{}, string, error) {
+	channelName := strings.ToLower(strings.TrimSpace(name))
+	if channelName == "" {
+		return nil, nil, "", &channelError{Code: "invalid_channel", Message: "channel is required"}
+	}
+	plug, ok := s.channels[channelName]
+	if !ok {
+		return nil, nil, "", &channelError{
+			Code:    "channel_not_supported",
+			Message: fmt.Sprintf("channel %q is not supported", channelName),
+		}
+	}
+
+	cfg := map[string]interface{}{}
+	s.store.Read(func(st *repo.State) {
+		if st.Channels == nil {
+			return
+		}
+		raw := st.Channels[channelName]
+		cfg = cloneChannelConfig(raw)
+	})
+
+	if !channelEnabled(channelName, cfg) {
+		return nil, nil, "", &channelError{
+			Code:    "channel_disabled",
+			Message: fmt.Sprintf("channel %q is disabled", channelName),
+		}
+	}
+	return plug, cfg, channelName, nil
+}
+
+func channelEnabled(name string, cfg map[string]interface{}) bool {
+	if raw, ok := cfg["enabled"]; ok {
+		return parseBool(raw)
+	}
+	return name == "console"
+}
+
+func parseBool(v interface{}) bool {
+	switch value := v.(type) {
+	case bool:
+		return value
+	case string:
+		return strings.EqualFold(strings.TrimSpace(value), "true")
+	case float64:
+		return value != 0
+	case int:
+		return value != 0
+	case int64:
+		return value != 0
+	default:
+		return false
+	}
+}
+
+func cloneChannelConfig(in map[string]interface{}) map[string]interface{} {
+	if in == nil {
+		return map[string]interface{}{}
+	}
+	encoded, err := json.Marshal(in)
+	if err != nil {
+		out := map[string]interface{}{}
+		for key, value := range in {
+			out[key] = value
+		}
+		return out
+	}
+	out := map[string]interface{}{}
+	if err := json.Unmarshal(encoded, &out); err != nil {
+		fallback := map[string]interface{}{}
+		for key, value := range in {
+			fallback[key] = value
+		}
+		return fallback
+	}
+	return out
+}
+
+func mapChannelError(err error) (status int, code string, message string) {
+	var chErr *channelError
+	if errors.As(err, &chErr) {
+		switch chErr.Code {
+		case "invalid_channel", "channel_not_supported", "channel_disabled":
+			return http.StatusBadRequest, chErr.Code, chErr.Message
+		case "channel_dispatch_failed":
+			return http.StatusBadGateway, chErr.Code, chErr.Message
+		default:
+			return http.StatusBadGateway, "channel_dispatch_failed", "channel dispatch failed"
+		}
+	}
+	return http.StatusBadGateway, "channel_dispatch_failed", "channel dispatch failed"
 }
 
 func (s *Server) listCronJobs(w http.ResponseWriter, _ *http.Request) {
@@ -808,9 +958,28 @@ func (s *Server) executeCronTask(ctx context.Context, job domain.CronJobSpec) er
 	default:
 	}
 	if job.TaskType == "text" && strings.TrimSpace(job.Text) != "" {
-		s.console.SendText(job.Dispatch.Target.UserID, job.Dispatch.Target.SessionID, job.Text)
+		channelName := resolveCronDispatchChannel(job)
+		channelPlugin, channelCfg, _, err := s.resolveChannel(channelName)
+		if err != nil {
+			return err
+		}
+		if err := channelPlugin.SendText(ctx, job.Dispatch.Target.UserID, job.Dispatch.Target.SessionID, job.Text, channelCfg); err != nil {
+			return &channelError{
+				Code:    "channel_dispatch_failed",
+				Message: fmt.Sprintf("failed to dispatch cron job to channel %q", channelName),
+				Err:     err,
+			}
+		}
 	}
 	return nil
+}
+
+func resolveCronDispatchChannel(job domain.CronJobSpec) string {
+	channelName := strings.TrimSpace(job.Dispatch.Channel)
+	if channelName == "" {
+		return "console"
+	}
+	return channelName
 }
 
 func alignCronStateForMutation(job domain.CronJobSpec, state domain.CronJobState, now time.Time) domain.CronJobState {
@@ -1616,12 +1785,10 @@ func (s *Server) listChannels(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *Server) listChannelTypes(w http.ResponseWriter, _ *http.Request) {
-	out := make([]string, 0)
-	s.store.Read(func(st *repo.State) {
-		for k := range st.Channels {
-			out = append(out, k)
-		}
-	})
+	out := make([]string, 0, len(s.channels))
+	for name := range s.channels {
+		out = append(out, name)
+	}
 	sort.Strings(out)
 	writeJSON(w, http.StatusOK, out)
 }
@@ -1632,8 +1799,18 @@ func (s *Server) putChannels(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "invalid_json", "invalid request body", nil)
 		return
 	}
+	for name := range body {
+		normalized := strings.ToLower(strings.TrimSpace(name))
+		if _, ok := s.channels[normalized]; !ok {
+			writeErr(w, http.StatusBadRequest, "channel_not_supported", fmt.Sprintf("channel %q is not supported", name), nil)
+			return
+		}
+	}
 	if err := s.store.Write(func(st *repo.State) error {
-		st.Channels = body
+		st.Channels = domain.ChannelConfigMap{}
+		for name, cfg := range body {
+			st.Channels[strings.ToLower(strings.TrimSpace(name))] = cfg
+		}
 		return nil
 	}); err != nil {
 		writeErr(w, http.StatusInternalServerError, "store_error", err.Error(), nil)
@@ -1644,10 +1821,11 @@ func (s *Server) putChannels(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) getChannel(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "channel_name")
+	normalized := strings.ToLower(strings.TrimSpace(name))
 	found := false
 	var out map[string]interface{}
 	s.store.Read(func(st *repo.State) {
-		out, found = st.Channels[name]
+		out, found = st.Channels[normalized]
 	})
 	if !found {
 		writeErr(w, http.StatusNotFound, "not_found", "channel not found", nil)
@@ -1658,6 +1836,11 @@ func (s *Server) getChannel(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) putChannel(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "channel_name")
+	normalized := strings.ToLower(strings.TrimSpace(name))
+	if _, ok := s.channels[normalized]; !ok {
+		writeErr(w, http.StatusBadRequest, "channel_not_supported", fmt.Sprintf("channel %q is not supported", name), nil)
+		return
+	}
 	var body map[string]interface{}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid_json", "invalid request body", nil)
@@ -1667,7 +1850,7 @@ func (s *Server) putChannel(w http.ResponseWriter, r *http.Request) {
 		if st.Channels == nil {
 			st.Channels = domain.ChannelConfigMap{}
 		}
-		st.Channels[name] = body
+		st.Channels[normalized] = body
 		return nil
 	}); err != nil {
 		writeErr(w, http.StatusInternalServerError, "store_error", err.Error(), nil)

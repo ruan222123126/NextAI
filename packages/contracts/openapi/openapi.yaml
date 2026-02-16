@@ -4,14 +4,18 @@ info:
   version: 0.1.0
 servers:
   - url: http://127.0.0.1:8088
+security:
+  - ApiKeyAuth: []
 paths:
   /version:
     get:
+      security: []
       responses:
         '200':
           description: version
   /healthz:
     get:
+      security: []
       responses:
         '200':
           description: health
@@ -321,6 +325,11 @@ paths:
       responses:
         '200': { description: ok }
 components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
   schemas:
     ChatSpec:
       type: object

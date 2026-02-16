@@ -51,6 +51,53 @@ func TestHealthz(t *testing.T) {
 	}
 }
 
+func TestAPIKeyAuthMiddleware(t *testing.T) {
+	dir, err := os.MkdirTemp("", "copaw-next-gateway-auth-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+
+	srv, err := NewServer(config.Config{Host: "127.0.0.1", Port: "0", DataDir: dir, APIKey: "secret-token"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { srv.Close() })
+
+	healthReq := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	healthW := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(healthW, healthReq)
+	if healthW.Code != http.StatusOK {
+		t.Fatalf("health endpoint should bypass auth, got=%d", healthW.Code)
+	}
+
+	noAuthReq := httptest.NewRequest(http.MethodGet, "/chats", nil)
+	noAuthW := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(noAuthW, noAuthReq)
+	if noAuthW.Code != http.StatusUnauthorized {
+		t.Fatalf("expected unauthorized status, got=%d body=%s", noAuthW.Code, noAuthW.Body.String())
+	}
+	if !strings.Contains(noAuthW.Body.String(), `"code":"unauthorized"`) {
+		t.Fatalf("unexpected unauthorized body: %s", noAuthW.Body.String())
+	}
+
+	apiKeyReq := httptest.NewRequest(http.MethodGet, "/chats", nil)
+	apiKeyReq.Header.Set("X-API-Key", "secret-token")
+	apiKeyW := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(apiKeyW, apiKeyReq)
+	if apiKeyW.Code != http.StatusOK {
+		t.Fatalf("expected authorized status via X-API-Key, got=%d body=%s", apiKeyW.Code, apiKeyW.Body.String())
+	}
+
+	bearerReq := httptest.NewRequest(http.MethodGet, "/chats", nil)
+	bearerReq.Header.Set("Authorization", "Bearer secret-token")
+	bearerW := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(bearerW, bearerReq)
+	if bearerW.Code != http.StatusOK {
+		t.Fatalf("expected authorized status via bearer, got=%d body=%s", bearerW.Code, bearerW.Body.String())
+	}
+}
+
 func TestChatCreateAndGetHistory(t *testing.T) {
 	srv := newTestServer(t)
 
@@ -84,6 +131,65 @@ func TestChatCreateAndGetHistory(t *testing.T) {
 	}
 	if !strings.Contains(w3.Body.String(), "assistant") {
 		t.Fatalf("history should contain assistant message: %s", w3.Body.String())
+	}
+}
+
+func TestProcessAgentRejectsUnsupportedChannel(t *testing.T) {
+	srv := newTestServer(t)
+
+	procReq := `{"input":[{"role":"user","type":"message","content":[{"type":"text","text":"hello"}]}],"session_id":"s1","user_id":"u1","channel":"sms","stream":false}`
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/agent/process", strings.NewReader(procReq)))
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got=%d body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"code":"channel_not_supported"`) {
+		t.Fatalf("unexpected error body: %s", w.Body.String())
+	}
+}
+
+func TestProcessAgentDispatchesToWebhookChannel(t *testing.T) {
+	var received atomic.Int32
+	var gotBody map[string]interface{}
+	webhook := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		received.Add(1)
+		if r.Header.Get("X-Test-Token") != "abc123" {
+			t.Fatalf("unexpected webhook header: %s", r.Header.Get("X-Test-Token"))
+		}
+		defer r.Body.Close()
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Fatalf("decode webhook body failed: %v", err)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer webhook.Close()
+
+	srv := newTestServer(t)
+	channelConfig := `{"enabled":true,"url":"` + webhook.URL + `","headers":{"X-Test-Token":"abc123"}}`
+	configW := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(configW, httptest.NewRequest(http.MethodPut, "/config/channels/webhook", strings.NewReader(channelConfig)))
+	if configW.Code != http.StatusOK {
+		t.Fatalf("set channel config status=%d body=%s", configW.Code, configW.Body.String())
+	}
+
+	procReq := `{"input":[{"role":"user","type":"message","content":[{"type":"text","text":"hello webhook"}]}],"session_id":"s1","user_id":"u1","channel":"webhook","stream":false}`
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/agent/process", strings.NewReader(procReq)))
+	if w.Code != http.StatusOK {
+		t.Fatalf("process status=%d body=%s", w.Code, w.Body.String())
+	}
+
+	if got := received.Load(); got != 1 {
+		t.Fatalf("expected one webhook call, got=%d", got)
+	}
+	if gotBody["user_id"] != "u1" {
+		t.Fatalf("unexpected webhook user_id: %#v", gotBody["user_id"])
+	}
+	if gotBody["session_id"] != "s1" {
+		t.Fatalf("unexpected webhook session_id: %#v", gotBody["session_id"])
+	}
+	if text, _ := gotBody["text"].(string); !strings.Contains(text, "Echo: hello webhook") {
+		t.Fatalf("unexpected webhook text: %#v", gotBody["text"])
 	}
 }
 
@@ -201,6 +307,48 @@ func TestCronSchedulerRunsIntervalJob(t *testing.T) {
 	}
 	if _, ok := state["next_run_at"].(string); !ok {
 		t.Fatalf("expected next_run_at to be set: %+v", state)
+	}
+}
+
+func TestRunCronJobDispatchesToWebhookChannel(t *testing.T) {
+	var received atomic.Int32
+	webhook := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		received.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer webhook.Close()
+
+	srv := newTestServer(t)
+	channelConfig := `{"enabled":true,"url":"` + webhook.URL + `"}`
+	configW := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(configW, httptest.NewRequest(http.MethodPut, "/config/channels/webhook", strings.NewReader(channelConfig)))
+	if configW.Code != http.StatusOK {
+		t.Fatalf("set channel config status=%d body=%s", configW.Code, configW.Body.String())
+	}
+
+	createReq := `{
+		"id":"job-webhook",
+		"name":"job-webhook",
+		"enabled":false,
+		"schedule":{"type":"interval","cron":"60s"},
+		"task_type":"text",
+		"text":"hello webhook cron",
+		"dispatch":{"channel":"webhook","target":{"user_id":"u1","session_id":"s1"}},
+		"runtime":{"max_concurrency":1,"timeout_seconds":5}
+	}`
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/cron/jobs", strings.NewReader(createReq)))
+	if w.Code != http.StatusOK {
+		t.Fatalf("create cron status=%d body=%s", w.Code, w.Body.String())
+	}
+
+	runW := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(runW, httptest.NewRequest(http.MethodPost, "/cron/jobs/job-webhook/run", nil))
+	if runW.Code != http.StatusOK {
+		t.Fatalf("run cron status=%d body=%s", runW.Code, runW.Body.String())
+	}
+	if got := received.Load(); got != 1 {
+		t.Fatalf("expected one webhook dispatch, got=%d", got)
 	}
 }
 

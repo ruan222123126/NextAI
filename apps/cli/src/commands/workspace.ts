@@ -1,6 +1,7 @@
 import { Command } from "commander";
 import { ApiClient } from "../client/api-client.js";
 import { writeFile } from "node:fs/promises";
+import { printResult } from "../io/output.js";
 
 export function registerWorkspaceCommand(program: Command, client: ApiClient): void {
   const ws = program.command("workspace").description("workspace operations");
@@ -13,10 +14,10 @@ export function registerWorkspaceCommand(program: Command, client: ApiClient): v
     }
     const buf = Buffer.from(await res.arrayBuffer());
     await writeFile(opts.out, buf);
-    console.log(JSON.stringify({ written: opts.out }, null, 2));
+    printResult({ written: opts.out });
   });
 
   ws.command("upload").requiredOption("--file <path>").action(async (opts: { file: string }) => {
-    console.log(JSON.stringify(await client.uploadWorkspace(opts.file), null, 2));
+    printResult(await client.uploadWorkspace(opts.file));
   });
 }

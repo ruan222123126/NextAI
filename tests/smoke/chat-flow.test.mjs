@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
@@ -117,6 +117,210 @@ test("gateway chat flow e2e: create -> stream send -> history", { timeout: 90_00
   }
 });
 
+test("gateway SSE boundary e2e: multi-chunk delta stream ends with DONE", { timeout: 90_000 }, async () => {
+  const port = await getFreePort();
+  const dataDir = await mkdtemp(join(tmpdir(), "copaw-smoke-sse-"));
+  const gatewayBin = join(dataDir, "gateway-smoke");
+  const baseURL = `http://127.0.0.1:${port}`;
+
+  await runCommand("go", ["build", "-o", gatewayBin, "./cmd/gateway"], {
+    cwd: gatewayDir,
+  });
+
+  const proc = spawn(gatewayBin, [], {
+    cwd: gatewayDir,
+    env: {
+      ...process.env,
+      COPAW_HOST: "127.0.0.1",
+      COPAW_PORT: String(port),
+      COPAW_DATA_DIR: dataDir,
+    },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let logs = "";
+  proc.stdout.on("data", (chunk) => {
+    logs += chunk.toString();
+  });
+  proc.stderr.on("data", (chunk) => {
+    logs += chunk.toString();
+  });
+
+  try {
+    await waitForHealth(`${baseURL}/healthz`);
+    const inputText = "this is a long e2e input to enforce multiple sse chunks in response";
+    const response = await fetch(`${baseURL}/agent/process`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        input: [{ role: "user", type: "message", content: [{ type: "text", text: inputText }] }],
+        session_id: `session-sse-${Date.now()}`,
+        user_id: "u-sse",
+        channel: "console",
+        stream: true,
+      }),
+    });
+    assert.equal(response.ok, true, "stream request should succeed");
+    assert.ok(response.body, "stream response body should exist");
+
+    const streamed = await readSSEStream(response.body);
+    assert.equal(streamed.done, true, "SSE stream should end with [DONE]");
+    assert.ok(streamed.chunks >= 2, `expected multi-chunk SSE, got chunks=${streamed.chunks}`);
+    assert.match(streamed.output, /Echo:\s*this is a long e2e input/);
+  } finally {
+    proc.kill("SIGTERM");
+    await onceProcessExit(proc, 4000);
+    await rm(dataDir, { recursive: true, force: true });
+  }
+
+  if (proc.exitCode !== null && proc.exitCode !== 0) {
+    throw new Error(`gateway exited unexpectedly (${proc.exitCode})\n${logs}`);
+  }
+});
+
+test("gateway error code consistency e2e: invalid request and unsupported channel", { timeout: 90_000 }, async () => {
+  const port = await getFreePort();
+  const dataDir = await mkdtemp(join(tmpdir(), "copaw-smoke-errors-"));
+  const gatewayBin = join(dataDir, "gateway-smoke");
+  const baseURL = `http://127.0.0.1:${port}`;
+
+  await runCommand("go", ["build", "-o", gatewayBin, "./cmd/gateway"], {
+    cwd: gatewayDir,
+  });
+
+  const proc = spawn(gatewayBin, [], {
+    cwd: gatewayDir,
+    env: {
+      ...process.env,
+      COPAW_HOST: "127.0.0.1",
+      COPAW_PORT: String(port),
+      COPAW_DATA_DIR: dataDir,
+    },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let logs = "";
+  proc.stdout.on("data", (chunk) => {
+    logs += chunk.toString();
+  });
+  proc.stderr.on("data", (chunk) => {
+    logs += chunk.toString();
+  });
+
+  try {
+    await waitForHealth(`${baseURL}/healthz`);
+
+    const invalidChat = await requestError(`${baseURL}/chats`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "missing fields" }),
+    });
+    assert.equal(invalidChat.status, 400);
+    assert.equal(invalidChat.code, "invalid_chat");
+
+    const missingChat = await requestError(`${baseURL}/chats/not-exists`);
+    assert.equal(missingChat.status, 404);
+    assert.equal(missingChat.code, "not_found");
+
+    const unsupportedChannel = await requestError(`${baseURL}/agent/process`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        input: [{ role: "user", type: "message", content: [{ type: "text", text: "hello" }] }],
+        session_id: `session-error-${Date.now()}`,
+        user_id: "u-error",
+        channel: "sms",
+        stream: false,
+      }),
+    });
+    assert.equal(unsupportedChannel.status, 400);
+    assert.equal(unsupportedChannel.code, "channel_not_supported");
+  } finally {
+    proc.kill("SIGTERM");
+    await onceProcessExit(proc, 4000);
+    await rm(dataDir, { recursive: true, force: true });
+  }
+
+  if (proc.exitCode !== null && proc.exitCode !== 0) {
+    throw new Error(`gateway exited unexpectedly (${proc.exitCode})\n${logs}`);
+  }
+});
+
+test("gateway cron concurrency e2e: pre-existing lease returns cron_busy", { timeout: 90_000 }, async () => {
+  const port = await getFreePort();
+  const dataDir = await mkdtemp(join(tmpdir(), "copaw-smoke-concurrency-"));
+  const gatewayBin = join(dataDir, "gateway-smoke");
+  const baseURL = `http://127.0.0.1:${port}`;
+
+  await runCommand("go", ["build", "-o", gatewayBin, "./cmd/gateway"], {
+    cwd: gatewayDir,
+  });
+
+  const proc = spawn(gatewayBin, [], {
+    cwd: gatewayDir,
+    env: {
+      ...process.env,
+      COPAW_HOST: "127.0.0.1",
+      COPAW_PORT: String(port),
+      COPAW_DATA_DIR: dataDir,
+    },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let logs = "";
+  proc.stdout.on("data", (chunk) => {
+    logs += chunk.toString();
+  });
+  proc.stderr.on("data", (chunk) => {
+    logs += chunk.toString();
+  });
+
+  try {
+    await waitForHealth(`${baseURL}/healthz`);
+    const jobID = `job-busy-${Date.now()}`;
+    await createCronJob(baseURL, {
+      id: jobID,
+      name: jobID,
+      enabled: false,
+      schedule: { type: "interval", cron: "60s" },
+      task_type: "text",
+      text: "hello",
+      dispatch: { target: { user_id: "u1", session_id: "s1" } },
+      runtime: { max_concurrency: 1, timeout_seconds: 30 },
+    });
+
+    const leaseDir = join(dataDir, "cron-leases", Buffer.from(jobID).toString("base64url"));
+    await mkdir(leaseDir, { recursive: true });
+    await writeFile(
+      join(leaseDir, "slot-0.json"),
+      JSON.stringify({
+        lease_id: "pre-busy-lease",
+        job_id: jobID,
+        owner: "smoke-test",
+        slot: 0,
+        acquired_at: new Date().toISOString(),
+        expires_at: new Date(Date.now() + 60_000).toISOString(),
+      }),
+      "utf8",
+    );
+
+    const busy = await requestError(`${baseURL}/cron/jobs/${encodeURIComponent(jobID)}/run`, {
+      method: "POST",
+    });
+    assert.equal(busy.status, 409);
+    assert.equal(busy.code, "cron_busy");
+
+    const state = await requestJSON(`${baseURL}/cron/jobs/${encodeURIComponent(jobID)}/state`);
+    assert.equal(state.last_status, "failed");
+    assert.match(state.last_error ?? "", /max_concurrency/);
+  } finally {
+    proc.kill("SIGTERM");
+    await onceProcessExit(proc, 4000);
+    await rm(dataDir, { recursive: true, force: true });
+  }
+
+  if (proc.exitCode !== null && proc.exitCode !== 0) {
+    throw new Error(`gateway exited unexpectedly (${proc.exitCode})\n${logs}`);
+  }
+});
+
 test("gateway cron DST boundary e2e: timezone next_run_at is deterministic", { timeout: 90_000 }, async () => {
   const port = await getFreePort();
   const dataDir = await mkdtemp(join(tmpdir(), "copaw-smoke-dst-"));
@@ -225,12 +429,34 @@ async function requestJSON(url, init = undefined) {
   return parsed;
 }
 
+async function requestError(url, init = undefined) {
+  const response = await fetch(url, init);
+  const text = await response.text();
+  const parsed = text ? JSON.parse(text) : {};
+  if (response.ok) {
+    throw new Error(`expected error response but got status ${response.status}`);
+  }
+  return {
+    status: response.status,
+    code: parsed?.error?.code ?? "",
+    message: parsed?.error?.message ?? "",
+    details: parsed?.error?.details ?? null,
+  };
+}
+
 async function readSSEDelta(stream) {
+  const result = await readSSEStream(stream);
+  assert.equal(result.done, true, "SSE stream should end with [DONE]");
+  return result.output;
+}
+
+async function readSSEStream(stream) {
   const reader = stream.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
   let output = "";
   let done = false;
+  let chunks = 0;
 
   while (!done) {
     const chunk = await reader.read();
@@ -241,6 +467,7 @@ async function readSSEDelta(stream) {
     const parsed = parseSSEBuffer(buffer);
     buffer = parsed.rest;
     output += parsed.delta;
+    chunks += parsed.chunks;
     done = parsed.done;
     if (done) {
       await reader.cancel();
@@ -252,16 +479,17 @@ async function readSSEDelta(stream) {
   if (!done && buffer.trim() !== "") {
     const parsed = parseSSEBuffer(`${buffer}\n\n`);
     output += parsed.delta;
+    chunks += parsed.chunks;
     done = parsed.done;
   }
-  assert.equal(done, true, "SSE stream should end with [DONE]");
-  return output;
+  return { output, done, chunks };
 }
 
 function parseSSEBuffer(raw) {
   let buffer = raw;
   let done = false;
   let delta = "";
+  let chunks = 0;
 
   while (!done) {
     const boundary = buffer.indexOf("\n\n");
@@ -287,10 +515,11 @@ function parseSSEBuffer(raw) {
     const payload = JSON.parse(data);
     if (typeof payload.delta === "string") {
       delta += payload.delta;
+      chunks += 1;
     }
   }
 
-  return { done, delta, rest: buffer };
+  return { done, delta, rest: buffer, chunks };
 }
 
 async function waitForHealth(url, timeoutMs = 30_000) {
