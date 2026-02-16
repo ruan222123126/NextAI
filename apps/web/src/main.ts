@@ -106,6 +106,12 @@ interface EnvVar {
   value: string;
 }
 
+interface WorkspaceFileInfo {
+  path: string;
+  kind: "config" | "skill";
+  size: number | null;
+}
+
 interface CronScheduleSpec {
   type: string;
   cron: string;
@@ -233,9 +239,17 @@ const envsForm = mustElement<HTMLFormElement>("envs-form");
 const envsJSONInput = mustElement<HTMLTextAreaElement>("envs-json");
 
 const refreshWorkspaceButton = mustElement<HTMLButtonElement>("refresh-workspace");
-const workspaceDownloadLink = mustElement<HTMLAnchorElement>("workspace-download-link");
-const workspaceUploadForm = mustElement<HTMLFormElement>("workspace-upload-form");
-const workspaceUploadFileInput = mustElement<HTMLInputElement>("workspace-upload-file");
+const workspaceFilesBody = mustElement<HTMLTableSectionElement>("workspace-files-body");
+const workspaceCreateFileForm = mustElement<HTMLFormElement>("workspace-create-file-form");
+const workspaceNewPathInput = mustElement<HTMLInputElement>("workspace-new-path");
+const workspaceEditorForm = mustElement<HTMLFormElement>("workspace-editor-form");
+const workspaceFilePathInput = mustElement<HTMLInputElement>("workspace-file-path");
+const workspaceFileContentInput = mustElement<HTMLTextAreaElement>("workspace-file-content");
+const workspaceSaveFileButton = mustElement<HTMLButtonElement>("workspace-save-file-btn");
+const workspaceDeleteFileButton = mustElement<HTMLButtonElement>("workspace-delete-file-btn");
+const workspaceExportButton = mustElement<HTMLButtonElement>("workspace-export-btn");
+const workspaceImportForm = mustElement<HTMLFormElement>("workspace-import-form");
+const workspaceJSONInput = mustElement<HTMLTextAreaElement>("workspace-json");
 
 const refreshCronButton = mustElement<HTMLButtonElement>("refresh-cron");
 const cronJobsBody = mustElement<HTMLTableSectionElement>("cron-jobs-body");
@@ -290,6 +304,9 @@ const state = {
     editingProviderID: "",
   },
   envs: [] as EnvVar[],
+  workspaceFiles: [] as WorkspaceFileInfo[],
+  activeWorkspacePath: "",
+  activeWorkspaceContent: "",
   cronJobs: [] as CronJobSpec[],
   cronStates: {} as Record<string, CronJobState>,
 };
@@ -306,7 +323,8 @@ async function bootstrap(): Promise<void> {
   renderChatHeader();
   renderChatList();
   renderMessages();
-  setWorkspaceDownloadLink();
+  renderWorkspaceFiles();
+  renderWorkspaceEditor();
   syncCronDispatchHint();
   ensureCronSessionID();
   resetProviderModalForm();
@@ -531,16 +549,54 @@ function bindEvents(): void {
     await deleteEnv(key);
   });
 
-  refreshWorkspaceButton.addEventListener("click", () => {
-    refreshWorkspace();
+  refreshWorkspaceButton.addEventListener("click", async () => {
+    await refreshWorkspace();
   });
-  workspaceDownloadLink.addEventListener("click", async (event) => {
+  workspaceCreateFileForm.addEventListener("submit", async (event) => {
     event.preventDefault();
-    await downloadWorkspace();
+    await createWorkspaceFile();
   });
-  workspaceUploadForm.addEventListener("submit", async (event) => {
+  workspaceFilesBody.addEventListener("click", async (event) => {
+    const target = event.target;
+    if (!(target instanceof Element)) {
+      return;
+    }
+    const openButton = target.closest<HTMLButtonElement>("button[data-workspace-open]");
+    if (openButton) {
+      const path = openButton.dataset.workspaceOpen ?? "";
+      if (path !== "") {
+        await openWorkspaceFile(path);
+      }
+      return;
+    }
+    const deleteButton = target.closest<HTMLButtonElement>("button[data-workspace-delete]");
+    if (!deleteButton) {
+      return;
+    }
+    const path = deleteButton.dataset.workspaceDelete ?? "";
+    if (path === "") {
+      return;
+    }
+    await deleteWorkspaceFile(path);
+  });
+  workspaceEditorForm.addEventListener("submit", async (event) => {
     event.preventDefault();
-    await uploadWorkspace();
+    await saveWorkspaceFile();
+  });
+  workspaceDeleteFileButton.addEventListener("click", async () => {
+    const path = workspaceFilePathInput.value.trim();
+    if (path === "") {
+      setStatus(t("error.workspacePathRequired"), "error");
+      return;
+    }
+    await deleteWorkspaceFile(path);
+  });
+  workspaceExportButton.addEventListener("click", async () => {
+    await exportWorkspaceJSON();
+  });
+  workspaceImportForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    await importWorkspaceJSON();
   });
 
   refreshCronButton.addEventListener("click", async () => {
@@ -624,6 +680,10 @@ function applyLocaleToDocument(): void {
   if (state.tabLoaded.envs) {
     renderEnvsPanel();
   }
+  if (state.tabLoaded.workspace) {
+    renderWorkspaceFiles();
+    renderWorkspaceEditor();
+  }
   if (state.tabLoaded.cron) {
     renderCronJobs();
   }
@@ -637,7 +697,6 @@ async function handleControlChange(resetDraft: boolean): Promise<void> {
     ensureCronSessionID();
   }
   syncCronDispatchHint();
-  setWorkspaceDownloadLink();
   invalidateResourceTabs();
 
   await reloadChats();
@@ -691,7 +750,7 @@ async function loadTabData(tab: TabKey, force = false): Promise<void> {
         await refreshEnvs();
         break;
       case "workspace":
-        refreshWorkspace();
+        await refreshWorkspace();
         break;
       case "cron":
         await refreshCronJobs();
@@ -1924,71 +1983,338 @@ async function deleteEnv(key: string): Promise<void> {
   }
 }
 
-function refreshWorkspace(): void {
+async function refreshWorkspace(options: { silent?: boolean } = {}): Promise<void> {
   syncControlState();
-  setWorkspaceDownloadLink();
-  state.tabLoaded.workspace = true;
-  setStatus(t("status.workspaceLinkRefreshed"), "info");
-}
-
-function setWorkspaceDownloadLink(): void {
-  workspaceDownloadLink.href = toAbsoluteURL("/workspace/download");
-}
-
-async function downloadWorkspace(): Promise<void> {
-  syncControlState();
-  setWorkspaceDownloadLink();
   try {
-    const response = await fetch(
-      toAbsoluteURL("/workspace/download"),
-      buildRequestInit({
-        method: "GET",
-        headers: {
-          accept: "application/zip,application/octet-stream",
-        },
-      }),
-    );
-    if (!response.ok) {
-      throw new Error(await readErrorMessage(response));
+    const files = await listWorkspaceFiles();
+    state.workspaceFiles = files;
+    if (state.activeWorkspacePath !== "" && !files.some((file) => file.path === state.activeWorkspacePath)) {
+      clearWorkspaceSelection();
     }
-
-    const blob = await response.blob();
-    const downloadURL = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = downloadURL;
-    link.download = "workspace.zip";
-    document.body.appendChild(link);
-    link.click();
-    link.remove();
-    URL.revokeObjectURL(downloadURL);
-    setStatus(t("status.workspaceLinkRefreshed"), "info");
+    renderWorkspaceFiles();
+    renderWorkspaceEditor();
+    state.tabLoaded.workspace = true;
+    if (!options.silent) {
+      setStatus(t("status.workspaceFilesLoaded", { count: files.length }), "info");
+    }
   } catch (error) {
     setStatus(asErrorMessage(error), "error");
   }
 }
 
-async function uploadWorkspace(): Promise<void> {
-  syncControlState();
-  const file = workspaceUploadFileInput.files?.[0];
-  if (!file) {
-    setStatus(t("status.zipRequired"), "error");
+function renderWorkspaceFiles(): void {
+  workspaceFilesBody.innerHTML = "";
+  if (state.workspaceFiles.length === 0) {
+    const row = document.createElement("tr");
+    const col = document.createElement("td");
+    col.colSpan = 3;
+    col.className = "empty-cell";
+    col.textContent = t("workspace.empty");
+    row.appendChild(col);
+    workspaceFilesBody.appendChild(row);
     return;
   }
 
-  const formData = new FormData();
-  formData.append("file", file);
+  state.workspaceFiles.forEach((file) => {
+    const row = document.createElement("tr");
+
+    const pathCol = document.createElement("td");
+    pathCol.className = "mono";
+    pathCol.textContent = file.path;
+
+    const sizeCol = document.createElement("td");
+    sizeCol.textContent = file.size === null ? t("common.none") : String(file.size);
+
+    const actionCol = document.createElement("td");
+    const openButton = document.createElement("button");
+    openButton.type = "button";
+    openButton.dataset.workspaceOpen = file.path;
+    openButton.textContent = t("workspace.openFile");
+    openButton.disabled = file.path === state.activeWorkspacePath;
+
+    const deleteButton = document.createElement("button");
+    deleteButton.type = "button";
+    deleteButton.className = "secondary-btn";
+    deleteButton.dataset.workspaceDelete = file.path;
+    deleteButton.textContent = t("workspace.deleteFile");
+    deleteButton.disabled = file.kind !== "skill";
+
+    actionCol.append(openButton, document.createTextNode(" "), deleteButton);
+    row.append(pathCol, sizeCol, actionCol);
+    workspaceFilesBody.appendChild(row);
+  });
+}
+
+function renderWorkspaceEditor(): void {
+  const hasActiveFile = state.activeWorkspacePath !== "";
+  const canDelete = hasActiveFile && isWorkspaceSkillPath(state.activeWorkspacePath);
+  workspaceFilePathInput.value = state.activeWorkspacePath;
+  workspaceFileContentInput.value = state.activeWorkspaceContent;
+  workspaceFileContentInput.disabled = !hasActiveFile;
+  workspaceSaveFileButton.disabled = !hasActiveFile;
+  workspaceDeleteFileButton.disabled = !canDelete;
+}
+
+async function createWorkspaceFile(): Promise<void> {
+  syncControlState();
+  const path = normalizeWorkspaceInputPath(workspaceNewPathInput.value);
+  if (path === "") {
+    setStatus(t("error.workspacePathRequired"), "error");
+    return;
+  }
+  if (!isWorkspaceSkillPath(path)) {
+    setStatus(t("error.workspaceCreateOnlySkill"), "error");
+    return;
+  }
 
   try {
-    const result = await requestJSON<Record<string, boolean>>("/workspace/upload", {
-      method: "POST",
-      body: formData,
-    });
-    workspaceUploadFileInput.value = "";
-    const success = result.success === true;
-    setStatus(success ? t("status.workspaceUploadSuccess") : t("status.workspaceUploadDone"), "info");
+    await putWorkspaceFile(path, createWorkspaceSkillTemplate(path));
+    workspaceNewPathInput.value = "";
+    state.activeWorkspacePath = path;
+    state.activeWorkspaceContent = JSON.stringify(createWorkspaceSkillTemplate(path), null, 2);
+    await refreshWorkspace({ silent: true });
+    setStatus(t("status.workspaceFileCreated", { path }), "info");
   } catch (error) {
     setStatus(asErrorMessage(error), "error");
   }
+}
+
+async function openWorkspaceFile(path: string, options: { silent?: boolean } = {}): Promise<void> {
+  syncControlState();
+  try {
+    const payload = await getWorkspaceFile(path);
+    state.activeWorkspacePath = path;
+    state.activeWorkspaceContent = JSON.stringify(payload, null, 2);
+    renderWorkspaceFiles();
+    renderWorkspaceEditor();
+    if (!options.silent) {
+      setStatus(t("status.workspaceFileLoaded", { path }), "info");
+    }
+  } catch (error) {
+    setStatus(asErrorMessage(error), "error");
+  }
+}
+
+async function saveWorkspaceFile(): Promise<void> {
+  syncControlState();
+  const path = normalizeWorkspaceInputPath(workspaceFilePathInput.value);
+  if (path === "") {
+    setStatus(t("error.workspacePathRequired"), "error");
+    return;
+  }
+
+  let payload: unknown;
+  try {
+    payload = JSON.parse(workspaceFileContentInput.value);
+  } catch {
+    setStatus(t("error.workspaceInvalidJSON"), "error");
+    return;
+  }
+  try {
+    await putWorkspaceFile(path, payload);
+    state.activeWorkspacePath = path;
+    state.activeWorkspaceContent = JSON.stringify(payload, null, 2);
+    await refreshWorkspace({ silent: true });
+    setStatus(t("status.workspaceFileSaved", { path }), "info");
+  } catch (error) {
+    setStatus(asErrorMessage(error), "error");
+  }
+}
+
+async function deleteWorkspaceFile(path: string): Promise<void> {
+  syncControlState();
+  const confirmed = window.confirm(t("workspace.deleteFileConfirm", { path }));
+  if (!confirmed) {
+    return;
+  }
+
+  try {
+    await deleteWorkspaceFileRequest(path);
+    if (state.activeWorkspacePath === path) {
+      clearWorkspaceSelection();
+    }
+    await refreshWorkspace({ silent: true });
+    setStatus(t("status.workspaceFileDeleted", { path }), "info");
+  } catch (error) {
+    setStatus(asErrorMessage(error), "error");
+  }
+}
+
+async function exportWorkspaceJSON(): Promise<void> {
+  syncControlState();
+  try {
+    const raw = await requestJSON<unknown>("/workspace/export");
+    workspaceJSONInput.value = stringifyWorkspaceExport(raw);
+    setStatus(t("status.workspaceExportReady"), "info");
+  } catch (error) {
+    setStatus(asErrorMessage(error), "error");
+  }
+}
+
+async function importWorkspaceJSON(): Promise<void> {
+  syncControlState();
+  const raw = workspaceJSONInput.value.trim();
+  if (raw === "") {
+    setStatus(t("error.workspaceJSONRequired"), "error");
+    return;
+  }
+
+  let payload: unknown;
+  try {
+    payload = JSON.parse(raw);
+  } catch {
+    setStatus(t("error.workspaceInvalidJSON"), "error");
+    return;
+  }
+
+  try {
+    await requestJSON<unknown>("/workspace/import", {
+      method: "POST",
+      body:
+        payload && typeof payload === "object" && "mode" in (payload as Record<string, unknown>)
+          ? payload
+          : {
+              mode: "replace",
+              payload,
+            },
+    });
+    clearWorkspaceSelection();
+    await refreshWorkspace({ silent: true });
+    setStatus(t("status.workspaceImportDone"), "info");
+  } catch (error) {
+    setStatus(asErrorMessage(error), "error");
+  }
+}
+
+async function listWorkspaceFiles(): Promise<WorkspaceFileInfo[]> {
+  const raw = await requestJSON<unknown>("/workspace/files");
+  return normalizeWorkspaceFiles(raw);
+}
+
+async function getWorkspaceFile(path: string): Promise<unknown> {
+  return requestJSON<unknown>(`/workspace/files/${encodeURIComponent(path)}`);
+}
+
+async function putWorkspaceFile(path: string, payload: unknown): Promise<void> {
+  await requestJSON<unknown>(`/workspace/files/${encodeURIComponent(path)}`, {
+    method: "PUT",
+    body: payload,
+  });
+}
+
+async function deleteWorkspaceFileRequest(path: string): Promise<void> {
+  await requestJSON<unknown>(`/workspace/files/${encodeURIComponent(path)}`, {
+    method: "DELETE",
+  });
+}
+
+function normalizeWorkspaceFiles(raw: unknown): WorkspaceFileInfo[] {
+  const rows: unknown[] = [];
+  if (Array.isArray(raw)) {
+    rows.push(...raw);
+  } else if (raw && typeof raw === "object") {
+    const obj = raw as Record<string, unknown>;
+    if (Array.isArray(obj.files)) {
+      rows.push(...obj.files);
+    } else if (obj.files && typeof obj.files === "object") {
+      rows.push(...Object.entries(obj.files as Record<string, unknown>).map(([path, value]) => ({ path, value })));
+    }
+    if (Array.isArray(obj.items)) {
+      rows.push(...obj.items);
+    }
+    if (rows.length === 0) {
+      rows.push(...Object.entries(obj).map(([path, value]) => ({ path, value })));
+    }
+  }
+
+  const byPath = new Map<string, WorkspaceFileInfo>();
+  for (const row of rows) {
+    let path = "";
+    let kind: "config" | "skill" = "config";
+    let size: number | null = null;
+
+    if (typeof row === "string") {
+      path = row.trim();
+    } else if (row && typeof row === "object") {
+      const item = row as Record<string, unknown>;
+      if (typeof item.path === "string") {
+        path = item.path.trim();
+      } else if (typeof item.name === "string") {
+        path = item.name.trim();
+      } else if (typeof item.file === "string") {
+        path = item.file.trim();
+      }
+
+      if (typeof item.size === "number" && Number.isFinite(item.size)) {
+        size = item.size;
+      } else if (typeof item.bytes === "number" && Number.isFinite(item.bytes)) {
+        size = item.bytes;
+      }
+
+      if (item.kind === "skill") {
+        kind = "skill";
+      } else if (item.kind === "config") {
+        kind = "config";
+      }
+    }
+
+    if (path === "") {
+      continue;
+    }
+    if (kind === "config" && path.startsWith("skills/") && path.endsWith(".json")) {
+      kind = "skill";
+    }
+    const prev = byPath.get(path);
+    if (!prev || (prev.size === null && size !== null)) {
+      byPath.set(path, { path, kind, size });
+    }
+  }
+
+  return Array.from(byPath.values()).sort((a, b) => a.path.localeCompare(b.path));
+}
+
+function clearWorkspaceSelection(): void {
+  state.activeWorkspacePath = "";
+  state.activeWorkspaceContent = "";
+}
+
+function stringifyWorkspaceExport(raw: unknown): string {
+  if (typeof raw === "string") {
+    try {
+      return JSON.stringify(JSON.parse(raw), null, 2);
+    } catch {
+      return raw;
+    }
+  }
+  return JSON.stringify(raw ?? {}, null, 2);
+}
+
+function normalizeWorkspaceInputPath(path: string): string {
+  return path.trim().replace(/^\/+/, "");
+}
+
+function isWorkspaceSkillPath(path: string): boolean {
+  if (!path.startsWith("skills/") || !path.endsWith(".json")) {
+    return false;
+  }
+  const name = path.slice("skills/".length, path.length - ".json".length).trim();
+  return name !== "" && !name.includes("/");
+}
+
+function createWorkspaceSkillTemplate(path: string): Record<string, unknown> {
+  const normalized = normalizeWorkspaceInputPath(path);
+  const name = normalized.slice("skills/".length, normalized.length - ".json".length).trim();
+  if (name === "") {
+    throw new Error(t("error.workspacePathRequired"));
+  }
+  return {
+    name,
+    content: "# new skill",
+    source: "customized",
+    references: {},
+    scripts: {},
+    enabled: true,
+  };
 }
 
 function syncCronDispatchHint(): void {

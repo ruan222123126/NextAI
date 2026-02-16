@@ -86,21 +86,27 @@ export class ApiClient {
     return this.request<T>(path, { method: "DELETE" });
   }
 
-  async uploadWorkspace(filePath: string): Promise<unknown> {
-    const fs = await import("node:fs/promises");
-    const form = new FormData();
-    const data = await fs.readFile(filePath);
-    const blob = new Blob([data], { type: "application/zip" });
-    form.append("file", blob, "workspace.zip");
-    const res = await fetch(`${this.base}/workspace/upload`, {
-      method: "POST",
-      body: form,
-    });
-    const text = await res.text();
-    const json = parseResponsePayload(text);
-    if (!res.ok) {
-      throw toClientError(res.status, json, `${res.status} ${res.statusText}`.trim());
-    }
-    return json;
+  workspaceLs(): Promise<unknown> {
+    return this.get("/workspace/files");
+  }
+
+  workspaceCat(path: string): Promise<unknown> {
+    return this.get(`/workspace/files/${encodeURIComponent(path)}`);
+  }
+
+  workspacePut(path: string, payload: unknown): Promise<unknown> {
+    return this.put(`/workspace/files/${encodeURIComponent(path)}`, payload);
+  }
+
+  workspaceRm(path: string): Promise<unknown> {
+    return this.delete(`/workspace/files/${encodeURIComponent(path)}`);
+  }
+
+  workspaceExport(): Promise<unknown> {
+    return this.get("/workspace/export");
+  }
+
+  workspaceImport(payload: unknown): Promise<unknown> {
+    return this.post("/workspace/import", payload);
   }
 }

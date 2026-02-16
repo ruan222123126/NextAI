@@ -14,8 +14,9 @@ Current scope:
   - Replace env map by JSON (`PUT /envs`)
   - Delete single env (`DELETE /envs/{key}`)
 - Workspace tab
-  - Download link (`GET /workspace/download`)
-  - Zip upload (`POST /workspace/upload`, multipart field `file`)
+  - File list (`GET /workspace/files`)
+  - File read/edit/save/delete (`GET/PUT/DELETE /workspace/files/{file_path}`)
+  - JSON export/import (`GET /workspace/export`, `POST /workspace/import`)
 - Cron tab
   - Jobs list (`GET /cron/jobs` + optional `GET /cron/jobs/{id}/state` for `next_run_at`)
   - Create interval text job (`POST /cron/jobs`)

@@ -89,18 +89,42 @@ describe("cli e2e", () => {
   });
 
   it("covers main command success paths with mocked gateway", async () => {
-    const calls: Array<{ method: string; url: string }> = [];
+    const calls: Array<{ method: string; url: string; body: string }> = [];
     const run = async (argv: string[]) =>
       runCLI(argv, async (url, init) => {
-        calls.push({ method: (init?.method ?? "GET").toUpperCase(), url: String(url) });
-        if (String(url).endsWith("/workspace/download")) {
-          return new Response(new Uint8Array([1, 2, 3]), { status: 200 });
+        const method = (init?.method ?? "GET").toUpperCase();
+        const body = typeof init?.body === "string" ? init.body : "";
+        calls.push({ method, url: String(url), body });
+        if (String(url).endsWith("/workspace/export")) {
+          return new Response(
+            JSON.stringify({
+              version: "v1",
+              skills: {},
+              config: {
+                envs: {},
+                channels: {},
+                models: {
+                  providers: {},
+                  active_llm: { provider_id: "", model: "" },
+                },
+              },
+            }),
+            { status: 200 },
+          );
+        }
+        if (String(url).includes("/workspace/files/")) {
+          return new Response(JSON.stringify({ content: "# skill", source: "customized", enabled: true, references: {}, scripts: {} }), {
+            status: 200,
+          });
+        }
+        if (String(url).endsWith("/workspace/files")) {
+          return new Response(JSON.stringify({ files: [{ path: "config/envs.json", kind: "config", size: 16 }] }), { status: 200 });
         }
         return new Response(JSON.stringify({ ok: true }), { status: 200 });
       });
 
     const outDir = await mkdtemp(join(tmpdir(), "copaw-cli-e2e-"));
-    const outFile = join(outDir, "workspace.zip");
+    const outFile = join(outDir, "workspace.json");
     try {
       expect((await run(["app", "start"])).exitCode).toBe(0);
       expect((await run(["chats", "list", "--user-id", "u1", "--channel", "console"])).exitCode).toBe(0);
@@ -119,10 +143,26 @@ describe("cli e2e", () => {
       expect((await run(["env", "set", "--body", "{\"A\":\"1\"}"])).exitCode).toBe(0);
       expect((await run(["skills", "list"])).exitCode).toBe(0);
       expect((await run(["channels", "set", "console", "--body", "{\"enabled\":true}"])).exitCode).toBe(0);
-      expect((await run(["workspace", "download", "--out", outFile])).exitCode).toBe(0);
+      expect((await run(["workspace", "ls"])).exitCode).toBe(0);
+      expect((await run(["workspace", "cat", "config/envs.json"])).exitCode).toBe(0);
+      expect(
+        (
+          await run([
+            "workspace",
+            "put",
+            "--path",
+            "skills/demo-skill.json",
+            "--body",
+            "{\"content\":\"# demo\",\"source\":\"customized\",\"enabled\":true,\"references\":{},\"scripts\":{}}",
+          ])
+        ).exitCode,
+      ).toBe(0);
+      expect((await run(["workspace", "rm", "skills/demo-skill.json"])).exitCode).toBe(0);
+      expect((await run(["workspace", "export", "--out", outFile])).exitCode).toBe(0);
+      expect((await run(["workspace", "import", "--file", outFile])).exitCode).toBe(0);
 
-      const downloaded = await readFile(outFile);
-      expect(downloaded.length).toBe(3);
+      const downloaded = JSON.parse(await readFile(outFile, "utf8")) as { version?: string };
+      expect(downloaded.version).toBe("v1");
     } finally {
       await rm(outDir, { recursive: true, force: true });
     }
@@ -130,6 +170,14 @@ describe("cli e2e", () => {
     expect(calls.some((v) => v.method === "GET" && v.url.endsWith("/healthz"))).toBe(true);
     expect(calls.some((v) => v.method === "PUT" && v.url.includes("/config/channels/console"))).toBe(true);
     expect(calls.some((v) => v.method === "POST" && v.url.endsWith("/cron/jobs"))).toBe(true);
+    expect(calls.some((v) => v.method === "GET" && v.url.endsWith("/workspace/files"))).toBe(true);
+    expect(calls.some((v) => v.method === "GET" && v.url.includes("/workspace/files/config%2Fenvs.json"))).toBe(true);
+    const putFileCall = calls.find((v) => v.method === "PUT" && v.url.includes("/workspace/files/skills%2Fdemo-skill.json"));
+    expect(putFileCall).toBeDefined();
+    expect(JSON.parse(putFileCall?.body ?? "{}")).toMatchObject({ content: "# demo" });
+    expect(calls.some((v) => v.method === "DELETE" && v.url.includes("/workspace/files/skills%2Fdemo-skill.json"))).toBe(true);
+    expect(calls.some((v) => v.method === "GET" && v.url.endsWith("/workspace/export"))).toBe(true);
+    expect(calls.some((v) => v.method === "POST" && v.url.endsWith("/workspace/import"))).toBe(true);
   });
 
   it("covers models alias/custom-provider config with chat chain", async () => {

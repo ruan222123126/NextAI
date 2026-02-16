@@ -8,7 +8,8 @@
 - /models 系列
 - /envs 系列
 - /skills 系列
-- /workspace/download, /workspace/upload
+- /workspace/files, /workspace/files/{file_path}
+- /workspace/export, /workspace/import
 - /config/channels 系列
 
 ## CLI
@@ -18,5 +19,5 @@
 - copaw models list/config/active-get/active-set
 - copaw env list/set/delete
 - copaw skills list/create/enable/disable/delete
-- copaw workspace download/upload
+- copaw workspace ls/cat/put/rm/export/import
 - copaw channels list/types/get/set

@@ -1,6 +1,6 @@
 # CoPaw Next TODO
 
-更新时间：2026-02-16 21:01:27 +0800
+更新时间：2026-02-16 21:31:43 +0800
 
 ## 执行约定（强制）
 - 每位接手 AI 开始前，必须先阅读本文件与 `/home/ruan/.codex/handoff/latest.md`。
@@ -59,8 +59,10 @@
 - [x] 2026-02-16 20:47 +0800 服务重启验证：先停止端口占用进程（Gateway `pid=498972`、Web `pid=499049`），再启动 Gateway（`NEXTAI_ALLOW_INSECURE_NO_API_KEY=true make gateway`）与 Web（`python3 -m http.server 5173 --bind 127.0.0.1 --directory apps/web/dist`）；`GET /healthz`、`GET /version`、Web `HEAD /` 均返回 `200`。
 - [x] 2026-02-16 20:56 +0800 Web 技能区移除验证：删除前端 Skills 标签与面板、移除 `main.ts` 中技能状态/请求逻辑并同步 smoke 测试与 README；执行 `pnpm -C apps/web test`（13 tests）与 `pnpm -C apps/web build` 均通过。
 - [x] 2026-02-16 21:01 +0800 PR 提交记录：将“Web 技能区移除”提交为 `feat(web): remove skills panel from console`（`6bfd7b8`）并推送到分支 `refactor/rename-copaw-to-nextai`，已更新 GitHub PR `#5`。
+- [x] 2026-02-16 21:30 +0800 工作区重构落地：移除 `/workspace/download` 与 `/workspace/upload`，改为 `/workspace/files` + `/workspace/files/{file_path}` + `/workspace/export` + `/workspace/import`；CLI 改为 `workspace ls/cat/put/rm/export/import`，Web 工作区面板改为文件列表 + JSON 编辑 + 导入导出，契约与 SDK 同步更新；验证通过 `cd apps/gateway && go test ./...`、`pnpm -C apps/cli test && pnpm -C apps/cli build`、`pnpm -C apps/web test && pnpm -C apps/web build`、`pnpm --filter @copaw-next/tests-contract run lint && pnpm --filter @copaw-next/tests-contract run test`、`pnpm --dir packages/sdk-ts run lint && pnpm --dir packages/sdk-ts run test`。
 
-## 7. 当前未完成项与阻塞（2026-02-16 21:01:27 +0800）
+## 7. 当前未完成项与阻塞（2026-02-16 21:31:43 +0800）
 - [x] 设计并实现 provider 可删除方案（含内置 provider），并完成 catalog/active/default 语义调整：删除后从 `/models/catalog` 消失；删掉激活 provider 后 `active_llm` 置空。
 - [x] 风险已消除：删除全部 provider 后，`/agent/process` 在 `active_llm` 为空时走内部 demo 回声兜底；并有回归测试覆盖（`apps/gateway/internal/app/server_test.go`）。
 - [ ] 阻塞：无法将 PR 分支远端回退到 `1c94b19`。原因：当前环境策略禁止强推（`git push --force-with-lease` 与 `git push origin +ref` 均被 policy 拦截）；仅普通 `git push` 可执行但因 non-fast-forward 被拒绝。
+- [ ] 待办：本次“工作区重构”改动尚未提交 commit/PR。原因：当前会话仅执行实现与验证，未收到“创建 commit/PR”指令。
