@@ -252,9 +252,13 @@ button:disabled {
   min-height: 72vh;
 }
 
-.sidebar,
-.chat {
+.sidebar {
   min-height: 72vh;
+}
+
+.chat {
+  height: 72vh;
+  max-height: 72vh;
 }
 
 .panel-head {
