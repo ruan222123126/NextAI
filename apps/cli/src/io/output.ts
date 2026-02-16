@@ -1,17 +1,19 @@
 import { ApiClientError } from "../client/api-client.js";
+import { t } from "../i18n.js";
+import type { CliMessageKey } from "../locales/zh-CN.js";
 
 let jsonMode = false;
 
-const codeHints: Record<string, string> = {
-  invalid_json: "请求 JSON 格式非法，检查命令参数中的 JSON 字符串。",
-  invalid_request: "请求字段缺失或格式错误，检查必填参数。",
-  not_found: "资源不存在，确认 ID 或名称是否正确。",
-  unauthorized: "鉴权失败，请检查 COPAW_API_KEY 或 Authorization。",
-  provider_not_configured: "模型提供方未配置，先执行 models config/active-set。",
-  provider_not_supported: "模型提供方不受支持，检查 provider_id。",
-  provider_request_failed: "上游模型请求失败，检查 API Key/Base URL/网络。",
-  provider_invalid_reply: "上游返回格式异常，检查模型服务返回。",
-  store_error: "网关存储写入失败，检查 COPAW_DATA_DIR 权限与磁盘状态。",
+const codeHintKeys: Record<string, CliMessageKey> = {
+  invalid_json: "error_hint.invalid_json",
+  invalid_request: "error_hint.invalid_request",
+  not_found: "error_hint.not_found",
+  unauthorized: "error_hint.unauthorized",
+  provider_not_configured: "error_hint.provider_not_configured",
+  provider_not_supported: "error_hint.provider_not_supported",
+  provider_request_failed: "error_hint.provider_request_failed",
+  provider_invalid_reply: "error_hint.provider_invalid_reply",
+  store_error: "error_hint.store_error",
 };
 
 export function setOutputJSONMode(enabled: boolean): void {
@@ -47,9 +49,10 @@ export function printError(err: unknown): void {
       });
       return;
     }
-    const hint = codeHints[err.code];
+    const hintKey = codeHintKeys[err.code];
     console.error(`[${err.code}] ${err.message}`);
-    if (hint) {
+    if (hintKey) {
+      const hint = t(hintKey);
       console.error(`hint: ${hint}`);
     }
     return;

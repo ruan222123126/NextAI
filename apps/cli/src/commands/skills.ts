@@ -1,9 +1,10 @@
 import { Command } from "commander";
 import { ApiClient } from "../client/api-client.js";
 import { printResult } from "../io/output.js";
+import { t } from "../i18n.js";
 
 export function registerSkillsCommand(program: Command, client: ApiClient): void {
-  const skills = program.command("skills").description("skills management");
+  const skills = program.command("skills").description(t("cli.command.skills"));
 
   skills.command("list").action(async () => {
     printResult(await client.get("/skills"));

@@ -1,9 +1,10 @@
 import { Command } from "commander";
 import { ApiClient } from "../client/api-client.js";
 import { printResult } from "../io/output.js";
+import { t } from "../i18n.js";
 
 export function registerCronCommand(program: Command, client: ApiClient): void {
-  const cron = program.command("cron").description("cron jobs");
+  const cron = program.command("cron").description(t("cli.command.cron"));
 
   cron.command("list").action(async () => {
     printResult(await client.get("/cron/jobs"));

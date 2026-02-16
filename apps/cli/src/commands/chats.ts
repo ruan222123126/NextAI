@@ -1,9 +1,10 @@
 import { Command } from "commander";
 import { ApiClient, ApiClientError } from "../client/api-client.js";
 import { printResult } from "../io/output.js";
+import { t } from "../i18n.js";
 
 export function registerChatsCommand(program: Command, client: ApiClient): void {
-  const chats = program.command("chats").description("chat management");
+  const chats = program.command("chats").description(t("cli.command.chats"));
 
   chats
     .command("list")
@@ -22,7 +23,7 @@ export function registerChatsCommand(program: Command, client: ApiClient): void 
     .requiredOption("--session-id <sid>")
     .requiredOption("--user-id <uid>")
     .option("--channel <channel>", "console")
-    .option("--name <name>", "New Chat")
+    .option("--name <name>", t("chats.default_name"))
     .action(async (opts: { sessionId: string; userId: string; channel: string; name: string }) => {
       const payload = {
         name: opts.name,

@@ -1,0 +1,27 @@
+import type { CliMessages } from "./zh-CN.js";
+
+export const enUS: CliMessages = {
+  "cli.program.description": "CoPaw Next CLI",
+  "cli.option.json": "Machine-readable JSON output (compact)",
+  "cli.option.locale": "Output locale (zh-CN|en-US)",
+  "cli.command.app": "Gateway app commands",
+  "cli.command.app.start": "Print startup connectivity hint",
+  "cli.command.chats": "Chat management",
+  "cli.command.cron": "Cron job management",
+  "cli.command.models": "Models/providers",
+  "cli.command.env": "Environment variables",
+  "cli.command.skills": "Skills management",
+  "cli.command.workspace": "Workspace operations",
+  "cli.command.channels": "Channel configs",
+  "chats.default_name": "New Chat",
+  "output.download_failed": "download failed: {{status}}",
+  "error_hint.invalid_json": "Request JSON is invalid. Check JSON argument payload.",
+  "error_hint.invalid_request": "Request fields are missing or invalid. Check required params.",
+  "error_hint.not_found": "Resource not found. Check ID or name.",
+  "error_hint.unauthorized": "Authorization failed. Check COPAW_API_KEY or Authorization header.",
+  "error_hint.provider_not_configured": "Provider is not configured. Run models config/active-set first.",
+  "error_hint.provider_not_supported": "Provider is not supported. Check provider_id.",
+  "error_hint.provider_request_failed": "Upstream provider request failed. Check API key/base URL/network.",
+  "error_hint.provider_invalid_reply": "Upstream reply format is invalid. Check model service response.",
+  "error_hint.store_error": "Gateway store write failed. Check COPAW_DATA_DIR permissions and disk status.",
+};

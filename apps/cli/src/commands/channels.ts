@@ -1,9 +1,10 @@
 import { Command } from "commander";
 import { ApiClient } from "../client/api-client.js";
 import { printResult } from "../io/output.js";
+import { t } from "../i18n.js";
 
 export function registerChannelsCommand(program: Command, client: ApiClient): void {
-  const channels = program.command("channels").description("channel configs");
+  const channels = program.command("channels").description(t("cli.command.channels"));
 
   channels.command("list").action(async () => {
     printResult(await client.get("/config/channels"));

@@ -131,4 +131,134 @@ describe("cli e2e", () => {
     expect(calls.some((v) => v.method === "PUT" && v.url.includes("/config/channels/console"))).toBe(true);
     expect(calls.some((v) => v.method === "POST" && v.url.endsWith("/cron/jobs"))).toBe(true);
   });
+
+  it("covers models alias/custom-provider config with chat chain", async () => {
+    const calls: Array<{ method: string; url: string; body: string }> = [];
+    const run = async (argv: string[]) =>
+      runCLI(argv, async (url, init) => {
+        const method = (init?.method ?? "GET").toUpperCase();
+        const body = typeof init?.body === "string" ? init.body : "";
+        calls.push({ method, url: String(url), body });
+        if (String(url).endsWith("/agent/process")) {
+          return new Response(JSON.stringify({ output: [{ role: "assistant", content: [{ type: "text", text: "ok" }] }] }), {
+            status: 200,
+          });
+        }
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      });
+
+    expect(
+      (
+        await run([
+          "models",
+          "config",
+          "openai",
+          "--api-key",
+          "sk-openai",
+          "--base-url",
+          "http://127.0.0.1:19001/v1",
+          "--enabled",
+          "true",
+          "--timeout-ms",
+          "32000",
+          "--header",
+          "X-Tenant:team-a",
+          "--model-alias",
+          "fast=gpt-4o-mini",
+          "--model-alias",
+          "reasoning=gpt-4.1-mini",
+        ])
+      ).exitCode,
+    ).toBe(0);
+    expect((await run(["models", "active-set", "--provider-id", "openai", "--model", "fast"])).exitCode).toBe(0);
+    expect(
+      (
+        await run([
+          "chats",
+          "send",
+          "--chat-session",
+          "s-alias",
+          "--user-id",
+          "u1",
+          "--channel",
+          "console",
+          "--message",
+          "hello alias",
+        ])
+      ).exitCode,
+    ).toBe(0);
+
+    expect(
+      (
+        await run([
+          "models",
+          "config",
+          "custom-openai",
+          "--api-key",
+          "sk-custom",
+          "--base-url",
+          "http://127.0.0.1:19002/v1",
+          "--enabled",
+          "true",
+          "--timeout-ms",
+          "15000",
+          "--header",
+          "X-Workspace:lab",
+        ])
+      ).exitCode,
+    ).toBe(0);
+    expect((await run(["models", "active-set", "--provider-id", "custom-openai", "--model", "my-custom-model"])).exitCode).toBe(0);
+    expect(
+      (
+        await run([
+          "chats",
+          "send",
+          "--chat-session",
+          "s-custom",
+          "--user-id",
+          "u1",
+          "--channel",
+          "console",
+          "--message",
+          "hello custom",
+        ])
+      ).exitCode,
+    ).toBe(0);
+
+    const openaiConfig = calls.find((call) => call.method === "PUT" && call.url.endsWith("/models/openai/config"));
+    expect(openaiConfig).toBeDefined();
+    const openaiConfigBody = JSON.parse(openaiConfig?.body ?? "{}");
+    expect(openaiConfigBody).toMatchObject({
+      api_key: "sk-openai",
+      base_url: "http://127.0.0.1:19001/v1",
+      enabled: true,
+      timeout_ms: 32000,
+      headers: { "X-Tenant": "team-a" },
+      model_aliases: {
+        fast: "gpt-4o-mini",
+        reasoning: "gpt-4.1-mini",
+      },
+    });
+
+    const customConfig = calls.find((call) => call.method === "PUT" && call.url.endsWith("/models/custom-openai/config"));
+    expect(customConfig).toBeDefined();
+    const customConfigBody = JSON.parse(customConfig?.body ?? "{}");
+    expect(customConfigBody).toMatchObject({
+      api_key: "sk-custom",
+      base_url: "http://127.0.0.1:19002/v1",
+      enabled: true,
+      timeout_ms: 15000,
+      headers: { "X-Workspace": "lab" },
+    });
+
+    const activeCalls = calls.filter((call) => call.method === "PUT" && call.url.endsWith("/models/active"));
+    expect(activeCalls).toHaveLength(2);
+    expect(JSON.parse(activeCalls[0]?.body ?? "{}")).toMatchObject({ provider_id: "openai", model: "fast" });
+    expect(JSON.parse(activeCalls[1]?.body ?? "{}")).toMatchObject({ provider_id: "custom-openai", model: "my-custom-model" });
+
+    const processCalls = calls.filter((call) => call.method === "POST" && call.url.endsWith("/agent/process"));
+    expect(processCalls).toHaveLength(2);
+    expect(JSON.parse(processCalls[0]?.body ?? "{}")).toMatchObject({ session_id: "s-alias", user_id: "u1", channel: "console" });
+    expect(JSON.parse(processCalls[1]?.body ?? "{}")).toMatchObject({ session_id: "s-custom", user_id: "u1", channel: "console" });
+  });
 });

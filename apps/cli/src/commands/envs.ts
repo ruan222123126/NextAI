@@ -1,9 +1,10 @@
 import { Command } from "commander";
 import { ApiClient } from "../client/api-client.js";
 import { printResult } from "../io/output.js";
+import { t } from "../i18n.js";
 
 export function registerEnvsCommand(program: Command, client: ApiClient): void {
-  const env = program.command("env").description("environment variables");
+  const env = program.command("env").description(t("cli.command.env"));
 
   env.command("list").action(async () => {
     printResult(await client.get("/envs"));
