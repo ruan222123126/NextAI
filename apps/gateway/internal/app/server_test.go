@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -36,6 +38,21 @@ func newTestServerWithDataDir(t *testing.T, dataDir string) *Server {
 	}
 	t.Cleanup(func() { srv.Close() })
 	return srv
+}
+
+func newToolTestPath(t *testing.T, prefix string) (string, string) {
+	t.Helper()
+	repoRoot, err := findRepoRoot()
+	if err != nil {
+		t.Fatalf("find repo root failed: %v", err)
+	}
+	rel := filepath.ToSlash(filepath.Join("apps/gateway/.data/tool-tests", fmt.Sprintf("%s-%d.txt", prefix, time.Now().UnixNano())))
+	abs := filepath.Join(repoRoot, filepath.FromSlash(rel))
+	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
+		t.Fatalf("mkdir test path failed: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Remove(abs) })
+	return rel, abs
 }
 
 func TestHealthz(t *testing.T) {
@@ -225,10 +242,10 @@ func TestProcessAgentRejectsUnknownTool(t *testing.T) {
 	}`
 	w := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/agent/process", strings.NewReader(procReq)))
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("expected 400, got=%d body=%s", w.Code, w.Body.String())
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got=%d body=%s", w.Code, w.Body.String())
 	}
-	if !strings.Contains(w.Body.String(), `"code":"tool_not_supported"`) {
+	if !strings.Contains(w.Body.String(), `"code":"tool_not_found"`) {
 		t.Fatalf("unexpected body: %s", w.Body.String())
 	}
 }
@@ -272,6 +289,271 @@ func TestProcessAgentRejectsShellToolWithoutCommand(t *testing.T) {
 		t.Fatalf("expected 400, got=%d body=%s", w.Code, w.Body.String())
 	}
 	if !strings.Contains(w.Body.String(), `"code":"invalid_tool_input"`) {
+		t.Fatalf("unexpected body: %s", w.Body.String())
+	}
+}
+
+func TestProcessAgentReadFileTool(t *testing.T) {
+	srv := newTestServer(t)
+	rel, abs := newToolTestPath(t, "read")
+	if err := os.WriteFile(abs, []byte("hello from read_file"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	procReq := fmt.Sprintf(`{
+		"input":[{"role":"user","type":"message","content":[{"type":"text","text":"read file"}]}],
+		"session_id":"s-read-file",
+		"user_id":"u-read-file",
+		"channel":"console",
+		"stream":false,
+		"biz_params":{"tool":{"name":"read_file","input":{"path":%q}}}
+	}`, rel)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/agent/process", strings.NewReader(procReq)))
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got=%d body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "hello from read_file") {
+		t.Fatalf("expected file content in reply body, got=%s", w.Body.String())
+	}
+}
+
+func TestProcessAgentCreateFileToolConflict(t *testing.T) {
+	srv := newTestServer(t)
+	rel, abs := newToolTestPath(t, "create")
+	_ = os.Remove(abs)
+
+	procReq := fmt.Sprintf(`{
+		"input":[{"role":"user","type":"message","content":[{"type":"text","text":"create file"}]}],
+		"session_id":"s-create-file",
+		"user_id":"u-create-file",
+		"channel":"console",
+		"stream":false,
+		"biz_params":{"tool":{"name":"create_file","input":{"path":%q,"content":"first"}}}
+	}`, rel)
+	w1 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w1, httptest.NewRequest(http.MethodPost, "/agent/process", strings.NewReader(procReq)))
+	if w1.Code != http.StatusOK {
+		t.Fatalf("expected first create 200, got=%d body=%s", w1.Code, w1.Body.String())
+	}
+	data, err := os.ReadFile(abs)
+	if err != nil {
+		t.Fatalf("read created file failed: %v", err)
+	}
+	if string(data) != "first" {
+		t.Fatalf("unexpected created file content: %q", string(data))
+	}
+
+	w2 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w2, httptest.NewRequest(http.MethodPost, "/agent/process", strings.NewReader(procReq)))
+	if w2.Code != http.StatusConflict {
+		t.Fatalf("expected second create 409, got=%d body=%s", w2.Code, w2.Body.String())
+	}
+	if !strings.Contains(w2.Body.String(), `"code":"tool_conflict"`) {
+		t.Fatalf("unexpected body: %s", w2.Body.String())
+	}
+}
+
+func TestProcessAgentUpdateFileToolModesAndMissing(t *testing.T) {
+	srv := newTestServer(t)
+	rel, abs := newToolTestPath(t, "update")
+	if err := os.WriteFile(abs, []byte("old"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	overwriteReq := fmt.Sprintf(`{
+		"input":[{"role":"user","type":"message","content":[{"type":"text","text":"update overwrite"}]}],
+		"session_id":"s-update-file",
+		"user_id":"u-update-file",
+		"channel":"console",
+		"stream":false,
+		"biz_params":{"tool":{"name":"update_file","input":{"path":%q,"content":"new","mode":"overwrite"}}}
+	}`, rel)
+	w1 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w1, httptest.NewRequest(http.MethodPost, "/agent/process", strings.NewReader(overwriteReq)))
+	if w1.Code != http.StatusOK {
+		t.Fatalf("expected overwrite 200, got=%d body=%s", w1.Code, w1.Body.String())
+	}
+	updated, err := os.ReadFile(abs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(updated) != "new" {
+		t.Fatalf("unexpected overwrite content: %q", string(updated))
+	}
+
+	appendReq := fmt.Sprintf(`{
+		"input":[{"role":"user","type":"message","content":[{"type":"text","text":"update append"}]}],
+		"session_id":"s-update-file",
+		"user_id":"u-update-file",
+		"channel":"console",
+		"stream":false,
+		"biz_params":{"tool":{"name":"update_file","input":{"path":%q,"content":"-tail","mode":"append"}}}
+	}`, rel)
+	w2 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w2, httptest.NewRequest(http.MethodPost, "/agent/process", strings.NewReader(appendReq)))
+	if w2.Code != http.StatusOK {
+		t.Fatalf("expected append 200, got=%d body=%s", w2.Code, w2.Body.String())
+	}
+	updated, err = os.ReadFile(abs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(updated) != "new-tail" {
+		t.Fatalf("unexpected append content: %q", string(updated))
+	}
+
+	missingRel, missingAbs := newToolTestPath(t, "missing")
+	_ = os.Remove(missingAbs)
+	missingReq := fmt.Sprintf(`{
+		"input":[{"role":"user","type":"message","content":[{"type":"text","text":"update missing"}]}],
+		"session_id":"s-update-missing",
+		"user_id":"u-update-missing",
+		"channel":"console",
+		"stream":false,
+		"biz_params":{"tool":{"name":"update_file","input":{"path":%q,"content":"x","mode":"overwrite"}}}
+	}`, missingRel)
+	w3 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w3, httptest.NewRequest(http.MethodPost, "/agent/process", strings.NewReader(missingReq)))
+	if w3.Code != http.StatusNotFound {
+		t.Fatalf("expected missing file 404, got=%d body=%s", w3.Code, w3.Body.String())
+	}
+	if !strings.Contains(w3.Body.String(), `"code":"tool_not_found"`) {
+		t.Fatalf("unexpected body: %s", w3.Body.String())
+	}
+}
+
+func TestProcessAgentRejectsForbiddenToolPath(t *testing.T) {
+	srv := newTestServer(t)
+
+	procReq := `{
+		"input":[{"role":"user","type":"message","content":[{"type":"text","text":"forbidden path"}]}],
+		"session_id":"s-forbidden",
+		"user_id":"u-forbidden",
+		"channel":"console",
+		"stream":false,
+		"biz_params":{"tool":{"name":"read_file","input":{"path":"../AGENTS.md"}}}
+	}`
+	w1 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w1, httptest.NewRequest(http.MethodPost, "/agent/process", strings.NewReader(procReq)))
+	if w1.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 for ../ path, got=%d body=%s", w1.Code, w1.Body.String())
+	}
+	if !strings.Contains(w1.Body.String(), `"code":"tool_forbidden_path"`) {
+		t.Fatalf("unexpected body for ../ path: %s", w1.Body.String())
+	}
+
+	absReq := `{
+		"input":[{"role":"user","type":"message","content":[{"type":"text","text":"absolute path"}]}],
+		"session_id":"s-forbidden-abs",
+		"user_id":"u-forbidden-abs",
+		"channel":"console",
+		"stream":false,
+		"biz_params":{"tool":{"name":"read_file","input":{"path":"/tmp/any.txt"}}}
+	}`
+	w2 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w2, httptest.NewRequest(http.MethodPost, "/agent/process", strings.NewReader(absReq)))
+	if w2.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 for absolute path, got=%d body=%s", w2.Code, w2.Body.String())
+	}
+	if !strings.Contains(w2.Body.String(), `"code":"tool_forbidden_path"`) {
+		t.Fatalf("unexpected body for absolute path: %s", w2.Body.String())
+	}
+}
+
+func TestProcessAgentInjectsAIToolsGuide(t *testing.T) {
+	type message struct {
+		Role    string `json:"role"`
+		Content string `json:"content"`
+	}
+	payloadCh := make(chan []message, 1)
+
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Messages []message `json:"messages"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode provider body failed: %v", err)
+		}
+		payloadCh <- body.Messages
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"provider reply with guide"}}]}`))
+	}))
+	defer mock.Close()
+
+	srv := newTestServer(t)
+
+	configProvider := `{"api_key":"sk-test","base_url":"` + mock.URL + `"}`
+	w1 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w1, httptest.NewRequest(http.MethodPut, "/models/openai/config", strings.NewReader(configProvider)))
+	if w1.Code != http.StatusOK {
+		t.Fatalf("config provider status=%d body=%s", w1.Code, w1.Body.String())
+	}
+	setActive := `{"provider_id":"openai","model":"gpt-4o-mini"}`
+	w2 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w2, httptest.NewRequest(http.MethodPut, "/models/active", strings.NewReader(setActive)))
+	if w2.Code != http.StatusOK {
+		t.Fatalf("set active status=%d body=%s", w2.Code, w2.Body.String())
+	}
+
+	procReq := `{"input":[{"role":"user","type":"message","content":[{"type":"text","text":"hello with guide"}]}],"session_id":"s-guide","user_id":"u-guide","channel":"console","stream":false}`
+	w3 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w3, httptest.NewRequest(http.MethodPost, "/agent/process", strings.NewReader(procReq)))
+	if w3.Code != http.StatusOK {
+		t.Fatalf("process status=%d body=%s", w3.Code, w3.Body.String())
+	}
+
+	var messages []message
+	select {
+	case messages = <-payloadCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("provider did not receive request payload")
+	}
+	if len(messages) == 0 {
+		t.Fatalf("expected provider messages, got empty")
+	}
+	if messages[0].Role != "system" {
+		t.Fatalf("expected first message role=system, got=%q", messages[0].Role)
+	}
+	if !strings.Contains(messages[0].Content, "read_file") || !strings.Contains(messages[0].Content, "create_file") {
+		t.Fatalf("system guide message does not contain tool docs: %q", messages[0].Content)
+	}
+
+	var storedHistory []domain.RuntimeMessage
+	srv.store.Read(func(st *repo.State) {
+		for chatID, c := range st.Chats {
+			if c.SessionID == "s-guide" && c.UserID == "u-guide" && c.Channel == "console" {
+				storedHistory = append(storedHistory, st.Histories[chatID]...)
+				return
+			}
+		}
+	})
+	for _, msg := range storedHistory {
+		if strings.EqualFold(msg.Role, "system") {
+			t.Fatalf("system guide should not be persisted into chat history")
+		}
+	}
+}
+
+func TestProcessAgentFailsWhenAIToolsGuideUnavailable(t *testing.T) {
+	srv := newTestServer(t)
+
+	originalWD, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tempDir := t.TempDir()
+	if err := os.Chdir(tempDir); err != nil {
+		t.Fatalf("chdir temp dir failed: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(originalWD) })
+
+	procReq := `{"input":[{"role":"user","type":"message","content":[{"type":"text","text":"hello"}]}],"session_id":"s-missing-guide","user_id":"u-missing-guide","channel":"console","stream":false}`
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/agent/process", strings.NewReader(procReq)))
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got=%d body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"code":"ai_tool_guide_unavailable"`) {
 		t.Fatalf("unexpected body: %s", w.Body.String())
 	}
 }

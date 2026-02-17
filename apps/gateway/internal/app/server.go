@@ -44,6 +44,8 @@ const (
 	cronStatusFailed    = "failed"
 
 	cronLeaseDirName = "cron-leases"
+
+	aiToolsGuideRelativePath = "docs/ai-tools.md"
 )
 
 var errCronJobNotFound = errors.New("cron_job_not_found")
@@ -81,6 +83,9 @@ func NewServer(cfg config.Config) (*Server, error) {
 	srv.registerChannelPlugin(channel.NewConsoleChannel())
 	srv.registerChannelPlugin(channel.NewWebhookChannel())
 	srv.registerToolPlugin(plugin.NewShellTool())
+	srv.registerToolPlugin(plugin.NewFileReadTool())
+	srv.registerToolPlugin(plugin.NewFileCreateTool())
+	srv.registerToolPlugin(plugin.NewFileUpdateTool())
 	srv.startCronScheduler()
 	return srv, nil
 }
@@ -473,6 +478,12 @@ func (s *Server) processAgent(w http.ResponseWriter, r *http.Request) {
 	}
 	req.Channel = channelName
 
+	aiToolsGuide, err := loadAIToolsGuide()
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "ai_tool_guide_unavailable", "ai tools guide is unavailable", nil)
+		return
+	}
+
 	chatID := ""
 	activeLLM := domain.ModelSlotConfig{}
 	providerSetting := repo.ProviderSetting{}
@@ -509,7 +520,7 @@ func (s *Server) processAgent(w http.ResponseWriter, r *http.Request) {
 	}
 	toolCall, hasToolCall, err := parseToolCall(req.BizParams)
 	if err != nil {
-		writeErr(w, http.StatusBadRequest, "invalid_tool_request", err.Error(), nil)
+		writeErr(w, http.StatusBadRequest, "invalid_tool_input", err.Error(), nil)
 		return
 	}
 
@@ -551,7 +562,9 @@ func (s *Server) processAgent(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		reply, err = s.runner.GenerateReply(r.Context(), req, generateConfig)
+		effectiveReq := req
+		effectiveReq.Input = prependAIToolsGuide(req.Input, aiToolsGuide)
+		reply, err = s.runner.GenerateReply(r.Context(), effectiveReq, generateConfig)
 		if err != nil {
 			status, code, message := mapRunnerError(err)
 			writeErr(w, status, code, message, nil)
@@ -740,8 +753,8 @@ func (s *Server) executeToolCall(call toolCall) (string, error) {
 	plug, ok := s.tools[call.Name]
 	if !ok {
 		return "", &toolError{
-			Code:    "tool_not_supported",
-			Message: fmt.Sprintf("tool %q is not supported", call.Name),
+			Code:    "tool_not_found",
+			Message: fmt.Sprintf("tool %q not found", call.Name),
 		}
 	}
 
@@ -2609,19 +2622,35 @@ func mapToolError(err error) (status int, code string, message string) {
 	var te *toolError
 	if errors.As(err, &te) {
 		switch te.Code {
-		case "tool_not_supported":
-			return http.StatusBadRequest, te.Code, te.Message
+		case "tool_not_found":
+			return http.StatusNotFound, te.Code, te.Message
 		case "tool_invoke_failed":
 			switch {
 			case errors.Is(te.Err, plugin.ErrShellToolDisabled):
 				return http.StatusForbidden, "tool_disabled", "tool is disabled by server config"
 			case errors.Is(te.Err, plugin.ErrShellToolCommandMissing):
 				return http.StatusBadRequest, "invalid_tool_input", "tool input command is required"
+			case errors.Is(te.Err, plugin.ErrFilePathRequired):
+				return http.StatusBadRequest, "invalid_tool_input", "tool input path is required"
+			case errors.Is(te.Err, plugin.ErrFileContentType):
+				return http.StatusBadRequest, "invalid_tool_input", "tool input content must be a string"
+			case errors.Is(te.Err, plugin.ErrFileModeInvalid):
+				return http.StatusBadRequest, "invalid_tool_input", "tool input mode must be overwrite or append"
+			case errors.Is(te.Err, plugin.ErrInvalidPath):
+				return http.StatusBadRequest, "invalid_tool_input", "tool path is invalid"
+			case errors.Is(te.Err, plugin.ErrForbiddenPath):
+				return http.StatusForbidden, "tool_forbidden_path", "tool path must stay inside repository root"
+			case errors.Is(te.Err, plugin.ErrFileExists):
+				return http.StatusConflict, "tool_conflict", "target file already exists"
+			case errors.Is(te.Err, plugin.ErrFileNotFound):
+				return http.StatusNotFound, "tool_not_found", "target file not found"
+			case errors.Is(te.Err, plugin.ErrRepoRootNotFound):
+				return http.StatusInternalServerError, "tool_error", "repository root not found"
 			default:
-				return http.StatusBadGateway, te.Code, te.Message
+				return http.StatusInternalServerError, "tool_error", te.Message
 			}
 		case "tool_invalid_result":
-			return http.StatusBadGateway, te.Code, te.Message
+			return http.StatusInternalServerError, "tool_error", "tool returned invalid result"
 		default:
 			return http.StatusInternalServerError, "tool_error", "tool execution failed"
 		}
@@ -2789,6 +2818,55 @@ func findProviderSettingByID(st *repo.State, providerID string) (repo.ProviderSe
 		}
 	}
 	return repo.ProviderSetting{}, false
+}
+
+func prependAIToolsGuide(input []domain.AgentInputMessage, guide string) []domain.AgentInputMessage {
+	effective := make([]domain.AgentInputMessage, 0, len(input)+1)
+	effective = append(effective, domain.AgentInputMessage{
+		Role: "system",
+		Type: "message",
+		Content: []domain.RuntimeContent{
+			{Type: "text", Text: guide},
+		},
+	})
+	effective = append(effective, input...)
+	return effective
+}
+
+func loadAIToolsGuide() (string, error) {
+	repoRoot, err := findRepoRoot()
+	if err != nil {
+		return "", err
+	}
+	guidePath := filepath.Join(repoRoot, aiToolsGuideRelativePath)
+	content, err := os.ReadFile(guidePath)
+	if err != nil {
+		return "", err
+	}
+	trimmed := strings.TrimSpace(string(content))
+	if trimmed == "" {
+		return "", errors.New("ai tools guide is empty")
+	}
+	return trimmed, nil
+}
+
+func findRepoRoot() (string, error) {
+	wd, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+	current := wd
+	for {
+		gitPath := filepath.Join(current, ".git")
+		if info, statErr := os.Stat(gitPath); statErr == nil && info.IsDir() {
+			return current, nil
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return "", errors.New("repository root not found")
+		}
+		current = parent
+	}
 }
 
 func writeJSON(w http.ResponseWriter, code int, data interface{}) {

@@ -457,8 +457,47 @@ components:
         stream: { type: boolean }
         biz_params:
           type: object
+          description: Business extension params. Tool calls are sent via biz_params.tool.
           additionalProperties: true
+          properties:
+            tool:
+              $ref: '#/components/schemas/AgentToolCall'
       required: [input, session_id, user_id, channel, stream]
+    AgentToolCall:
+      type: object
+      properties:
+        name:
+          type: string
+          enum: [read_file, create_file, update_file, shell]
+          description: Tool name.
+        input:
+          type: object
+          additionalProperties: true
+          description: |
+            Tool input object by name:
+            - read_file: {"path":"relative/path.txt"}
+            - create_file: {"path":"relative/path.txt","content":"..."}
+            - update_file: {"path":"relative/path.txt","content":"...","mode":"overwrite|append"}
+            - shell: {"command":"...","cwd":"...","timeout_seconds":20}
+          examples:
+            read_file:
+              value:
+                path: docs/contracts.md
+            create_file:
+              value:
+                path: docs/notes.md
+                content: hello
+            update_file:
+              value:
+                path: docs/notes.md
+                content: world
+                mode: append
+            shell:
+              value:
+                command: ls -la
+                cwd: apps/gateway
+                timeout_seconds: 20
+      required: [name, input]
     CronJobSpec:
       type: object
       properties:
