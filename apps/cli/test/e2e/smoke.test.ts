@@ -13,12 +13,13 @@ import { registerEnvsCommand } from "../../src/commands/envs.js";
 import { registerSkillsCommand } from "../../src/commands/skills.js";
 import { registerWorkspaceCommand } from "../../src/commands/workspace.js";
 import { registerChannelsCommand } from "../../src/commands/channels.js";
+import { registerTUICommand, type StartTUIFn } from "../../src/commands/tui.js";
 import { printError, setOutputJSONMode } from "../../src/io/output.js";
 
-function buildProgram(client: ApiClient): Command {
+function buildProgram(client: ApiClient, startTUI?: StartTUIFn): Command {
   const program = new Command();
   program.exitOverride();
-  program.name("copaw").option("--json");
+  program.name("nextai").option("--json");
   program.hook("preAction", (thisCommand) => {
     setOutputJSONMode(Boolean(thisCommand.optsWithGlobals().json));
   });
@@ -31,10 +32,17 @@ function buildProgram(client: ApiClient): Command {
   registerSkillsCommand(program, client);
   registerWorkspaceCommand(program, client);
   registerChannelsCommand(program, client);
+  registerTUICommand(program, client, {
+    start: startTUI ?? (async () => {}),
+  });
   return program;
 }
 
-async function runCLI(argv: string[], fetchImpl: (url: string, init?: RequestInit) => Promise<Response>) {
+async function runCLI(
+  argv: string[],
+  fetchImpl: (url: string, init?: RequestInit) => Promise<Response>,
+  options?: { startTUI?: StartTUIFn },
+) {
   vi.stubGlobal("fetch", vi.fn(fetchImpl));
   setOutputJSONMode(false);
 
@@ -48,10 +56,10 @@ async function runCLI(argv: string[], fetchImpl: (url: string, init?: RequestIni
   });
 
   const client = new ApiClient("http://127.0.0.1:8088");
-  const program = buildProgram(client);
+  const program = buildProgram(client, options?.startTUI);
   let exitCode = 0;
   try {
-    await program.parseAsync(["node", "copaw", ...argv]);
+    await program.parseAsync(["node", "nextai", ...argv]);
   } catch (err) {
     exitCode = 1;
     printError(err);
@@ -123,7 +131,7 @@ describe("cli e2e", () => {
         return new Response(JSON.stringify({ ok: true }), { status: 200 });
       });
 
-    const outDir = await mkdtemp(join(tmpdir(), "copaw-cli-e2e-"));
+    const outDir = await mkdtemp(join(tmpdir(), "nextai-cli-e2e-"));
     const outFile = join(outDir, "workspace.json");
     try {
       expect((await run(["app", "start"])).exitCode).toBe(0);
@@ -311,7 +319,7 @@ describe("cli e2e", () => {
   });
 
   it("workspace export uses default workspace.json when --out omitted", async () => {
-    const tempDir = await mkdtemp(join(tmpdir(), "copaw-cli-e2e-export-default-"));
+    const tempDir = await mkdtemp(join(tmpdir(), "nextai-cli-e2e-export-default-"));
     const previousCwd = process.cwd();
     try {
       process.chdir(tempDir);
@@ -352,7 +360,7 @@ describe("cli e2e", () => {
   });
 
   it("workspace import defaults mode to replace when input json omits mode", async () => {
-    const tempDir = await mkdtemp(join(tmpdir(), "copaw-cli-e2e-import-default-"));
+    const tempDir = await mkdtemp(join(tmpdir(), "nextai-cli-e2e-import-default-"));
     try {
       const inputFile = join(tempDir, "workspace-import.json");
       const input = {
@@ -401,5 +409,26 @@ describe("cli e2e", () => {
     expect(result.errors[0]).toContain("--body");
     expect(result.errors[0]).toContain("--file");
     expect(fetchCalled).toBe(false);
+  });
+
+  it("starts tui command with runtime options", async () => {
+    const startTUI = vi.fn(async () => {});
+    const result = await runCLI(
+      ["tui", "--session-id", "s-tui", "--user-id", "u-tui", "--channel", "console", "--api-base", "http://127.0.0.1:8088"],
+      async () => new Response(JSON.stringify({ ok: true }), { status: 200 }),
+      { startTUI },
+    );
+
+    expect(result.exitCode).toBe(0);
+    expect(startTUI).toHaveBeenCalledTimes(1);
+    const call = startTUI.mock.calls[0]?.[0] as {
+      bootstrap?: { sessionID?: string; userID?: string; channel?: string; apiBase?: string };
+    };
+    expect(call.bootstrap).toMatchObject({
+      sessionID: "s-tui",
+      userID: "u-tui",
+      channel: "console",
+      apiBase: "http://127.0.0.1:8088",
+    });
   });
 });
