@@ -23,6 +23,14 @@ export class ApiClientError extends Error {
   }
 }
 
+export interface ApiClientInit {
+  base?: string;
+  apiKey?: string;
+}
+
+const REQUEST_SOURCE_HEADER = "X-NextAI-Source";
+const REQUEST_SOURCE_CLI = "cli";
+
 function parseResponsePayload(text: string): unknown {
   try {
     return text ? JSON.parse(text) : {};
@@ -45,20 +53,57 @@ function toClientError(status: number, payload: unknown, fallbackMessage: string
 }
 
 export class ApiClient {
-  private readonly base: string;
+  private base: string;
+  private apiKey: string;
 
-  constructor(base?: string) {
-    this.base = (base ?? process.env.COPAW_API_BASE ?? "http://127.0.0.1:8088").replace(/\/$/, "");
+  constructor(input?: string | ApiClientInit) {
+    const init = typeof input === "string" ? { base: input } : input;
+    this.base = (init?.base ?? process.env.NEXTAI_API_BASE ?? "http://127.0.0.1:8088").replace(/\/$/, "");
+    this.apiKey = (init?.apiKey ?? process.env.NEXTAI_API_KEY ?? "").trim();
+  }
+
+  setBaseURL(base: string): void {
+    const normalized = base.trim().replace(/\/$/, "");
+    if (normalized) {
+      this.base = normalized;
+    }
+  }
+
+  getBaseURL(): string {
+    return this.base;
+  }
+
+  setAPIKey(apiKey?: string): void {
+    this.apiKey = (apiKey ?? "").trim();
+  }
+
+  getAPIKey(): string {
+    return this.apiKey;
+  }
+
+  buildRequest(path: string, init?: RequestInit): { url: string; init: RequestInit } {
+    const headers = new Headers(init?.headers ?? {});
+    if (!headers.has("content-type")) {
+      headers.set("content-type", "application/json");
+    }
+    if (!headers.has(REQUEST_SOURCE_HEADER)) {
+      headers.set(REQUEST_SOURCE_HEADER, REQUEST_SOURCE_CLI);
+    }
+    if (this.apiKey !== "" && !headers.has("X-API-Key")) {
+      headers.set("X-API-Key", this.apiKey);
+    }
+    return {
+      url: `${this.base}${path}`,
+      init: {
+        ...init,
+        headers,
+      },
+    };
   }
 
   async request<T>(path: string, init?: RequestInit): Promise<T> {
-    const res = await fetch(`${this.base}${path}`, {
-      ...init,
-      headers: {
-        "content-type": "application/json",
-        ...(init?.headers ?? {}),
-      },
-    });
+    const request = this.buildRequest(path, init);
+    const res = await fetch(request.url, request.init);
 
     const text = await res.text();
     const data = parseResponsePayload(text);
