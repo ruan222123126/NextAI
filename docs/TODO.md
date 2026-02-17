@@ -1,6 +1,6 @@
 # NextAI TODO
 
-更新时间：2026-02-17 19:04:43 +0800
+更新时间：2026-02-17 19:12:41 +0800
 
 ## 执行约定（强制）
 - 每位接手 AI 开始前，必须先阅读本文件与 `/home/ruan/.codex/handoff/latest.md`。
@@ -29,6 +29,8 @@
 - [x] `docs/v1-roadmap.md`、`docs/contracts.md`、本地开发文档、部署文档与发布模板已完成。
 
 ## 6. 实操验证（汇总）
+- [x] 2026-02-17 19:12 +0800 发布阻塞修复：`apps/web/test/e2e/web-active-model-chat-flow.test.ts` 在“新增 openai-compatible provider”用例中新增前置等待（确保已有 provider 已渲染），消除 CI 时序抖动导致的偶发错误断言。
+- [x] 2026-02-17 19:12 +0800 发布前全量校验通过：执行 `cd apps/gateway && go test ./...`、`pnpm -r test`、`pnpm -r build` 全部通过（含 web e2e/cli/smoke/contract）。
 - [x] 2026-02-17 19:04 +0800 Skill 位置调整：按用户要求将上网搜索 skill 从 `~/.codex/skills/news` 移动到仓库目录 `docs/AI/news/SKILL.md`。
 - [x] 2026-02-17 19:04 +0800 验证通过：`ls -la /mnt/Files/NextAI/docs/AI/news` 显示 `SKILL.md` 存在，且 `test ! -e /home/ruan/.codex/skills/news` 校验源路径已移除。
 - [x] 2026-02-17 19:02 +0800 Skill 迁移：已将 `/mnt/Files/copaw-local/copaw/agents/skills/news/SKILL.md` 迁入本机 `~/.codex/skills/news/SKILL.md`，用于上网新闻检索场景。
