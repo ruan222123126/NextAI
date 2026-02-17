@@ -1,9 +1,9 @@
 <!doctype html>
-<html lang="en">
+<html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>CoPaw Next Chat Console</title>
+    <title>CoPaw Next 控制台</title>
     <link rel="stylesheet" href="./styles.css" />
   </head>
   <body>
@@ -13,53 +13,262 @@
       <header class="topbar">
         <div class="title-block">
           <p class="kicker">CoPaw Next</p>
-          <h1>Chat Console</h1>
+          <h1 data-i18n="app.console">控制台</h1>
         </div>
         <div class="controls">
           <label>
-            API Base
+            <span data-i18n="control.apiBase">API 地址</span>
             <input id="api-base" type="url" placeholder="http://127.0.0.1:8088" />
           </label>
           <label>
-            User ID
+            <span data-i18n="control.userId">用户 ID</span>
             <input id="user-id" type="text" placeholder="demo-user" />
           </label>
           <label>
-            Channel
+            <span data-i18n="control.channel">渠道</span>
             <input id="channel" type="text" placeholder="console" />
           </label>
-          <button id="reload-chats" type="button">Reload Chats</button>
+          <label>
+            <span data-i18n="control.locale">语言</span>
+            <select id="locale-select">
+              <option value="zh-CN" data-i18n="locale.zhCN">中文</option>
+              <option value="en-US" data-i18n="locale.enUS">English</option>
+            </select>
+          </label>
+          <button id="reload-chats" type="button" data-i18n="control.reloadChats">刷新会话</button>
         </div>
       </header>
 
-      <main class="layout">
-        <aside class="sidebar panel">
+      <nav class="tab-strip panel" aria-label="控制台标签页" data-i18n-aria-label="tab.ariaLabel">
+        <button class="tab-btn active" data-tab="chat" type="button" data-i18n="tab.chat">聊天</button>
+        <button class="tab-btn" data-tab="models" type="button" data-i18n="tab.models">模型</button>
+        <button class="tab-btn" data-tab="envs" type="button" data-i18n="tab.envs">环境变量</button>
+        <button class="tab-btn" data-tab="skills" type="button" data-i18n="tab.skills">技能</button>
+        <button class="tab-btn" data-tab="workspace" type="button" data-i18n="tab.workspace">工作区</button>
+        <button class="tab-btn" data-tab="cron" type="button" data-i18n="tab.cron">定时任务</button>
+      </nav>
+
+      <div class="panel panel-status">
+        <span id="status-line" class="status-line">就绪</span>
+      </div>
+
+      <main>
+        <section id="panel-chat" class="tab-panel is-active">
+          <div class="chat-layout">
+            <aside class="sidebar panel">
+              <div class="panel-head">
+                <h2 data-i18n="chat.sidebarTitle">会话</h2>
+                <button id="new-chat" type="button" data-i18n="chat.new">新建会话</button>
+              </div>
+              <ul id="chat-list" class="chat-list"></ul>
+            </aside>
+
+            <section class="chat panel">
+              <div class="panel-head chat-head">
+                <h2 id="chat-title">草稿会话</h2>
+                <span id="chat-session" class="session-badge"></span>
+              </div>
+
+              <ul id="message-list" class="messages"></ul>
+
+              <form id="composer" class="composer">
+                <textarea
+                  id="message-input"
+                  rows="3"
+                  placeholder="输入消息，流式调用 /agent/process 获取回复"
+                  data-i18n-placeholder="chat.inputPlaceholder"
+                ></textarea>
+                <div class="composer-actions">
+                  <button id="send-btn" type="submit" data-i18n="chat.send">发送（SSE）</button>
+                </div>
+              </form>
+            </section>
+          </div>
+        </section>
+
+        <section id="panel-models" class="tab-panel panel stack-panel">
           <div class="panel-head">
-            <h2>Sessions</h2>
-            <button id="new-chat" type="button">New Session</button>
+            <h2 data-i18n="models.title">模型</h2>
+            <button id="refresh-models" type="button" data-i18n="common.refresh">刷新</button>
           </div>
-          <ul id="chat-list" class="chat-list"></ul>
-        </aside>
+          <div class="panel-body split-grid">
+            <section class="subpanel">
+              <h3 data-i18n="models.providers">提供商</h3>
+              <ul id="models-provider-list" class="detail-list"></ul>
+            </section>
 
-        <section class="chat panel">
-          <div class="panel-head chat-head">
-            <h2 id="chat-title">Draft Session</h2>
-            <span id="chat-session" class="session-badge"></span>
+            <section class="subpanel">
+              <h3 data-i18n="models.activeModel">当前激活模型</h3>
+              <p id="models-active-text" class="mono">-</p>
+              <form id="models-active-form" class="stack-form">
+                <label>
+                  <span data-i18n="models.provider">提供商</span>
+                  <select id="models-provider-select"></select>
+                </label>
+                <label>
+                  <span data-i18n="models.modelFromProvider">模型（来自提供商）</span>
+                  <select id="models-model-select"></select>
+                </label>
+                <label>
+                  <span data-i18n="models.modelManual">模型（手动覆盖）</span>
+                  <input id="models-model-input" type="text" placeholder="可选模型 ID" data-i18n-placeholder="models.modelManualPlaceholder" />
+                </label>
+                <button type="submit" data-i18n="models.setActive">设为激活</button>
+              </form>
+            </section>
           </div>
+        </section>
 
-          <ul id="message-list" class="messages"></ul>
+        <section id="panel-envs" class="tab-panel panel stack-panel">
+          <div class="panel-head">
+            <h2 data-i18n="env.title">环境变量</h2>
+            <button id="refresh-envs" type="button" data-i18n="common.refresh">刷新</button>
+          </div>
+          <div class="panel-body split-grid">
+            <section class="subpanel">
+              <h3 data-i18n="env.current">当前环境变量</h3>
+              <div class="table-wrap">
+                <table class="data-table">
+                  <thead>
+                    <tr>
+                      <th data-i18n="env.key">键</th>
+                      <th data-i18n="env.value">值</th>
+                      <th data-i18n="env.action">操作</th>
+                    </tr>
+                  </thead>
+                  <tbody id="envs-table-body"></tbody>
+                </table>
+              </div>
+            </section>
 
-          <form id="composer" class="composer">
-            <textarea
-              id="message-input"
-              rows="3"
-              placeholder="Type a message and stream reply from /agent/process"
-            ></textarea>
-            <div class="composer-actions">
-              <span id="status-line" class="status-line">Ready</span>
-              <button id="send-btn" type="submit">Send (SSE)</button>
-            </div>
-          </form>
+            <section class="subpanel">
+              <h3 data-i18n="env.replaceJSON">使用 JSON Map 全量替换</h3>
+              <form id="envs-form" class="stack-form">
+                <label>
+                  <span data-i18n="env.jsonLabel">JSON (`{"KEY":"VALUE"}`)</span>
+                  <textarea id="envs-json" rows="12" placeholder='{"OPENAI_API_KEY":"sk-***"}'></textarea>
+                </label>
+                <button type="submit" data-i18n="env.submitPut">提交到 PUT /envs</button>
+              </form>
+            </section>
+          </div>
+        </section>
+
+        <section id="panel-skills" class="tab-panel panel stack-panel">
+          <div class="panel-head">
+            <h2 data-i18n="skills.title">技能</h2>
+            <button id="refresh-skills" type="button" data-i18n="common.refresh">刷新</button>
+          </div>
+          <div class="panel-body split-grid">
+            <section class="subpanel">
+              <h3 data-i18n="skills.all">全部技能</h3>
+              <ul id="skills-all-list" class="detail-list"></ul>
+            </section>
+
+            <section class="subpanel">
+              <h3 data-i18n="skills.enabledAvailable">已启用技能（`/skills/available`）</h3>
+              <ul id="skills-enabled-list" class="simple-list"></ul>
+            </section>
+          </div>
+        </section>
+
+        <section id="panel-workspace" class="tab-panel panel stack-panel">
+          <div class="panel-head">
+            <h2 data-i18n="workspace.title">工作区</h2>
+            <button id="refresh-workspace" type="button" data-i18n="common.refresh">刷新</button>
+          </div>
+          <div class="panel-body split-grid">
+            <section class="subpanel">
+              <h3 data-i18n="workspace.download">下载</h3>
+              <p class="hint" data-i18n="workspace.downloadHint">点击按钮打开 `GET /workspace/download`。</p>
+              <a id="workspace-download-link" class="button-link" href="#" target="_blank" rel="noreferrer" data-i18n="workspace.downloadZip">下载 workspace.zip</a>
+            </section>
+
+            <section class="subpanel">
+              <h3 data-i18n="workspace.upload">上传 ZIP</h3>
+              <p class="hint" data-i18n="workspace.uploadHint">上传字段名固定为 `file`。</p>
+              <form id="workspace-upload-form" class="stack-form">
+                <label>
+                  <span data-i18n="workspace.zipFile">ZIP 文件</span>
+                  <input id="workspace-upload-file" type="file" accept=".zip,application/zip" />
+                </label>
+                <button id="workspace-upload-btn" type="submit" data-i18n="workspace.submitUpload">提交到 POST /workspace/upload</button>
+              </form>
+            </section>
+          </div>
+        </section>
+
+        <section id="panel-cron" class="tab-panel panel stack-panel">
+          <div class="panel-head">
+            <h2 data-i18n="cron.title">定时任务</h2>
+            <button id="refresh-cron" type="button" data-i18n="common.refresh">刷新</button>
+          </div>
+          <div class="panel-body stack-block">
+            <section class="subpanel">
+              <h3 data-i18n="cron.jobs">任务列表</h3>
+              <div class="table-wrap">
+                <table class="data-table">
+                  <thead>
+                    <tr>
+                      <th data-i18n="cron.id">ID</th>
+                      <th data-i18n="cron.name">名称</th>
+                      <th data-i18n="cron.enabled">启用</th>
+                      <th data-i18n="cron.nextRun">下次运行</th>
+                      <th data-i18n="cron.action">操作</th>
+                    </tr>
+                  </thead>
+                  <tbody id="cron-jobs-body"></tbody>
+                </table>
+              </div>
+            </section>
+
+            <section class="subpanel">
+              <h3 data-i18n="cron.createTextJob">创建间隔文本任务</h3>
+              <p id="cron-dispatch-hint" class="hint"></p>
+              <form id="cron-create-form" class="stack-form cron-form-grid">
+                <label>
+                  <span data-i18n="cron.id">ID</span>
+                  <input id="cron-id" type="text" placeholder="job-demo" data-i18n-placeholder="cron.idPlaceholder" />
+                </label>
+                <label>
+                  <span data-i18n="cron.name">名称</span>
+                  <input id="cron-name" type="text" placeholder="示例任务" data-i18n-placeholder="cron.namePlaceholder" />
+                </label>
+                <label>
+                  <span data-i18n="cron.intervalLabel">schedule.cron（间隔文本）</span>
+                  <input id="cron-interval" type="text" placeholder="60s" value="60s" data-i18n-placeholder="cron.intervalPlaceholder" />
+                </label>
+                <label>
+                  <span data-i18n="cron.dispatchSession">dispatch.target.session_id</span>
+                  <input id="cron-session-id" type="text" />
+                </label>
+                <label>
+                  <span data-i18n="cron.maxConcurrency">runtime.max_concurrency</span>
+                  <input id="cron-max-concurrency" type="number" min="1" value="1" />
+                </label>
+                <label>
+                  <span data-i18n="cron.timeoutSeconds">runtime.timeout_seconds</span>
+                  <input id="cron-timeout-seconds" type="number" min="1" value="30" />
+                </label>
+                <label>
+                  <span data-i18n="cron.misfireGraceSeconds">runtime.misfire_grace_seconds</span>
+                  <input id="cron-misfire-grace" type="number" min="0" value="0" />
+                </label>
+                <label class="checkbox-inline">
+                  <input id="cron-enabled" type="checkbox" checked />
+                  <span data-i18n="cron.enabledSwitch">启用</span>
+                </label>
+                <label class="full-row">
+                  <span data-i18n="cron.text">文本</span>
+                  <textarea id="cron-text" rows="4" placeholder="定时消息文本" data-i18n-placeholder="cron.textPlaceholder"></textarea>
+                </label>
+                <div class="full-row actions-row">
+                  <button id="cron-new-session" type="button" data-i18n="cron.newSession">生成新 Session ID</button>
+                  <button type="submit" data-i18n="cron.submitCreate">提交到 POST /cron/jobs</button>
+                </div>
+              </form>
+            </section>
+          </div>
         </section>
       </main>
     </div>

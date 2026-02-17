@@ -1,8 +1,10 @@
 package plugin
 
+import "context"
+
 type ChannelPlugin interface {
 	Name() string
-	SendText(userID, sessionID, text string) error
+	SendText(ctx context.Context, userID, sessionID, text string, cfg map[string]interface{}) error
 }
 
 type ToolPlugin interface {

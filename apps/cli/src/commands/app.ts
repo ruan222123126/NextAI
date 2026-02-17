@@ -1,14 +1,16 @@
 import { Command } from "commander";
 import { ApiClient } from "../client/api-client.js";
+import { printResult } from "../io/output.js";
+import { t } from "../i18n.js";
 
 export function registerAppCommand(program: Command, client: ApiClient): void {
   program
     .command("app")
-    .description("gateway app commands")
+    .description(t("cli.command.app"))
     .command("start")
-    .description("print startup hint")
+    .description(t("cli.command.app.start"))
     .action(async () => {
       const health = await client.get<{ ok: boolean }>("/healthz");
-      console.log(JSON.stringify({ connected: health.ok }, null, 2));
+      printResult({ connected: health.ok });
     });
 }

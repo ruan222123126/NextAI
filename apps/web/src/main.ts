@@ -1,4 +1,9 @@
+import { parseEnvMap, parseErrorMessage } from "./api-utils.js";
+import { DEFAULT_LOCALE, getLocale, isWebMessageKey, setLocale, t } from "./i18n.js";
+
 type Tone = "neutral" | "info" | "error";
+type TabKey = "chat" | "models" | "envs" | "skills" | "workspace" | "cron";
+type HttpMethod = "GET" | "POST" | "PUT" | "DELETE";
 
 interface ChatSpec {
   id: string;
@@ -24,12 +29,120 @@ interface ChatHistoryResponse {
   messages: RuntimeMessage[];
 }
 
-interface ErrorEnvelope {
-  error?: {
-    code?: string;
-    message?: string;
-    details?: unknown;
-  };
+interface ModelInfo {
+  id: string;
+  name: string;
+  status?: string;
+  alias_of?: string;
+  capabilities?: ModelCapabilities;
+  limit?: ModelLimit;
+}
+
+interface ModelModalities {
+  text: boolean;
+  audio: boolean;
+  image: boolean;
+  video: boolean;
+  pdf: boolean;
+}
+
+interface ModelCapabilities {
+  temperature: boolean;
+  reasoning: boolean;
+  attachment: boolean;
+  tool_call: boolean;
+  input?: ModelModalities;
+  output?: ModelModalities;
+}
+
+interface ModelLimit {
+  context?: number;
+  input?: number;
+  output?: number;
+}
+
+interface ProviderInfo {
+  id: string;
+  name: string;
+  api_key_prefix?: string;
+  models: ModelInfo[];
+  allow_custom_base_url?: boolean;
+  enabled?: boolean;
+  has_api_key: boolean;
+  current_api_key?: string;
+  current_base_url?: string;
+}
+
+interface ModelSlotConfig {
+  provider_id: string;
+  model: string;
+}
+
+interface ActiveModelsInfo {
+  active_llm: ModelSlotConfig;
+}
+
+interface ModelCatalogInfo {
+  providers: ProviderInfo[];
+  defaults: Record<string, string>;
+  active_llm: ModelSlotConfig;
+}
+
+interface EnvVar {
+  key: string;
+  value: string;
+}
+
+interface SkillSpec {
+  name: string;
+  source?: string;
+  enabled: boolean;
+  path?: string;
+}
+
+interface CronScheduleSpec {
+  type: string;
+  cron: string;
+  timezone?: string;
+}
+
+interface CronDispatchTarget {
+  user_id: string;
+  session_id: string;
+}
+
+interface CronDispatchSpec {
+  type?: string;
+  channel?: string;
+  target: CronDispatchTarget;
+  mode?: string;
+  meta?: Record<string, unknown>;
+}
+
+interface CronRuntimeSpec {
+  max_concurrency?: number;
+  timeout_seconds?: number;
+  misfire_grace_seconds?: number;
+}
+
+interface CronJobSpec {
+  id: string;
+  name: string;
+  enabled: boolean;
+  schedule: CronScheduleSpec;
+  task_type: string;
+  text?: string;
+  dispatch: CronDispatchSpec;
+  runtime: CronRuntimeSpec;
+  meta?: Record<string, unknown>;
+}
+
+interface CronJobState {
+  next_run_at?: string;
+  last_run_at?: string;
+  last_status?: string;
+  last_error?: string;
+  paused?: boolean;
 }
 
 interface ViewMessage {
@@ -38,15 +151,35 @@ interface ViewMessage {
   text: string;
 }
 
+interface JSONRequestOptions {
+  method?: HttpMethod;
+  body?: unknown;
+  headers?: Record<string, string>;
+}
+
 const DEFAULT_API_BASE = "http://127.0.0.1:8088";
 const DEFAULT_USER_ID = "demo-user";
 const DEFAULT_CHANNEL = "console";
 const SETTINGS_KEY = "copaw-next.web.chat.settings";
+const LOCALE_KEY = "copaw-next.web.locale";
+const TABS: TabKey[] = ["chat", "models", "envs", "skills", "workspace", "cron"];
 
 const apiBaseInput = mustElement<HTMLInputElement>("api-base");
 const userIdInput = mustElement<HTMLInputElement>("user-id");
 const channelInput = mustElement<HTMLInputElement>("channel");
+const localeSelect = mustElement<HTMLSelectElement>("locale-select");
 const reloadChatsButton = mustElement<HTMLButtonElement>("reload-chats");
+const statusLine = mustElement<HTMLElement>("status-line");
+
+const tabButtons = Array.from(document.querySelectorAll<HTMLButtonElement>(".tab-btn"));
+
+const panelChat = mustElement<HTMLElement>("panel-chat");
+const panelModels = mustElement<HTMLElement>("panel-models");
+const panelEnvs = mustElement<HTMLElement>("panel-envs");
+const panelSkills = mustElement<HTMLElement>("panel-skills");
+const panelWorkspace = mustElement<HTMLElement>("panel-workspace");
+const panelCron = mustElement<HTMLElement>("panel-cron");
+
 const newChatButton = mustElement<HTMLButtonElement>("new-chat");
 const chatList = mustElement<HTMLUListElement>("chat-list");
 const chatTitle = mustElement<HTMLElement>("chat-title");
@@ -55,72 +188,373 @@ const messageList = mustElement<HTMLUListElement>("message-list");
 const composerForm = mustElement<HTMLFormElement>("composer");
 const messageInput = mustElement<HTMLTextAreaElement>("message-input");
 const sendButton = mustElement<HTMLButtonElement>("send-btn");
-const statusLine = mustElement<HTMLElement>("status-line");
+
+const refreshModelsButton = mustElement<HTMLButtonElement>("refresh-models");
+const modelsProviderList = mustElement<HTMLUListElement>("models-provider-list");
+const modelsActiveText = mustElement<HTMLElement>("models-active-text");
+const modelsActiveForm = mustElement<HTMLFormElement>("models-active-form");
+const modelsProviderSelect = mustElement<HTMLSelectElement>("models-provider-select");
+const modelsModelSelect = mustElement<HTMLSelectElement>("models-model-select");
+const modelsModelInput = mustElement<HTMLInputElement>("models-model-input");
+
+const refreshEnvsButton = mustElement<HTMLButtonElement>("refresh-envs");
+const envsTableBody = mustElement<HTMLTableSectionElement>("envs-table-body");
+const envsForm = mustElement<HTMLFormElement>("envs-form");
+const envsJSONInput = mustElement<HTMLTextAreaElement>("envs-json");
+
+const refreshSkillsButton = mustElement<HTMLButtonElement>("refresh-skills");
+const skillsAllList = mustElement<HTMLUListElement>("skills-all-list");
+const skillsEnabledList = mustElement<HTMLUListElement>("skills-enabled-list");
+
+const refreshWorkspaceButton = mustElement<HTMLButtonElement>("refresh-workspace");
+const workspaceDownloadLink = mustElement<HTMLAnchorElement>("workspace-download-link");
+const workspaceUploadForm = mustElement<HTMLFormElement>("workspace-upload-form");
+const workspaceUploadFileInput = mustElement<HTMLInputElement>("workspace-upload-file");
+
+const refreshCronButton = mustElement<HTMLButtonElement>("refresh-cron");
+const cronJobsBody = mustElement<HTMLTableSectionElement>("cron-jobs-body");
+const cronCreateForm = mustElement<HTMLFormElement>("cron-create-form");
+const cronDispatchHint = mustElement<HTMLElement>("cron-dispatch-hint");
+const cronIDInput = mustElement<HTMLInputElement>("cron-id");
+const cronNameInput = mustElement<HTMLInputElement>("cron-name");
+const cronIntervalInput = mustElement<HTMLInputElement>("cron-interval");
+const cronSessionIDInput = mustElement<HTMLInputElement>("cron-session-id");
+const cronMaxConcurrencyInput = mustElement<HTMLInputElement>("cron-max-concurrency");
+const cronTimeoutInput = mustElement<HTMLInputElement>("cron-timeout-seconds");
+const cronMisfireInput = mustElement<HTMLInputElement>("cron-misfire-grace");
+const cronEnabledInput = mustElement<HTMLInputElement>("cron-enabled");
+const cronTextInput = mustElement<HTMLTextAreaElement>("cron-text");
+const cronNewSessionButton = mustElement<HTMLButtonElement>("cron-new-session");
+
+const panelByTab: Record<TabKey, HTMLElement> = {
+  chat: panelChat,
+  models: panelModels,
+  envs: panelEnvs,
+  skills: panelSkills,
+  workspace: panelWorkspace,
+  cron: panelCron,
+};
 
 const state = {
   apiBase: DEFAULT_API_BASE,
   userId: DEFAULT_USER_ID,
   channel: DEFAULT_CHANNEL,
+  activeTab: "chat" as TabKey,
+  tabLoaded: {
+    chat: true,
+    models: false,
+    envs: false,
+    skills: false,
+    workspace: false,
+    cron: false,
+  },
+
   chats: [] as ChatSpec[],
   activeChatId: null as string | null,
   activeSessionId: newSessionID(),
   messages: [] as ViewMessage[],
   sending: false,
+
+  providers: [] as ProviderInfo[],
+  modelDefaults: {} as Record<string, string>,
+  activeModels: null as ActiveModelsInfo | null,
+  envs: [] as EnvVar[],
+  skillsAll: [] as SkillSpec[],
+  skillsAvailable: [] as SkillSpec[],
+  cronJobs: [] as CronJobSpec[],
+  cronStates: {} as Record<string, CronJobState>,
 };
 
 void bootstrap();
 
 async function bootstrap(): Promise<void> {
+  initLocale();
   restoreSettings();
   bindEvents();
+  applyLocaleToDocument();
+  renderTabPanels();
   renderChatHeader();
+  renderChatList();
   renderMessages();
-  setStatus("Loading sessions...", "info");
+  setWorkspaceDownloadLink();
+  syncCronDispatchHint();
+  ensureCronSessionID();
+
+  setStatus(t("status.loadingChats"), "info");
   await reloadChats();
   if (state.chats.length > 0) {
     await openChat(state.chats[0].id);
-    setStatus("Loaded latest session", "info");
+    setStatus(t("status.loadedRecentChat"), "info");
     return;
   }
   startDraftSession();
-  setStatus("No session yet, draft started", "info");
+  setStatus(t("status.noChatsDraft"), "info");
 }
 
 function bindEvents(): void {
+  tabButtons.forEach((button) => {
+    button.addEventListener("click", () => {
+      const tab = button.dataset.tab;
+      if (isTabKey(tab)) {
+        void switchTab(tab);
+      }
+    });
+  });
+
   reloadChatsButton.addEventListener("click", async () => {
     syncControlState();
-    setStatus("Reloading sessions...", "info");
+    setStatus(t("status.refreshingChats"), "info");
     await reloadChats();
-    setStatus("Sessions refreshed", "info");
+    setStatus(t("status.chatsRefreshed"), "info");
   });
 
   newChatButton.addEventListener("click", () => {
     syncControlState();
     startDraftSession();
-    setStatus("Draft session ready", "info");
+    setStatus(t("status.draftReady"), "info");
   });
 
   apiBaseInput.addEventListener("change", async () => {
-    syncControlState();
-    await reloadChats();
+    await handleControlChange(false);
   });
 
   userIdInput.addEventListener("change", async () => {
-    syncControlState();
-    startDraftSession();
-    await reloadChats();
+    await handleControlChange(true);
   });
 
   channelInput.addEventListener("change", async () => {
-    syncControlState();
-    startDraftSession();
-    await reloadChats();
+    await handleControlChange(true);
+  });
+  localeSelect.addEventListener("change", () => {
+    const locale = setLocale(localeSelect.value);
+    localeSelect.value = locale;
+    localStorage.setItem(LOCALE_KEY, locale);
+    applyLocaleToDocument();
+    setStatus(
+      t("status.localeChanged", {
+        localeName: locale === "zh-CN" ? t("locale.zhCN") : t("locale.enUS"),
+      }),
+      "info",
+    );
   });
 
   composerForm.addEventListener("submit", async (event) => {
     event.preventDefault();
     await sendMessage();
   });
+
+  refreshModelsButton.addEventListener("click", async () => {
+    await refreshModels();
+  });
+  modelsActiveForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    await setActiveModel();
+  });
+  modelsProviderSelect.addEventListener("change", () => {
+    renderModelOptionsForProvider(modelsProviderSelect.value, modelsModelSelect.value);
+  });
+
+  refreshEnvsButton.addEventListener("click", async () => {
+    await refreshEnvs();
+  });
+  envsForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    await putEnvs();
+  });
+  envsTableBody.addEventListener("click", async (event) => {
+    const target = event.target;
+    if (!(target instanceof Element)) {
+      return;
+    }
+    const button = target.closest<HTMLButtonElement>("button[data-env-key]");
+    if (!button) {
+      return;
+    }
+    const key = button.dataset.envKey ?? "";
+    if (key === "") {
+      return;
+    }
+    await deleteEnv(key);
+  });
+
+  refreshSkillsButton.addEventListener("click", async () => {
+    await refreshSkills();
+  });
+  skillsAllList.addEventListener("click", async (event) => {
+    const target = event.target;
+    if (!(target instanceof Element)) {
+      return;
+    }
+    const button = target.closest<HTMLButtonElement>("button[data-skill-name]");
+    if (!button) {
+      return;
+    }
+    const skillName = button.dataset.skillName ?? "";
+    const action = button.dataset.skillAction;
+    if (skillName === "" || (action !== "enable" && action !== "disable")) {
+      return;
+    }
+    await toggleSkill(skillName, action === "enable");
+  });
+
+  refreshWorkspaceButton.addEventListener("click", () => {
+    refreshWorkspace();
+  });
+  workspaceDownloadLink.addEventListener("click", () => {
+    syncControlState();
+    setWorkspaceDownloadLink();
+  });
+  workspaceUploadForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    await uploadWorkspace();
+  });
+
+  refreshCronButton.addEventListener("click", async () => {
+    await refreshCronJobs();
+  });
+  cronNewSessionButton.addEventListener("click", () => {
+    cronSessionIDInput.value = newSessionID();
+  });
+  cronCreateForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    await createCronJob();
+  });
+  cronJobsBody.addEventListener("click", async (event) => {
+    const target = event.target;
+    if (!(target instanceof Element)) {
+      return;
+    }
+    const button = target.closest<HTMLButtonElement>("button[data-cron-run]");
+    if (!button) {
+      return;
+    }
+    const jobID = button.dataset.cronRun ?? "";
+    if (jobID === "") {
+      return;
+    }
+    await runCronJob(jobID);
+  });
+}
+
+function initLocale(): void {
+  const savedLocale = localStorage.getItem(LOCALE_KEY);
+  const locale = setLocale(savedLocale ?? navigator.language ?? DEFAULT_LOCALE);
+  localeSelect.value = locale;
+}
+
+function applyLocaleToDocument(): void {
+  document.documentElement.lang = getLocale();
+  document.title = t("app.title");
+
+  document.querySelectorAll<HTMLElement>("[data-i18n]").forEach((element) => {
+    const key = element.dataset.i18n;
+    if (key && isWebMessageKey(key)) {
+      element.textContent = t(key);
+    }
+  });
+
+  document.querySelectorAll<HTMLElement>("[data-i18n-placeholder]").forEach((element) => {
+    const key = element.dataset.i18nPlaceholder;
+    if (!key || !isWebMessageKey(key)) {
+      return;
+    }
+    if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement) {
+      element.placeholder = t(key);
+    }
+  });
+
+  document.querySelectorAll<HTMLElement>("[data-i18n-aria-label]").forEach((element) => {
+    const key = element.dataset.i18nAriaLabel;
+    if (key && isWebMessageKey(key)) {
+      element.setAttribute("aria-label", t(key));
+    }
+  });
+
+  renderChatHeader();
+  renderChatList();
+  renderMessages();
+  if (state.tabLoaded.models) {
+    renderModelsPanel();
+  }
+  if (state.tabLoaded.envs) {
+    renderEnvsPanel();
+  }
+  if (state.tabLoaded.skills) {
+    renderSkillsPanel();
+  }
+  if (state.tabLoaded.cron) {
+    renderCronJobs();
+  }
+  syncCronDispatchHint();
+}
+
+async function handleControlChange(resetDraft: boolean): Promise<void> {
+  syncControlState();
+  if (resetDraft) {
+    startDraftSession();
+    ensureCronSessionID();
+  }
+  syncCronDispatchHint();
+  setWorkspaceDownloadLink();
+  invalidateResourceTabs();
+
+  await reloadChats();
+  if (state.activeTab !== "chat") {
+    await loadTabData(state.activeTab, true);
+  }
+}
+
+async function switchTab(tab: TabKey): Promise<void> {
+  if (state.activeTab === tab) {
+    return;
+  }
+  state.activeTab = tab;
+  renderTabPanels();
+  await loadTabData(tab);
+}
+
+function renderTabPanels(): void {
+  tabButtons.forEach((button) => {
+    const tab = button.dataset.tab;
+    button.classList.toggle("active", tab === state.activeTab);
+  });
+
+  TABS.forEach((tab) => {
+    panelByTab[tab].classList.toggle("is-active", tab === state.activeTab);
+  });
+}
+
+async function loadTabData(tab: TabKey, force = false): Promise<void> {
+  try {
+    if (tab === "chat") {
+      return;
+    }
+    if (!force && state.tabLoaded[tab]) {
+      return;
+    }
+
+    switch (tab) {
+      case "models":
+        await refreshModels();
+        break;
+      case "envs":
+        await refreshEnvs();
+        break;
+      case "skills":
+        await refreshSkills();
+        break;
+      case "workspace":
+        refreshWorkspace();
+        break;
+      case "cron":
+        await refreshCronJobs();
+        break;
+      default:
+        break;
+    }
+  } catch (error) {
+    setStatus(asErrorMessage(error), "error");
+  }
 }
 
 function restoreSettings(): void {
@@ -160,6 +594,14 @@ function syncControlState(): void {
   );
 }
 
+function invalidateResourceTabs(): void {
+  state.tabLoaded.models = false;
+  state.tabLoaded.envs = false;
+  state.tabLoaded.skills = false;
+  state.tabLoaded.workspace = false;
+  state.tabLoaded.cron = false;
+}
+
 async function reloadChats(): Promise<void> {
   try {
     const query = new URLSearchParams({
@@ -168,7 +610,11 @@ async function reloadChats(): Promise<void> {
     });
     const chats = await requestJSON<ChatSpec[]>(`/chats?${query.toString()}`);
     state.chats = chats;
+    if (state.activeChatId && !state.chats.some((chat) => chat.id === state.activeChatId)) {
+      state.activeChatId = null;
+    }
     renderChatList();
+    renderChatHeader();
   } catch (error) {
     setStatus(asErrorMessage(error), "error");
   }
@@ -177,7 +623,7 @@ async function reloadChats(): Promise<void> {
 async function openChat(chatID: string): Promise<void> {
   const chat = state.chats.find((item) => item.id === chatID);
   if (!chat) {
-    setStatus(`chat not found: ${chatID}`, "error");
+    setStatus(t("status.chatNotFound", { chatId: chatID }), "error");
     return;
   }
 
@@ -190,7 +636,7 @@ async function openChat(chatID: string): Promise<void> {
     const history = await requestJSON<ChatHistoryResponse>(`/chats/${encodeURIComponent(chat.id)}`);
     state.messages = history.messages.map(toViewMessage);
     renderMessages();
-    setStatus(`Loaded ${history.messages.length} messages`, "info");
+    setStatus(t("status.loadedMessages", { count: history.messages.length }), "info");
   } catch (error) {
     setStatus(asErrorMessage(error), "error");
   }
@@ -210,13 +656,15 @@ async function sendMessage(): Promise<void> {
   if (state.sending) {
     return;
   }
+
   const inputText = messageInput.value.trim();
   if (inputText === "") {
-    setStatus("Please type a message first", "error");
+    setStatus(t("status.inputRequired"), "error");
     return;
   }
+
   if (state.apiBase === "" || state.userId === "" || state.channel === "") {
-    setStatus("API base, user id and channel are required", "error");
+    setStatus(t("status.controlsRequired"), "error");
     return;
   }
 
@@ -238,7 +686,7 @@ async function sendMessage(): Promise<void> {
   );
   renderMessages();
   messageInput.value = "";
-  setStatus("Streaming reply...", "info");
+  setStatus(t("status.streamingReply"), "info");
 
   try {
     await streamReply(inputText, (delta) => {
@@ -249,7 +697,7 @@ async function sendMessage(): Promise<void> {
       target.text += delta;
       renderMessages();
     });
-    setStatus("Reply completed", "info");
+    setStatus(t("status.replyCompleted"), "info");
 
     await reloadChats();
     const matched = state.chats.find(
@@ -282,13 +730,16 @@ async function streamReply(userText: string, onDelta: (delta: string) => void): 
     method: "POST",
     headers: {
       "content-type": "application/json",
+      accept: "text/event-stream,application/json",
     },
     body: JSON.stringify(payload),
   });
 
-  if (!response.ok || !response.body) {
-    const details = await safeReadError(response);
-    throw new Error(details);
+  if (!response.ok) {
+    throw new Error(await readErrorMessage(response));
+  }
+  if (!response.body) {
+    throw new Error(t("error.streamUnsupported"));
   }
 
   const reader = response.body.getReader();
@@ -314,7 +765,7 @@ async function streamReply(userText: string, onDelta: (delta: string) => void): 
   }
 
   if (!doneReceived) {
-    throw new Error("SSE stream ended before [DONE]");
+    throw new Error(t("error.sseEndedEarly"));
   }
 }
 
@@ -360,7 +811,7 @@ function consumeSSEBlock(block: string, onDelta: (delta: string) => void): boole
     onDelta(data);
     return false;
   }
-  throw new Error("Invalid SSE payload without delta");
+  throw new Error(t("error.invalidSSEPayload"));
 }
 
 function renderChatList(): void {
@@ -368,7 +819,7 @@ function renderChatList(): void {
   if (state.chats.length === 0) {
     const li = document.createElement("li");
     li.className = "message-empty";
-    li.textContent = "No sessions found for current user/channel.";
+    li.textContent = t("chat.emptyByFilter");
     chatList.appendChild(li);
     return;
   }
@@ -390,11 +841,14 @@ function renderChatList(): void {
 
     const title = document.createElement("span");
     title.className = "chat-title";
-    title.textContent = chat.name || "Untitled Chat";
+    title.textContent = chat.name || t("chat.unnamed");
 
     const meta = document.createElement("span");
     meta.className = "chat-meta";
-    meta.textContent = `Session ${chat.session_id} | Updated ${compactTime(chat.updated_at)}`;
+    meta.textContent = t("chat.meta", {
+      sessionId: chat.session_id,
+      updatedAt: compactTime(chat.updated_at),
+    });
 
     button.append(title, meta);
     li.appendChild(button);
@@ -404,7 +858,7 @@ function renderChatList(): void {
 
 function renderChatHeader(): void {
   const active = state.chats.find((chat) => chat.id === state.activeChatId);
-  chatTitle.textContent = active ? active.name : "Draft Session";
+  chatTitle.textContent = active ? active.name : t("chat.draftTitle");
   chatSession.textContent = state.activeSessionId;
 }
 
@@ -413,7 +867,7 @@ function renderMessages(): void {
   if (state.messages.length === 0) {
     const empty = document.createElement("li");
     empty.className = "message-empty";
-    empty.textContent = "No messages yet. Send your first prompt.";
+    empty.textContent = t("chat.emptyMessages");
     messageList.appendChild(empty);
     return;
   }
@@ -421,10 +875,794 @@ function renderMessages(): void {
   for (const message of state.messages) {
     const item = document.createElement("li");
     item.className = `message ${message.role}`;
-    item.textContent = message.text || (message.role === "assistant" ? "..." : "");
+    item.textContent = message.text || (message.role === "assistant" ? t("common.ellipsis") : "");
     messageList.appendChild(item);
   }
   messageList.scrollTop = messageList.scrollHeight;
+}
+
+async function refreshModels(): Promise<void> {
+  syncControlState();
+  try {
+    const result = await loadModelCatalog();
+    state.providers = result.providers;
+    state.modelDefaults = result.defaults;
+    state.activeModels = { active_llm: result.active };
+    state.tabLoaded.models = true;
+    renderModelsPanel();
+    setStatus(
+      t(result.source === "catalog" ? "status.providersLoadedCatalog" : "status.providersLoadedLegacy", {
+        count: result.providers.length,
+      }),
+      "info",
+    );
+  } catch (error) {
+    setStatus(asErrorMessage(error), "error");
+  }
+}
+
+async function loadModelCatalog(): Promise<{
+  providers: ProviderInfo[];
+  defaults: Record<string, string>;
+  active: ModelSlotConfig;
+  source: "catalog" | "legacy";
+}> {
+  try {
+    const catalog = await requestJSON<ModelCatalogInfo>("/models/catalog");
+    const providers = normalizeProviders(catalog.providers);
+    return {
+      providers,
+      defaults: normalizeDefaults(catalog.defaults, providers),
+      active: normalizeActiveModel(catalog.active_llm),
+      source: "catalog",
+    };
+  } catch {
+    const [providersRaw, activeRaw] = await Promise.all([
+      requestJSON<ProviderInfo[]>("/models"),
+      requestJSON<ActiveModelsInfo>("/models/active"),
+    ]);
+    const providers = normalizeProviders(providersRaw);
+    return {
+      providers,
+      defaults: buildDefaultMapFromProviders(providers),
+      active: normalizeActiveModel(activeRaw.active_llm),
+      source: "legacy",
+    };
+  }
+}
+
+function renderModelsPanel(): void {
+  modelsProviderList.innerHTML = "";
+  if (state.providers.length === 0) {
+    appendEmptyItem(modelsProviderList, t("models.emptyProviders"));
+  } else {
+    for (const provider of state.providers) {
+      const item = document.createElement("li");
+      item.className = "detail-item";
+
+      const title = document.createElement("p");
+      title.className = "item-title";
+      title.textContent = provider.id;
+
+      const enabledLine = document.createElement("p");
+      enabledLine.className = "item-meta";
+      enabledLine.textContent = t("models.enabledLine", {
+        enabled: provider.enabled === false ? t("common.no") : t("common.yes"),
+      });
+
+      const keyStatus = document.createElement("p");
+      keyStatus.className = "item-meta";
+      keyStatus.textContent = provider.has_api_key
+        ? t("models.apiKeyConfigured", {
+            value: provider.current_api_key ?? t("models.apiKeyMasked"),
+          })
+        : t("models.apiKeyUnset");
+
+      const defaultLine = document.createElement("p");
+      defaultLine.className = "item-meta";
+      defaultLine.textContent = t("models.defaultLine", {
+        model: state.modelDefaults[provider.id] || t("common.none"),
+      });
+
+      const baseURLLine = document.createElement("p");
+      baseURLLine.className = "item-meta";
+      baseURLLine.textContent = t("models.baseURLLine", {
+        baseURL: provider.current_base_url || t("common.none"),
+      });
+
+      const modelText = provider.models.map((model) => formatModelEntry(model)).join(", ") || t("models.noModels");
+      const modelLine = document.createElement("p");
+      modelLine.className = "item-meta";
+      modelLine.textContent = t("models.modelLine", { models: modelText });
+
+      item.append(title, enabledLine, keyStatus, defaultLine, baseURLLine, modelLine);
+      modelsProviderList.appendChild(item);
+    }
+  }
+
+  const activeLLM = state.activeModels?.active_llm;
+  modelsActiveText.textContent = activeLLM
+    ? t("models.activeSummary", {
+        providerId: activeLLM.provider_id,
+        model: activeLLM.model,
+      })
+    : t("common.none");
+
+  const preferredProvider = activeLLM?.provider_id || modelsProviderSelect.value || state.providers[0]?.id || "";
+  const preferredModel = activeLLM?.model || modelsModelSelect.value || state.modelDefaults[preferredProvider] || "";
+
+  modelsProviderSelect.innerHTML = "";
+  if (state.providers.length === 0) {
+    const option = document.createElement("option");
+    option.value = "";
+    option.textContent = t("models.noProviderOption");
+    modelsProviderSelect.appendChild(option);
+  } else {
+    for (const provider of state.providers) {
+      const option = document.createElement("option");
+      option.value = provider.id;
+      option.textContent = provider.id;
+      modelsProviderSelect.appendChild(option);
+    }
+  }
+
+  if (preferredProvider !== "") {
+    modelsProviderSelect.value = preferredProvider;
+  }
+  renderModelOptionsForProvider(modelsProviderSelect.value, preferredModel);
+}
+
+function renderModelOptionsForProvider(providerID: string, preferredModel = ""): void {
+  modelsModelSelect.innerHTML = "";
+  const provider = state.providers.find((item) => item.id === providerID);
+  const modelIDs = dedupeModelIDs(provider?.models ?? [], state.modelDefaults[providerID]);
+
+  if (modelIDs.length === 0) {
+    const option = document.createElement("option");
+    option.value = "";
+    option.textContent = t("models.noModelOption");
+    modelsModelSelect.appendChild(option);
+    modelsModelSelect.value = "";
+    return;
+  }
+
+  for (const modelID of modelIDs) {
+    const option = document.createElement("option");
+    option.value = modelID;
+    option.textContent = modelID;
+    modelsModelSelect.appendChild(option);
+  }
+
+  if (preferredModel !== "" && modelIDs.includes(preferredModel)) {
+    modelsModelSelect.value = preferredModel;
+  } else if (state.modelDefaults[providerID] && modelIDs.includes(state.modelDefaults[providerID])) {
+    modelsModelSelect.value = state.modelDefaults[providerID];
+  } else {
+    modelsModelSelect.value = modelIDs[0];
+  }
+}
+
+async function setActiveModel(): Promise<void> {
+  syncControlState();
+  const providerID = modelsProviderSelect.value.trim();
+  const model = modelsModelInput.value.trim() || modelsModelSelect.value.trim();
+
+  if (providerID === "" || model === "") {
+    setStatus(t("error.providerAndModelRequired"), "error");
+    return;
+  }
+
+  try {
+    await requestJSON<ActiveModelsInfo>("/models/active", {
+      method: "PUT",
+      body: {
+        provider_id: providerID,
+        model,
+      },
+    });
+    modelsModelInput.value = "";
+    await refreshModels();
+    setStatus(t("status.activeModelUpdated", { providerId: providerID, model }), "info");
+  } catch (error) {
+    setStatus(asErrorMessage(error), "error");
+  }
+}
+
+async function refreshEnvs(): Promise<void> {
+  syncControlState();
+  try {
+    state.envs = await requestJSON<EnvVar[]>("/envs");
+    state.tabLoaded.envs = true;
+    renderEnvsPanel();
+    setStatus(t("status.envsLoaded", { count: state.envs.length }), "info");
+  } catch (error) {
+    setStatus(asErrorMessage(error), "error");
+  }
+}
+
+function renderEnvsPanel(): void {
+  envsTableBody.innerHTML = "";
+  if (state.envs.length === 0) {
+    const row = document.createElement("tr");
+    const col = document.createElement("td");
+    col.colSpan = 3;
+    col.className = "empty-cell";
+    col.textContent = t("env.empty");
+    row.appendChild(col);
+    envsTableBody.appendChild(row);
+  } else {
+    state.envs.forEach((env) => {
+      const row = document.createElement("tr");
+
+      const key = document.createElement("td");
+      key.className = "mono";
+      key.textContent = env.key;
+
+      const value = document.createElement("td");
+      value.className = "mono";
+      value.textContent = env.value;
+
+      const action = document.createElement("td");
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "secondary-btn";
+      button.dataset.envKey = env.key;
+      button.textContent = t("common.delete");
+      action.appendChild(button);
+
+      row.append(key, value, action);
+      envsTableBody.appendChild(row);
+    });
+  }
+
+  const envMap: Record<string, string> = {};
+  for (const env of state.envs) {
+    envMap[env.key] = env.value;
+  }
+  envsJSONInput.value = JSON.stringify(envMap, null, 2);
+}
+
+async function putEnvs(): Promise<void> {
+  syncControlState();
+  let body: Record<string, string>;
+  try {
+    body = parseEnvMap(envsJSONInput.value, {
+      invalidJSON: t("error.invalidEnvJSON"),
+      invalidMap: t("error.invalidEnvMap"),
+      invalidKey: t("error.invalidEnvKey"),
+      invalidValue: (key) => t("error.invalidEnvValue", { key }),
+    });
+  } catch (error) {
+    setStatus(asErrorMessage(error), "error");
+    return;
+  }
+
+  try {
+    state.envs = await requestJSON<EnvVar[]>("/envs", {
+      method: "PUT",
+      body,
+    });
+    renderEnvsPanel();
+    setStatus(t("status.envMapUpdated", { count: state.envs.length }), "info");
+  } catch (error) {
+    setStatus(asErrorMessage(error), "error");
+  }
+}
+
+async function deleteEnv(key: string): Promise<void> {
+  syncControlState();
+  try {
+    state.envs = await requestJSON<EnvVar[]>(`/envs/${encodeURIComponent(key)}`, {
+      method: "DELETE",
+    });
+    renderEnvsPanel();
+    setStatus(t("status.envDeleted", { key }), "info");
+  } catch (error) {
+    setStatus(asErrorMessage(error), "error");
+  }
+}
+
+async function refreshSkills(): Promise<void> {
+  syncControlState();
+  try {
+    const [allSkills, availableSkills] = await Promise.all([
+      requestJSON<SkillSpec[]>("/skills"),
+      requestJSON<SkillSpec[]>("/skills/available"),
+    ]);
+    state.skillsAll = allSkills;
+    state.skillsAvailable = availableSkills;
+    state.tabLoaded.skills = true;
+    renderSkillsPanel();
+    setStatus(t("status.skillsLoaded", { count: allSkills.length }), "info");
+  } catch (error) {
+    setStatus(asErrorMessage(error), "error");
+  }
+}
+
+function renderSkillsPanel(): void {
+  skillsAllList.innerHTML = "";
+  skillsEnabledList.innerHTML = "";
+
+  if (state.skillsAll.length === 0) {
+    appendEmptyItem(skillsAllList, t("skills.empty"));
+  } else {
+    state.skillsAll.forEach((skill) => {
+      const item = document.createElement("li");
+      item.className = "detail-item";
+
+      const title = document.createElement("p");
+      title.className = "item-title";
+      title.textContent = skill.name;
+
+      const meta = document.createElement("p");
+      meta.className = "item-meta";
+      const source = skill.source ?? t("skills.sourceUnknown");
+      meta.textContent = t("skills.meta", {
+        source,
+        enabled: skill.enabled ? t("common.yes") : t("common.no"),
+      });
+
+      const action = document.createElement("button");
+      action.type = "button";
+      action.className = "secondary-btn";
+      action.dataset.skillName = skill.name;
+      action.dataset.skillAction = skill.enabled ? "disable" : "enable";
+      action.textContent = skill.enabled ? t("skills.disable") : t("skills.enable");
+
+      item.append(title, meta, action);
+      skillsAllList.appendChild(item);
+    });
+  }
+
+  if (state.skillsAvailable.length === 0) {
+    appendEmptyItem(skillsEnabledList, t("skills.enabledEmpty"));
+  } else {
+    state.skillsAvailable.forEach((skill) => {
+      const item = document.createElement("li");
+      item.textContent = skill.name;
+      skillsEnabledList.appendChild(item);
+    });
+  }
+}
+
+async function toggleSkill(name: string, enable: boolean): Promise<void> {
+  syncControlState();
+  const action = enable ? "enable" : "disable";
+  try {
+    await requestJSON<Record<string, boolean>>(`/skills/${encodeURIComponent(name)}/${action}`, {
+      method: "POST",
+    });
+    await refreshSkills();
+    setStatus(
+      t("status.skillToggled", {
+        action: enable ? t("skills.enable") : t("skills.disable"),
+        name,
+      }),
+      "info",
+    );
+  } catch (error) {
+    setStatus(asErrorMessage(error), "error");
+  }
+}
+
+function refreshWorkspace(): void {
+  syncControlState();
+  setWorkspaceDownloadLink();
+  state.tabLoaded.workspace = true;
+  setStatus(t("status.workspaceLinkRefreshed"), "info");
+}
+
+function setWorkspaceDownloadLink(): void {
+  workspaceDownloadLink.href = toAbsoluteURL("/workspace/download");
+}
+
+async function uploadWorkspace(): Promise<void> {
+  syncControlState();
+  const file = workspaceUploadFileInput.files?.[0];
+  if (!file) {
+    setStatus(t("status.zipRequired"), "error");
+    return;
+  }
+
+  const formData = new FormData();
+  formData.append("file", file);
+
+  try {
+    const result = await requestJSON<Record<string, boolean>>("/workspace/upload", {
+      method: "POST",
+      body: formData,
+    });
+    workspaceUploadFileInput.value = "";
+    const success = result.success === true;
+    setStatus(success ? t("status.workspaceUploadSuccess") : t("status.workspaceUploadDone"), "info");
+  } catch (error) {
+    setStatus(asErrorMessage(error), "error");
+  }
+}
+
+function syncCronDispatchHint(): void {
+  cronDispatchHint.textContent = t("workspace.dispatchHint", {
+    userId: state.userId,
+    channel: state.channel,
+  });
+}
+
+function ensureCronSessionID(): void {
+  if (cronSessionIDInput.value.trim() === "") {
+    cronSessionIDInput.value = newSessionID();
+  }
+}
+
+async function refreshCronJobs(): Promise<void> {
+  syncControlState();
+  syncCronDispatchHint();
+  ensureCronSessionID();
+
+  try {
+    const jobs = await requestJSON<CronJobSpec[]>("/cron/jobs");
+    state.cronJobs = jobs;
+
+    const statePairs = await Promise.all(
+      jobs.map(async (job) => {
+        try {
+          const jobState = await requestJSON<CronJobState>(`/cron/jobs/${encodeURIComponent(job.id)}/state`);
+          return [job.id, jobState] as const;
+        } catch {
+          return [job.id, null] as const;
+        }
+      }),
+    );
+
+    const stateMap: Record<string, CronJobState> = {};
+    for (const [jobID, jobState] of statePairs) {
+      if (jobState) {
+        stateMap[jobID] = jobState;
+      }
+    }
+
+    state.cronStates = stateMap;
+    state.tabLoaded.cron = true;
+    renderCronJobs();
+    setStatus(t("status.cronJobsLoaded", { count: jobs.length }), "info");
+  } catch (error) {
+    setStatus(asErrorMessage(error), "error");
+  }
+}
+
+function renderCronJobs(): void {
+  cronJobsBody.innerHTML = "";
+  if (state.cronJobs.length === 0) {
+    const row = document.createElement("tr");
+    const col = document.createElement("td");
+    col.colSpan = 5;
+    col.className = "empty-cell";
+    col.textContent = t("cron.empty");
+    row.appendChild(col);
+    cronJobsBody.appendChild(row);
+    return;
+  }
+
+  state.cronJobs.forEach((job) => {
+    const row = document.createElement("tr");
+    const nextRun = state.cronStates[job.id]?.next_run_at;
+
+    const idCol = document.createElement("td");
+    idCol.className = "mono";
+    idCol.textContent = job.id;
+
+    const nameCol = document.createElement("td");
+    nameCol.textContent = job.name;
+
+    const enabledCol = document.createElement("td");
+    enabledCol.textContent = job.enabled ? t("common.yes") : t("common.no");
+
+    const nextCol = document.createElement("td");
+    nextCol.textContent = nextRun ? compactTime(nextRun) : t("common.none");
+
+    const actionCol = document.createElement("td");
+    const runBtn = document.createElement("button");
+    runBtn.type = "button";
+    runBtn.className = "secondary-btn";
+    runBtn.dataset.cronRun = job.id;
+    runBtn.textContent = t("cron.run");
+    actionCol.appendChild(runBtn);
+
+    row.append(idCol, nameCol, enabledCol, nextCol, actionCol);
+    cronJobsBody.appendChild(row);
+  });
+}
+
+async function createCronJob(): Promise<void> {
+  syncControlState();
+
+  const id = cronIDInput.value.trim();
+  const name = cronNameInput.value.trim();
+  const intervalText = cronIntervalInput.value.trim();
+  const sessionID = cronSessionIDInput.value.trim();
+  const text = cronTextInput.value.trim();
+
+  if (id === "" || name === "") {
+    setStatus(t("error.cronIdNameRequired"), "error");
+    return;
+  }
+  if (intervalText === "") {
+    setStatus(t("error.cronScheduleRequired"), "error");
+    return;
+  }
+  if (sessionID === "") {
+    setStatus(t("error.cronSessionRequired"), "error");
+    return;
+  }
+  if (text === "") {
+    setStatus(t("error.cronTextRequired"), "error");
+    return;
+  }
+
+  const maxConcurrency = parseIntegerInput(cronMaxConcurrencyInput.value, 1, 1);
+  const timeoutSeconds = parseIntegerInput(cronTimeoutInput.value, 30, 1);
+  const misfireGraceSeconds = parseIntegerInput(cronMisfireInput.value, 0, 0);
+
+  const payload: CronJobSpec = {
+    id,
+    name,
+    enabled: cronEnabledInput.checked,
+    schedule: {
+      type: "interval",
+      cron: intervalText,
+      timezone: "",
+    },
+    task_type: "text",
+    text,
+    dispatch: {
+      type: "channel",
+      channel: state.channel,
+      target: {
+        user_id: state.userId,
+        session_id: sessionID,
+      },
+      mode: "",
+      meta: {},
+    },
+    runtime: {
+      max_concurrency: maxConcurrency,
+      timeout_seconds: timeoutSeconds,
+      misfire_grace_seconds: misfireGraceSeconds,
+    },
+    meta: {},
+  };
+
+  try {
+    await requestJSON<CronJobSpec>("/cron/jobs", {
+      method: "POST",
+      body: payload,
+    });
+    await refreshCronJobs();
+    setStatus(t("status.cronCreated", { jobId: id }), "info");
+  } catch (error) {
+    setStatus(asErrorMessage(error), "error");
+  }
+}
+
+async function runCronJob(jobID: string): Promise<void> {
+  syncControlState();
+  try {
+    const result = await requestJSON<{ started: boolean }>(`/cron/jobs/${encodeURIComponent(jobID)}/run`, {
+      method: "POST",
+    });
+    await refreshCronJobs();
+    setStatus(t("status.cronRunRequested", { jobId: jobID, started: String(result.started) }), "info");
+  } catch (error) {
+    setStatus(asErrorMessage(error), "error");
+  }
+}
+
+async function requestJSON<T>(path: string, options: JSONRequestOptions = {}): Promise<T> {
+  const response = await fetch(toAbsoluteURL(path), buildRequestInit(options));
+
+  if (!response.ok) {
+    throw new Error(await readErrorMessage(response));
+  }
+
+  const raw = await response.text();
+  if (raw.trim() === "") {
+    return null as T;
+  }
+
+  try {
+    return JSON.parse(raw) as T;
+  } catch {
+    throw new Error(
+      t("error.invalidJSONResponse", {
+        snippet: raw.slice(0, 180),
+      }),
+    );
+  }
+}
+
+function buildRequestInit(options: JSONRequestOptions): RequestInit {
+  const headers = new Headers(options.headers ?? {});
+  if (!headers.has("accept")) {
+    headers.set("accept", "application/json");
+  }
+  if (!headers.has("accept-language")) {
+    headers.set("accept-language", getLocale());
+  }
+
+  let body: BodyInit | undefined;
+  if (options.body !== undefined) {
+    if (options.body instanceof FormData) {
+      body = options.body;
+    } else {
+      headers.set("content-type", "application/json");
+      body = JSON.stringify(options.body);
+    }
+  }
+
+  return {
+    method: options.method ?? "GET",
+    headers,
+    body,
+  };
+}
+
+async function readErrorMessage(response: Response): Promise<string> {
+  const fallback = t("error.requestFailed", { status: response.status });
+  try {
+    const raw = await response.text();
+    return parseErrorMessage(raw, response.status, fallback);
+  } catch {
+    return fallback;
+  }
+}
+
+function parseIntegerInput(raw: string, fallback: number, min: number): number {
+  const trimmed = raw.trim();
+  if (trimmed === "") {
+    return fallback;
+  }
+  const parsed = Number.parseInt(trimmed, 10);
+  if (Number.isNaN(parsed)) {
+    return fallback;
+  }
+  if (parsed < min) {
+    return min;
+  }
+  return parsed;
+}
+
+function normalizeProviders(providers: ProviderInfo[]): ProviderInfo[] {
+  return providers.map((provider) => ({
+    ...provider,
+    models: Array.isArray(provider.models) ? provider.models : [],
+    enabled: provider.enabled ?? true,
+    current_api_key: provider.current_api_key ?? "",
+    current_base_url: provider.current_base_url ?? "",
+  }));
+}
+
+function normalizeDefaults(defaults: Record<string, string>, providers: ProviderInfo[]): Record<string, string> {
+  const normalized: Record<string, string> = {};
+  for (const [providerID, modelID] of Object.entries(defaults ?? {})) {
+    if (providerID.trim() === "" || modelID.trim() === "") {
+      continue;
+    }
+    normalized[providerID] = modelID;
+  }
+  for (const provider of providers) {
+    if (normalized[provider.id]) {
+      continue;
+    }
+    if (provider.models.length > 0) {
+      normalized[provider.id] = provider.models[0].id;
+    }
+  }
+  return normalized;
+}
+
+function buildDefaultMapFromProviders(providers: ProviderInfo[]): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const provider of providers) {
+    if (provider.models.length > 0) {
+      out[provider.id] = provider.models[0].id;
+    }
+  }
+  return out;
+}
+
+function normalizeActiveModel(active: ModelSlotConfig | undefined): ModelSlotConfig {
+  return {
+    provider_id: active?.provider_id ?? "",
+    model: active?.model ?? "",
+  };
+}
+
+function dedupeModelIDs(models: ModelInfo[], defaultModelID?: string): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  if (defaultModelID && defaultModelID.trim() !== "") {
+    const normalized = defaultModelID.trim();
+    seen.add(normalized);
+    out.push(normalized);
+  }
+  for (const model of models) {
+    const modelID = model.id.trim();
+    if (modelID === "" || seen.has(modelID)) {
+      continue;
+    }
+    seen.add(modelID);
+    out.push(modelID);
+  }
+  return out;
+}
+
+function formatModelEntry(model: ModelInfo): string {
+  const parts = [model.id];
+  if (model.alias_of && model.alias_of.trim() !== "") {
+    parts.push(`->${model.alias_of}`);
+  }
+  const caps = formatCapabilities(model.capabilities);
+  if (caps !== "") {
+    parts.push(`[${caps}]`);
+  }
+  return parts.join(" ");
+}
+
+function formatCapabilities(capabilities?: ModelCapabilities): string {
+  if (!capabilities) {
+    return "";
+  }
+  const tags: string[] = [];
+  if (capabilities.temperature) {
+    tags.push("temp");
+  }
+  if (capabilities.reasoning) {
+    tags.push("reason");
+  }
+  if (capabilities.attachment) {
+    tags.push("attach");
+  }
+  if (capabilities.tool_call) {
+    tags.push("tool");
+  }
+  const input = formatModalities(capabilities.input);
+  if (input !== "") {
+    tags.push(`in:${input}`);
+  }
+  const output = formatModalities(capabilities.output);
+  if (output !== "") {
+    tags.push(`out:${output}`);
+  }
+  return tags.join("|");
+}
+
+function formatModalities(modalities?: ModelModalities): string {
+  if (!modalities) {
+    return "";
+  }
+  const out: string[] = [];
+  if (modalities.text) {
+    out.push("text");
+  }
+  if (modalities.image) {
+    out.push("image");
+  }
+  if (modalities.audio) {
+    out.push("audio");
+  }
+  if (modalities.video) {
+    out.push("video");
+  }
+  if (modalities.pdf) {
+    out.push("pdf");
+  }
+  return out.join("+");
+}
+
+function appendEmptyItem(list: HTMLElement, text: string): void {
+  const item = document.createElement("li");
+  item.className = "message-empty";
+  item.textContent = text;
+  list.appendChild(item);
 }
 
 function setStatus(message: string, tone: Tone = "neutral"): void {
@@ -432,37 +1670,6 @@ function setStatus(message: string, tone: Tone = "neutral"): void {
   statusLine.classList.remove("error", "info");
   if (tone === "error" || tone === "info") {
     statusLine.classList.add(tone);
-  }
-}
-
-async function requestJSON<T>(path: string): Promise<T> {
-  const response = await fetch(toAbsoluteURL(path), {
-    headers: {
-      accept: "application/json",
-    },
-  });
-
-  const raw = await response.text();
-  const parsed = raw.trim() === "" ? null : (JSON.parse(raw) as T | ErrorEnvelope);
-  if (!response.ok) {
-    const errorBody = (parsed as ErrorEnvelope | null)?.error;
-    const detail = errorBody?.code ? `${errorBody.code}: ${errorBody.message ?? "request failed"}` : raw;
-    throw new Error(detail || `request failed (${response.status})`);
-  }
-  return parsed as T;
-}
-
-async function safeReadError(response: Response): Promise<string> {
-  const fallback = `request failed (${response.status})`;
-  try {
-    const raw = await response.text();
-    const parsed = raw.trim() === "" ? null : (JSON.parse(raw) as ErrorEnvelope);
-    if (parsed?.error?.code) {
-      return `${parsed.error.code}: ${parsed.error.message ?? "request failed"}`;
-    }
-    return raw || fallback;
-  } catch {
-    return fallback;
   }
 }
 
@@ -495,7 +1702,11 @@ function compactTime(value: string): string {
   if (Number.isNaN(date.getTime())) {
     return value;
   }
-  return date.toLocaleString();
+  return date.toLocaleString(getLocale(), { hour12: false });
+}
+
+function isTabKey(value: string | undefined): value is TabKey {
+  return value === "chat" || value === "models" || value === "envs" || value === "skills" || value === "workspace" || value === "cron";
 }
 
 function newSessionID(): string {
@@ -508,7 +1719,7 @@ function newSessionID(): string {
 function mustElement<T extends HTMLElement>(id: string): T {
   const element = document.getElementById(id);
   if (!element) {
-    throw new Error(`missing element: #${id}`);
+    throw new Error(t("error.missingElement", { id }));
   }
   return element as T;
 }

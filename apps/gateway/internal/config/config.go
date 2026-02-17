@@ -8,6 +8,7 @@ type Config struct {
 	Host    string
 	Port    string
 	DataDir string
+	APIKey  string
 }
 
 func Load() Config {
@@ -23,5 +24,6 @@ func Load() Config {
 	if dataDir == "" {
 		dataDir = ".data"
 	}
-	return Config{Host: host, Port: port, DataDir: dataDir}
+	apiKey := os.Getenv("COPAW_API_KEY")
+	return Config{Host: host, Port: port, DataDir: dataDir, APIKey: apiKey}
 }

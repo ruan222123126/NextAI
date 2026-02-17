@@ -4,6 +4,8 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -26,6 +28,8 @@ import (
 	"copaw-next/apps/gateway/internal/config"
 	"copaw-next/apps/gateway/internal/domain"
 	"copaw-next/apps/gateway/internal/observability"
+	"copaw-next/apps/gateway/internal/plugin"
+	"copaw-next/apps/gateway/internal/provider"
 	"copaw-next/apps/gateway/internal/repo"
 	"copaw-next/apps/gateway/internal/runner"
 )
@@ -40,22 +44,22 @@ const (
 	cronStatusRunning   = "running"
 	cronStatusSucceeded = "succeeded"
 	cronStatusFailed    = "failed"
+
+	cronLeaseDirName = "cron-leases"
 )
 
 var errCronJobNotFound = errors.New("cron_job_not_found")
 var errCronMaxConcurrencyReached = errors.New("cron_max_concurrency_reached")
 
 type Server struct {
-	cfg     config.Config
-	store   *repo.Store
-	runner  *runner.Runner
-	console *channel.ConsoleChannel
+	cfg      config.Config
+	store    *repo.Store
+	runner   *runner.Runner
+	channels map[string]plugin.ChannelPlugin
 
-	cronStop  chan struct{}
-	cronDone  chan struct{}
-	cronWG    sync.WaitGroup
-	cronRunMu sync.Mutex
-	cronRuns  map[string]int
+	cronStop chan struct{}
+	cronDone chan struct{}
+	cronWG   sync.WaitGroup
 
 	cronTaskExecutor func(context.Context, domain.CronJobSpec) error
 	closeOnce        sync.Once
@@ -70,11 +74,12 @@ func NewServer(cfg config.Config) (*Server, error) {
 		cfg:      cfg,
 		store:    store,
 		runner:   runner.New(),
-		console:  channel.NewConsoleChannel(),
+		channels: map[string]plugin.ChannelPlugin{},
 		cronStop: make(chan struct{}),
 		cronDone: make(chan struct{}),
-		cronRuns: map[string]int{},
 	}
+	srv.registerChannelPlugin(channel.NewConsoleChannel())
+	srv.registerChannelPlugin(channel.NewWebhookChannel())
 	srv.startCronScheduler()
 	return srv, nil
 }
@@ -87,11 +92,23 @@ func (s *Server) Close() {
 	})
 }
 
+func (s *Server) registerChannelPlugin(ch plugin.ChannelPlugin) {
+	if ch == nil {
+		return
+	}
+	name := strings.ToLower(strings.TrimSpace(ch.Name()))
+	if name == "" {
+		return
+	}
+	s.channels[name] = ch
+}
+
 func (s *Server) Handler() http.Handler {
 	r := chi.NewRouter()
 	r.Use(middleware.RealIP)
 	r.Use(observability.RequestID)
 	r.Use(observability.Logging)
+	r.Use(observability.APIKey(s.cfg.APIKey))
 	r.Use(cors)
 
 	r.Get("/version", s.handleVersion)
@@ -122,6 +139,7 @@ func (s *Server) Handler() http.Handler {
 
 	r.Route("/models", func(r chi.Router) {
 		r.Get("/", s.listProviders)
+		r.Get("/catalog", s.getModelCatalog)
 		r.Put("/{provider_id}/config", s.configureProvider)
 		r.Get("/active", s.getActiveModels)
 		r.Put("/active", s.setActiveModels)
@@ -430,6 +448,14 @@ func (s *Server) processAgent(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "invalid_request", "session_id, user_id, channel are required", nil)
 		return
 	}
+	channelPlugin, channelCfg, channelName, err := s.resolveChannel(req.Channel)
+	if err != nil {
+		status, code, message := mapChannelError(err)
+		writeErr(w, status, code, message, nil)
+		return
+	}
+	req.Channel = channelName
+
 	chatID := ""
 	activeLLM := domain.ModelSlotConfig{}
 	providerSetting := repo.ProviderSetting{}
@@ -457,18 +483,32 @@ func (s *Server) processAgent(w http.ResponseWriter, r *http.Request) {
 			})
 		}
 		activeLLM = state.ActiveLLM
-		providerSetting = state.Providers[activeLLM.ProviderID]
+		activeLLM.ProviderID = normalizeProviderID(activeLLM.ProviderID)
+		providerSetting = getProviderSettingByID(state, activeLLM.ProviderID)
 		return nil
 	}); err != nil {
 		writeErr(w, http.StatusInternalServerError, "store_error", err.Error(), nil)
 		return
 	}
+	if !providerEnabled(providerSetting) {
+		writeErr(w, http.StatusBadRequest, "provider_disabled", "active provider is disabled", nil)
+		return
+	}
+	resolvedModel, ok := provider.ResolveModelID(activeLLM.ProviderID, activeLLM.Model, providerSetting.ModelAliases)
+	if !ok {
+		writeErr(w, http.StatusBadRequest, "model_not_found", "active model is not available for provider", nil)
+		return
+	}
+	activeLLM.Model = resolvedModel
 
 	reply, err := s.runner.GenerateReply(r.Context(), req, runner.GenerateConfig{
 		ProviderID: activeLLM.ProviderID,
 		Model:      activeLLM.Model,
 		APIKey:     resolveProviderAPIKey(activeLLM.ProviderID, providerSetting),
 		BaseURL:    resolveProviderBaseURL(activeLLM.ProviderID, providerSetting),
+		AdapterID:  provider.ResolveAdapter(activeLLM.ProviderID),
+		Headers:    sanitizeStringMap(providerSetting.Headers),
+		TimeoutMS:  providerSetting.TimeoutMS,
 	})
 	if err != nil {
 		status, code, message := mapRunnerError(err)
@@ -500,7 +540,15 @@ func (s *Server) processAgent(w http.ResponseWriter, r *http.Request) {
 		return nil
 	})
 
-	s.console.SendText(req.UserID, req.SessionID, reply)
+	if err := channelPlugin.SendText(r.Context(), req.UserID, req.SessionID, reply, channelCfg); err != nil {
+		status, code, message := mapChannelError(&channelError{
+			Code:    "channel_dispatch_failed",
+			Message: fmt.Sprintf("failed to dispatch message to channel %q", channelName),
+			Err:     err,
+		})
+		writeErr(w, status, code, message, nil)
+		return
+	}
 
 	if !req.Stream {
 		writeJSON(w, http.StatusOK, map[string]string{"reply": reply})
@@ -550,6 +598,125 @@ func splitReplyChunks(text string, chunkSize int) []string {
 		out = append(out, string(runes[i:end]))
 	}
 	return out
+}
+
+type channelError struct {
+	Code    string
+	Message string
+	Err     error
+}
+
+func (e *channelError) Error() string {
+	if e == nil {
+		return ""
+	}
+	if e.Message != "" {
+		return e.Message
+	}
+	if e.Err != nil {
+		return e.Err.Error()
+	}
+	return e.Code
+}
+
+func (e *channelError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
+}
+
+func (s *Server) resolveChannel(name string) (plugin.ChannelPlugin, map[string]interface{}, string, error) {
+	channelName := strings.ToLower(strings.TrimSpace(name))
+	if channelName == "" {
+		return nil, nil, "", &channelError{Code: "invalid_channel", Message: "channel is required"}
+	}
+	plug, ok := s.channels[channelName]
+	if !ok {
+		return nil, nil, "", &channelError{
+			Code:    "channel_not_supported",
+			Message: fmt.Sprintf("channel %q is not supported", channelName),
+		}
+	}
+
+	cfg := map[string]interface{}{}
+	s.store.Read(func(st *repo.State) {
+		if st.Channels == nil {
+			return
+		}
+		raw := st.Channels[channelName]
+		cfg = cloneChannelConfig(raw)
+	})
+
+	if !channelEnabled(channelName, cfg) {
+		return nil, nil, "", &channelError{
+			Code:    "channel_disabled",
+			Message: fmt.Sprintf("channel %q is disabled", channelName),
+		}
+	}
+	return plug, cfg, channelName, nil
+}
+
+func channelEnabled(name string, cfg map[string]interface{}) bool {
+	if raw, ok := cfg["enabled"]; ok {
+		return parseBool(raw)
+	}
+	return name == "console"
+}
+
+func parseBool(v interface{}) bool {
+	switch value := v.(type) {
+	case bool:
+		return value
+	case string:
+		return strings.EqualFold(strings.TrimSpace(value), "true")
+	case float64:
+		return value != 0
+	case int:
+		return value != 0
+	case int64:
+		return value != 0
+	default:
+		return false
+	}
+}
+
+func cloneChannelConfig(in map[string]interface{}) map[string]interface{} {
+	if in == nil {
+		return map[string]interface{}{}
+	}
+	encoded, err := json.Marshal(in)
+	if err != nil {
+		out := map[string]interface{}{}
+		for key, value := range in {
+			out[key] = value
+		}
+		return out
+	}
+	out := map[string]interface{}{}
+	if err := json.Unmarshal(encoded, &out); err != nil {
+		fallback := map[string]interface{}{}
+		for key, value := range in {
+			fallback[key] = value
+		}
+		return fallback
+	}
+	return out
+}
+
+func mapChannelError(err error) (status int, code string, message string) {
+	var chErr *channelError
+	if errors.As(err, &chErr) {
+		switch chErr.Code {
+		case "invalid_channel", "channel_not_supported", "channel_disabled":
+			return http.StatusBadRequest, chErr.Code, chErr.Message
+		case "channel_dispatch_failed":
+			return http.StatusBadGateway, chErr.Code, chErr.Message
+		default:
+			return http.StatusBadGateway, "channel_dispatch_failed", "channel dispatch failed"
+		}
+	}
+	return http.StatusBadGateway, "channel_dispatch_failed", "channel dispatch failed"
 }
 
 func (s *Server) listCronJobs(w http.ResponseWriter, _ *http.Request) {
@@ -739,13 +906,17 @@ func (s *Server) executeCronJob(id string) error {
 	}
 
 	runtime := cronRuntimeSpec(job)
-	if !s.tryAcquireCronSlot(id, runtime.MaxConcurrency) {
+	slot, acquired, err := s.tryAcquireCronSlot(id, runtime)
+	if err != nil {
+		return err
+	}
+	if !acquired {
 		if err := s.markCronExecutionSkipped(id, fmt.Sprintf("max_concurrency limit reached (%d)", runtime.MaxConcurrency)); err != nil {
 			return err
 		}
 		return errCronMaxConcurrencyReached
 	}
-	defer s.releaseCronSlot(id)
+	defer s.releaseCronSlot(slot)
 
 	startedAt := nowISO()
 	running := cronStatusRunning
@@ -803,9 +974,28 @@ func (s *Server) executeCronTask(ctx context.Context, job domain.CronJobSpec) er
 	default:
 	}
 	if job.TaskType == "text" && strings.TrimSpace(job.Text) != "" {
-		s.console.SendText(job.Dispatch.Target.UserID, job.Dispatch.Target.SessionID, job.Text)
+		channelName := resolveCronDispatchChannel(job)
+		channelPlugin, channelCfg, _, err := s.resolveChannel(channelName)
+		if err != nil {
+			return err
+		}
+		if err := channelPlugin.SendText(ctx, job.Dispatch.Target.UserID, job.Dispatch.Target.SessionID, job.Text, channelCfg); err != nil {
+			return &channelError{
+				Code:    "channel_dispatch_failed",
+				Message: fmt.Sprintf("failed to dispatch cron job to channel %q", channelName),
+				Err:     err,
+			}
+		}
 	}
 	return nil
+}
+
+func resolveCronDispatchChannel(job domain.CronJobSpec) string {
+	channelName := strings.TrimSpace(job.Dispatch.Channel)
+	if channelName == "" {
+		return "console"
+	}
+	return channelName
 }
 
 func alignCronStateForMutation(job domain.CronJobSpec, state domain.CronJobState, now time.Time) domain.CronJobState {
@@ -853,28 +1043,151 @@ func cronJobSchedulable(job domain.CronJobSpec, state domain.CronJobState) bool 
 	return job.Enabled && !state.Paused
 }
 
-func (s *Server) tryAcquireCronSlot(jobID string, maxConcurrency int) bool {
+type cronLeaseSlot struct {
+	LeaseID string `json:"lease_id"`
+	JobID   string `json:"job_id"`
+	Owner   string `json:"owner"`
+	Slot    int    `json:"slot"`
+
+	AcquiredAt string `json:"acquired_at"`
+	ExpiresAt  string `json:"expires_at"`
+}
+
+type cronLeaseHandle struct {
+	Path    string
+	LeaseID string
+}
+
+func (s *Server) tryAcquireCronSlot(jobID string, runtime domain.CronRuntimeSpec) (*cronLeaseHandle, bool, error) {
+	maxConcurrency := runtime.MaxConcurrency
 	if maxConcurrency <= 0 {
 		maxConcurrency = 1
 	}
-	s.cronRunMu.Lock()
-	defer s.cronRunMu.Unlock()
-	if s.cronRuns[jobID] >= maxConcurrency {
-		return false
+
+	now := time.Now().UTC()
+	ttl := time.Duration(runtime.TimeoutSeconds)*time.Second + 30*time.Second
+	if ttl < 30*time.Second {
+		ttl = 30 * time.Second
 	}
-	s.cronRuns[jobID]++
-	return true
+
+	leaseID := newCronLeaseID()
+	dir := filepath.Join(s.cfg.DataDir, cronLeaseDirName, encodeCronJobID(jobID))
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return nil, false, err
+	}
+
+	for slot := 0; slot < maxConcurrency; slot++ {
+		path := filepath.Join(dir, fmt.Sprintf("slot-%d.json", slot))
+		if err := cleanupExpiredCronLease(path, now); err != nil {
+			return nil, false, err
+		}
+
+		lease := cronLeaseSlot{
+			LeaseID:    leaseID,
+			JobID:      jobID,
+			Owner:      fmt.Sprintf("pid:%d", os.Getpid()),
+			Slot:       slot,
+			AcquiredAt: now.Format(time.RFC3339Nano),
+			ExpiresAt:  now.Add(ttl).Format(time.RFC3339Nano),
+		}
+		body, err := json.Marshal(lease)
+		if err != nil {
+			return nil, false, err
+		}
+
+		f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		if err != nil {
+			if errors.Is(err, os.ErrExist) {
+				continue
+			}
+			return nil, false, err
+		}
+
+		if _, err := f.Write(body); err != nil {
+			_ = f.Close()
+			_ = removeIfExists(path)
+			return nil, false, err
+		}
+		if err := f.Close(); err != nil {
+			_ = removeIfExists(path)
+			return nil, false, err
+		}
+		return &cronLeaseHandle{Path: path, LeaseID: leaseID}, true, nil
+	}
+	return nil, false, nil
 }
 
-func (s *Server) releaseCronSlot(jobID string) {
-	s.cronRunMu.Lock()
-	defer s.cronRunMu.Unlock()
-	n := s.cronRuns[jobID] - 1
-	if n <= 0 {
-		delete(s.cronRuns, jobID)
+func (s *Server) releaseCronSlot(slot *cronLeaseHandle) {
+	if slot == nil || strings.TrimSpace(slot.Path) == "" {
 		return
 	}
-	s.cronRuns[jobID] = n
+
+	body, err := os.ReadFile(slot.Path)
+	if errors.Is(err, os.ErrNotExist) {
+		return
+	}
+	if err != nil {
+		log.Printf("release cron lease read failed: path=%s err=%v", slot.Path, err)
+		return
+	}
+
+	var lease cronLeaseSlot
+	if err := json.Unmarshal(body, &lease); err != nil {
+		if rmErr := removeIfExists(slot.Path); rmErr != nil {
+			log.Printf("release cron lease cleanup failed: path=%s err=%v", slot.Path, rmErr)
+		}
+		return
+	}
+	if lease.LeaseID != slot.LeaseID {
+		return
+	}
+	if err := os.Remove(slot.Path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		log.Printf("release cron lease failed: path=%s err=%v", slot.Path, err)
+	}
+}
+
+func cleanupExpiredCronLease(path string, now time.Time) error {
+	body, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+
+	var lease cronLeaseSlot
+	if err := json.Unmarshal(body, &lease); err != nil {
+		return removeIfExists(path)
+	}
+
+	expiresAt, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(lease.ExpiresAt))
+	if err != nil {
+		return removeIfExists(path)
+	}
+	if !now.After(expiresAt.UTC()) {
+		return nil
+	}
+	return removeIfExists(path)
+}
+
+func removeIfExists(path string) error {
+	err := os.Remove(path)
+	if err == nil || errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	return err
+}
+
+func encodeCronJobID(jobID string) string {
+	return base64.RawURLEncoding.EncodeToString([]byte(jobID))
+}
+
+func newCronLeaseID() string {
+	buf := make([]byte, 6)
+	if _, err := rand.Read(buf); err != nil {
+		return fmt.Sprintf("%d-%d", os.Getpid(), time.Now().UnixNano())
+	}
+	return fmt.Sprintf("%d-%x", os.Getpid(), buf)
 }
 
 func (s *Server) markCronExecutionSkipped(id, message string) error {
@@ -1043,53 +1356,71 @@ func cronMisfireExceeded(dueAt *time.Time, runtime domain.CronRuntimeSpec, now t
 }
 
 func (s *Server) listProviders(w http.ResponseWriter, _ *http.Request) {
-	out := make([]domain.ProviderInfo, 0)
-	s.store.Read(func(st *repo.State) {
-		for id, setting := range st.Providers {
-			has := strings.TrimSpace(resolveProviderAPIKey(id, setting)) != ""
-			out = append(out, domain.ProviderInfo{
-				ID: id, Name: strings.ToUpper(id), APIKeyPrefix: strings.ToUpper(id) + "_API_KEY",
-				Models:             providerModels(id),
-				AllowCustomBaseURL: providerAllowCustomBaseURL(id),
-				HasAPIKey:          has,
-				CurrentAPIKey:      maskKey(resolveProviderAPIKey(id, setting)),
-				CurrentBaseURL:     resolveProviderBaseURL(id, setting),
-			})
-		}
+	providers, _, _ := s.collectProviderCatalog()
+	writeJSON(w, http.StatusOK, providers)
+}
+
+func (s *Server) getModelCatalog(w http.ResponseWriter, _ *http.Request) {
+	providers, defaults, active := s.collectProviderCatalog()
+	writeJSON(w, http.StatusOK, domain.ModelCatalogInfo{
+		Providers: providers,
+		Defaults:  defaults,
+		ActiveLLM: active,
 	})
-	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
-	writeJSON(w, http.StatusOK, out)
 }
 
 func (s *Server) configureProvider(w http.ResponseWriter, r *http.Request) {
-	providerID := chi.URLParam(r, "provider_id")
+	providerID := normalizeProviderID(chi.URLParam(r, "provider_id"))
+	if providerID == "" {
+		writeErr(w, http.StatusBadRequest, "invalid_provider_id", "provider_id is required", nil)
+		return
+	}
 	var body struct {
-		APIKey  *string `json:"api_key"`
-		BaseURL *string `json:"base_url"`
+		APIKey       *string            `json:"api_key"`
+		BaseURL      *string            `json:"base_url"`
+		Enabled      *bool              `json:"enabled"`
+		Headers      *map[string]string `json:"headers"`
+		TimeoutMS    *int               `json:"timeout_ms"`
+		ModelAliases *map[string]string `json:"model_aliases"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid_json", "invalid request body", nil)
 		return
 	}
+	if body.TimeoutMS != nil && *body.TimeoutMS < 0 {
+		writeErr(w, http.StatusBadRequest, "invalid_provider_config", "timeout_ms must be >= 0", nil)
+		return
+	}
+	sanitizedAliases, aliasErr := sanitizeModelAliases(body.ModelAliases)
+	if aliasErr != nil {
+		writeErr(w, http.StatusBadRequest, "invalid_provider_config", aliasErr.Error(), nil)
+		return
+	}
 	var out domain.ProviderInfo
 	if err := s.store.Write(func(st *repo.State) error {
-		setting := st.Providers[providerID]
+		setting := getProviderSettingByID(st, providerID)
+		normalizeProviderSetting(&setting)
 		if body.APIKey != nil {
-			setting.APIKey = *body.APIKey
+			setting.APIKey = strings.TrimSpace(*body.APIKey)
 		}
 		if body.BaseURL != nil {
-			setting.BaseURL = *body.BaseURL
+			setting.BaseURL = strings.TrimSpace(*body.BaseURL)
+		}
+		if body.Enabled != nil {
+			enabled := *body.Enabled
+			setting.Enabled = &enabled
+		}
+		if body.Headers != nil {
+			setting.Headers = sanitizeStringMap(*body.Headers)
+		}
+		if body.TimeoutMS != nil {
+			setting.TimeoutMS = *body.TimeoutMS
+		}
+		if body.ModelAliases != nil {
+			setting.ModelAliases = sanitizedAliases
 		}
 		st.Providers[providerID] = setting
-		has := strings.TrimSpace(resolveProviderAPIKey(providerID, setting)) != ""
-		out = domain.ProviderInfo{
-			ID: providerID, Name: strings.ToUpper(providerID), APIKeyPrefix: strings.ToUpper(providerID) + "_API_KEY",
-			Models:             providerModels(providerID),
-			AllowCustomBaseURL: providerAllowCustomBaseURL(providerID),
-			HasAPIKey:          has,
-			CurrentAPIKey:      maskKey(resolveProviderAPIKey(providerID, setting)),
-			CurrentBaseURL:     resolveProviderBaseURL(providerID, setting),
-		}
+		out = buildProviderInfo(providerID, setting)
 		return nil
 	}); err != nil {
 		writeErr(w, http.StatusInternalServerError, "store_error", err.Error(), nil)
@@ -1112,25 +1443,48 @@ func (s *Server) setActiveModels(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "invalid_json", "invalid request body", nil)
 		return
 	}
+	body.ProviderID = normalizeProviderID(body.ProviderID)
+	body.Model = strings.TrimSpace(body.Model)
 	if body.ProviderID == "" || body.Model == "" {
 		writeErr(w, http.StatusBadRequest, "invalid_model_slot", "provider_id and model are required", nil)
 		return
 	}
+	var out domain.ModelSlotConfig
 	if err := s.store.Write(func(st *repo.State) error {
-		if _, ok := st.Providers[body.ProviderID]; !ok {
+		setting, ok := findProviderSettingByID(st, body.ProviderID)
+		if !ok {
 			return errors.New("provider_not_found")
 		}
-		st.ActiveLLM = body
+		normalizeProviderSetting(&setting)
+		if !providerEnabled(setting) {
+			return errors.New("provider_disabled")
+		}
+		resolvedModel, ok := provider.ResolveModelID(body.ProviderID, body.Model, setting.ModelAliases)
+		if !ok {
+			return errors.New("model_not_found")
+		}
+		out = domain.ModelSlotConfig{
+			ProviderID: body.ProviderID,
+			Model:      resolvedModel,
+		}
+		st.ActiveLLM = out
 		return nil
 	}); err != nil {
-		if err.Error() == "provider_not_found" {
+		switch err.Error() {
+		case "provider_not_found":
 			writeErr(w, http.StatusNotFound, "provider_not_found", "provider not found", nil)
+			return
+		case "provider_disabled":
+			writeErr(w, http.StatusBadRequest, "provider_disabled", "provider is disabled", nil)
+			return
+		case "model_not_found":
+			writeErr(w, http.StatusBadRequest, "model_not_found", "model not found for provider", nil)
 			return
 		}
 		writeErr(w, http.StatusInternalServerError, "store_error", err.Error(), nil)
 		return
 	}
-	writeJSON(w, http.StatusOK, domain.ActiveModelsInfo{ActiveLLM: body})
+	writeJSON(w, http.StatusOK, domain.ActiveModelsInfo{ActiveLLM: out})
 }
 
 func (s *Server) listEnvs(w http.ResponseWriter, _ *http.Request) {
@@ -1488,12 +1842,10 @@ func (s *Server) listChannels(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *Server) listChannelTypes(w http.ResponseWriter, _ *http.Request) {
-	out := make([]string, 0)
-	s.store.Read(func(st *repo.State) {
-		for k := range st.Channels {
-			out = append(out, k)
-		}
-	})
+	out := make([]string, 0, len(s.channels))
+	for name := range s.channels {
+		out = append(out, name)
+	}
 	sort.Strings(out)
 	writeJSON(w, http.StatusOK, out)
 }
@@ -1504,8 +1856,18 @@ func (s *Server) putChannels(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "invalid_json", "invalid request body", nil)
 		return
 	}
+	for name := range body {
+		normalized := strings.ToLower(strings.TrimSpace(name))
+		if _, ok := s.channels[normalized]; !ok {
+			writeErr(w, http.StatusBadRequest, "channel_not_supported", fmt.Sprintf("channel %q is not supported", name), nil)
+			return
+		}
+	}
 	if err := s.store.Write(func(st *repo.State) error {
-		st.Channels = body
+		st.Channels = domain.ChannelConfigMap{}
+		for name, cfg := range body {
+			st.Channels[strings.ToLower(strings.TrimSpace(name))] = cfg
+		}
 		return nil
 	}); err != nil {
 		writeErr(w, http.StatusInternalServerError, "store_error", err.Error(), nil)
@@ -1516,10 +1878,11 @@ func (s *Server) putChannels(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) getChannel(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "channel_name")
+	normalized := strings.ToLower(strings.TrimSpace(name))
 	found := false
 	var out map[string]interface{}
 	s.store.Read(func(st *repo.State) {
-		out, found = st.Channels[name]
+		out, found = st.Channels[normalized]
 	})
 	if !found {
 		writeErr(w, http.StatusNotFound, "not_found", "channel not found", nil)
@@ -1530,6 +1893,11 @@ func (s *Server) getChannel(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) putChannel(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "channel_name")
+	normalized := strings.ToLower(strings.TrimSpace(name))
+	if _, ok := s.channels[normalized]; !ok {
+		writeErr(w, http.StatusBadRequest, "channel_not_supported", fmt.Sprintf("channel %q is not supported", name), nil)
+		return
+	}
 	var body map[string]interface{}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid_json", "invalid request body", nil)
@@ -1539,7 +1907,7 @@ func (s *Server) putChannel(w http.ResponseWriter, r *http.Request) {
 		if st.Channels == nil {
 			st.Channels = domain.ChannelConfigMap{}
 		}
-		st.Channels[name] = body
+		st.Channels[normalized] = body
 		return nil
 	}); err != nil {
 		writeErr(w, http.StatusInternalServerError, "store_error", err.Error(), nil)
@@ -1567,33 +1935,59 @@ func mapRunnerError(err error) (status int, code string, message string) {
 	return http.StatusInternalServerError, "runner_error", "runner execution failed"
 }
 
-func providerModels(providerID string) []domain.ModelInfo {
-	switch strings.ToLower(strings.TrimSpace(providerID)) {
-	case runner.ProviderOpenAI:
-		return []domain.ModelInfo{
-			{ID: "gpt-4o-mini", Name: "GPT-4o Mini"},
-			{ID: "gpt-4.1-mini", Name: "GPT-4.1 Mini"},
+func (s *Server) collectProviderCatalog() ([]domain.ProviderInfo, map[string]string, domain.ModelSlotConfig) {
+	out := make([]domain.ProviderInfo, 0)
+	defaults := map[string]string{}
+	active := domain.ModelSlotConfig{}
+
+	s.store.Read(func(st *repo.State) {
+		active = st.ActiveLLM
+		ids := map[string]struct{}{}
+		settingsByID := map[string]repo.ProviderSetting{}
+
+		for _, id := range provider.ListBuiltinProviderIDs() {
+			ids[id] = struct{}{}
 		}
-	default:
-		return []domain.ModelInfo{{ID: "demo-chat", Name: "Demo Chat"}}
-	}
+		for rawID, setting := range st.Providers {
+			id := normalizeProviderID(rawID)
+			if id == "" {
+				continue
+			}
+			normalizeProviderSetting(&setting)
+			settingsByID[id] = setting
+			ids[id] = struct{}{}
+		}
+
+		ordered := make([]string, 0, len(ids))
+		for id := range ids {
+			ordered = append(ordered, id)
+		}
+		sort.Strings(ordered)
+
+		for _, id := range ordered {
+			setting := settingsByID[id]
+			normalizeProviderSetting(&setting)
+			out = append(out, buildProviderInfo(id, setting))
+			defaults[id] = provider.DefaultModelID(id)
+		}
+	})
+	return out, defaults, active
 }
 
-func providerAllowCustomBaseURL(providerID string) bool {
-	switch strings.ToLower(strings.TrimSpace(providerID)) {
-	case runner.ProviderDemo:
-		return false
-	default:
-		return true
-	}
-}
-
-func providerDefaultBaseURL(providerID string) string {
-	switch strings.ToLower(strings.TrimSpace(providerID)) {
-	case runner.ProviderOpenAI:
-		return "https://api.openai.com/v1"
-	default:
-		return ""
+func buildProviderInfo(providerID string, setting repo.ProviderSetting) domain.ProviderInfo {
+	normalizeProviderSetting(&setting)
+	spec := provider.ResolveProvider(providerID)
+	apiKey := resolveProviderAPIKey(providerID, setting)
+	return domain.ProviderInfo{
+		ID:                 providerID,
+		Name:               spec.Name,
+		APIKeyPrefix:       spec.APIKeyPrefix,
+		Models:             provider.ResolveModels(providerID, setting.ModelAliases),
+		AllowCustomBaseURL: spec.AllowCustomBaseURL,
+		Enabled:            providerEnabled(setting),
+		HasAPIKey:          strings.TrimSpace(apiKey) != "",
+		CurrentAPIKey:      maskKey(apiKey),
+		CurrentBaseURL:     resolveProviderBaseURL(providerID, setting),
 	}
 }
 
@@ -1611,16 +2005,91 @@ func resolveProviderBaseURL(providerID string, setting repo.ProviderSetting) str
 	if envBaseURL := strings.TrimSpace(os.Getenv(providerEnvPrefix(providerID) + "_BASE_URL")); envBaseURL != "" {
 		return envBaseURL
 	}
-	return providerDefaultBaseURL(providerID)
+	return provider.ResolveProvider(providerID).DefaultBaseURL
 }
 
 func providerEnvPrefix(providerID string) string {
-	prefix := strings.ToUpper(strings.TrimSpace(providerID))
-	if prefix == "" {
-		return "PROVIDER"
+	return provider.EnvPrefix(providerID)
+}
+
+func normalizeProviderID(providerID string) string {
+	return strings.ToLower(strings.TrimSpace(providerID))
+}
+
+func providerEnabled(setting repo.ProviderSetting) bool {
+	if setting.Enabled == nil {
+		return true
 	}
-	replacer := strings.NewReplacer("-", "_", ".", "_", " ", "_")
-	return replacer.Replace(prefix)
+	return *setting.Enabled
+}
+
+func normalizeProviderSetting(setting *repo.ProviderSetting) {
+	if setting == nil {
+		return
+	}
+	if setting.Enabled == nil {
+		enabled := true
+		setting.Enabled = &enabled
+	}
+	if setting.Headers == nil {
+		setting.Headers = map[string]string{}
+	}
+	if setting.ModelAliases == nil {
+		setting.ModelAliases = map[string]string{}
+	}
+}
+
+func sanitizeStringMap(in map[string]string) map[string]string {
+	out := map[string]string{}
+	for key, value := range in {
+		k := strings.TrimSpace(key)
+		v := strings.TrimSpace(value)
+		if k == "" || v == "" {
+			continue
+		}
+		out[k] = v
+	}
+	return out
+}
+
+func sanitizeModelAliases(raw *map[string]string) (map[string]string, error) {
+	if raw == nil {
+		return nil, nil
+	}
+	out := map[string]string{}
+	for key, value := range *raw {
+		alias := strings.TrimSpace(key)
+		modelID := strings.TrimSpace(value)
+		if alias == "" || modelID == "" {
+			return nil, errors.New("model_aliases requires non-empty key and value")
+		}
+		out[alias] = modelID
+	}
+	return out, nil
+}
+
+func getProviderSettingByID(st *repo.State, providerID string) repo.ProviderSetting {
+	if setting, ok := findProviderSettingByID(st, providerID); ok {
+		return setting
+	}
+	setting := repo.ProviderSetting{}
+	normalizeProviderSetting(&setting)
+	return setting
+}
+
+func findProviderSettingByID(st *repo.State, providerID string) (repo.ProviderSetting, bool) {
+	if st == nil {
+		return repo.ProviderSetting{}, false
+	}
+	if setting, ok := st.Providers[providerID]; ok {
+		return setting, true
+	}
+	for key, setting := range st.Providers {
+		if normalizeProviderID(key) == providerID {
+			return setting, true
+		}
+	}
+	return repo.ProviderSetting{}, false
 }
 
 func writeJSON(w http.ResponseWriter, code int, data interface{}) {

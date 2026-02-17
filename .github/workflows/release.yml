@@ -1,0 +1,80 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+
+      - name: Cache Go modules/build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.23.0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: "pnpm"
+
+      - name: Install dependencies (retry)
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3; do
+            if pnpm install --recursive --frozen-lockfile; then
+              exit 0
+            fi
+            if [ "$attempt" -lt 3 ]; then
+              sleep $((attempt * 10))
+            fi
+          done
+          echo "pnpm install failed after retries" >&2
+          exit 1
+
+      - name: Run release verification
+        run: |
+          cd apps/gateway && go test ./...
+          cd "$GITHUB_WORKSPACE" && pnpm -r test
+          pnpm -r build
+
+      - name: Build release artifacts
+        run: |
+          mkdir -p dist
+          cd apps/gateway && GOOS=linux GOARCH=amd64 go build -o "$GITHUB_WORKSPACE/dist/gateway-linux-amd64" ./cmd/gateway
+          cd "$GITHUB_WORKSPACE/apps/cli" && pnpm build
+          tar -czf "$GITHUB_WORKSPACE/dist/cli-dist.tar.gz" -C "$GITHUB_WORKSPACE/apps/cli/dist" .
+          cd "$GITHUB_WORKSPACE/apps/web" && pnpm build
+          tar -czf "$GITHUB_WORKSPACE/dist/web-dist.tar.gz" -C "$GITHUB_WORKSPACE/apps/web/dist" .
+          cp "$GITHUB_WORKSPACE/docs/release-template.md" "$GITHUB_WORKSPACE/dist/release-template.md"
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          body_path: docs/release-template.md
+          files: |
+            dist/gateway-linux-amd64
+            dist/cli-dist.tar.gz
+            dist/web-dist.tar.gz
+            dist/release-template.md

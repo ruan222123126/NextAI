@@ -1,3 +1,49 @@
+export interface ApiErrorEnvelope {
+  error?: {
+    code?: string;
+    message?: string;
+    details?: unknown;
+  };
+  [k: string]: unknown;
+}
+
+export class ApiClientError extends Error {
+  readonly status: number;
+  readonly code: string;
+  readonly details?: unknown;
+  readonly payload: unknown;
+
+  constructor(input: { status: number; code: string; message: string; details?: unknown; payload: unknown }) {
+    super(input.message);
+    this.name = "ApiClientError";
+    this.status = input.status;
+    this.code = input.code;
+    this.details = input.details;
+    this.payload = input.payload;
+  }
+}
+
+function parseResponsePayload(text: string): unknown {
+  try {
+    return text ? JSON.parse(text) : {};
+  } catch {
+    return { raw: text };
+  }
+}
+
+function toClientError(status: number, payload: unknown, fallbackMessage: string): ApiClientError {
+  const envelope = payload as ApiErrorEnvelope;
+  const code = envelope?.error?.code ?? "http_error";
+  const message = envelope?.error?.message ?? fallbackMessage;
+  return new ApiClientError({
+    status,
+    code,
+    message,
+    details: envelope?.error?.details,
+    payload,
+  });
+}
+
 export class ApiClient {
   private readonly base: string;
 
@@ -15,15 +61,10 @@ export class ApiClient {
     });
 
     const text = await res.text();
-    let data: unknown = {};
-    try {
-      data = text ? JSON.parse(text) : {};
-    } catch {
-      data = { raw: text };
-    }
+    const data = parseResponsePayload(text);
 
     if (!res.ok) {
-      throw new Error(JSON.stringify(data));
+      throw toClientError(res.status, data, `${res.status} ${res.statusText}`.trim());
     }
 
     return data as T;
@@ -55,9 +96,10 @@ export class ApiClient {
       method: "POST",
       body: form,
     });
-    const json = await res.json();
+    const text = await res.text();
+    const json = parseResponsePayload(text);
     if (!res.ok) {
-      throw new Error(JSON.stringify(json));
+      throw toClientError(res.status, json, `${res.status} ${res.statusText}`.trim());
     }
     return json;
   }

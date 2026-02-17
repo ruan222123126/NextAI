@@ -1,0 +1,28 @@
+export const zhCN = {
+  "cli.program.description": "CoPaw Next CLI",
+  "cli.option.json": "机器可读 JSON 输出（紧凑格式）",
+  "cli.option.locale": "输出语言（zh-CN|en-US）",
+  "cli.command.app": "网关应用命令",
+  "cli.command.app.start": "输出启动连通性提示",
+  "cli.command.chats": "会话管理",
+  "cli.command.cron": "定时任务管理",
+  "cli.command.models": "模型/提供商管理",
+  "cli.command.env": "环境变量管理",
+  "cli.command.skills": "技能管理",
+  "cli.command.workspace": "工作区操作",
+  "cli.command.channels": "渠道配置管理",
+  "chats.default_name": "新会话",
+  "output.download_failed": "download failed: {{status}}",
+  "error_hint.invalid_json": "请求 JSON 格式非法，检查命令参数中的 JSON 字符串。",
+  "error_hint.invalid_request": "请求字段缺失或格式错误，检查必填参数。",
+  "error_hint.not_found": "资源不存在，确认 ID 或名称是否正确。",
+  "error_hint.unauthorized": "鉴权失败，请检查 COPAW_API_KEY 或 Authorization。",
+  "error_hint.provider_not_configured": "模型提供方未配置，先执行 models config/active-set。",
+  "error_hint.provider_not_supported": "模型提供方不受支持，检查 provider_id。",
+  "error_hint.provider_request_failed": "上游模型请求失败，检查 API Key/Base URL/网络。",
+  "error_hint.provider_invalid_reply": "上游返回格式异常，检查模型服务返回。",
+  "error_hint.store_error": "网关存储写入失败，检查 COPAW_DATA_DIR 权限与磁盘状态。",
+} as const;
+
+export type CliMessageKey = keyof typeof zhCN;
+export type CliMessages = Record<CliMessageKey, string>;

@@ -7,11 +7,21 @@ on:
 jobs:
   full:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version: '1.22'
+      - name: Cache Go modules/build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-
       - uses: pnpm/action-setup@v4
         with:
           version: 10.23.0
@@ -19,10 +29,23 @@ jobs:
         with:
           node-version: 22
           cache: 'pnpm'
-      - name: Install Node deps
-        run: pnpm install --recursive
-      - name: Gateway tests
-        run: cd apps/gateway && go test ./...
+      - name: Install Node deps (retry)
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3; do
+            if pnpm install --recursive --frozen-lockfile; then
+              exit 0
+            fi
+            if [ "$attempt" -lt 3 ]; then
+              sleep $((attempt * 10))
+            fi
+          done
+          echo "pnpm install failed after retries" >&2
+          exit 1
+      - name: Gateway coverage gate
+        run: make gateway-coverage
+      - name: CLI coverage gate
+        run: cd apps/cli && pnpm run test:coverage
       - name: Build CLI
         run: cd apps/cli && pnpm build
       - name: Build web
