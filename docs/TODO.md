@@ -1,6 +1,6 @@
 # NextAI TODO
 
-更新时间：2026-02-17 17:37:38 +0800
+更新时间：2026-02-17 17:40:51 +0800
 
 ## 执行约定（强制）
 - 每位接手 AI 开始前，必须先阅读本文件与 `/home/ruan/.codex/handoff/latest.md`。
@@ -29,6 +29,8 @@
 - [x] `docs/v1-roadmap.md`、`docs/contracts.md`、本地开发文档、部署文档与发布模板已完成。
 
 ## 6. 实操验证（汇总）
+- [x] 2026-02-17 17:40 +0800 文档同步更新：`README.md` 重写为可直接落地的快速开始与验证指引；`SECURITY.md` 精简漏洞提交流程段落；`docs/AI/AGENTS.md` 规则文案更新为简版约束。
+- [x] 2026-02-17 17:40 +0800 验证通过：`cd apps/gateway && go test ./internal/app`、`cd apps/gateway && go test ./...`（文档改动本身未触发额外构建）。
 - [x] 2026-02-17 17:37 +0800 Gateway 提示词拼装修复：`/agent/process` 调模型时的 system 提示由“仅注入 `docs/AI/AGENTS.md`”改为“按顺序拼接 `docs/AI/AGENTS.md` + `docs/AI/ai-tools.md`”，确保工具使用规范与总规则同时下发给模型。
 - [x] 2026-02-17 17:37 +0800 验证通过：`cd apps/gateway && go test ./internal/app`、`cd apps/gateway && go test ./...`。
 - [x] 2026-02-17 17:36 +0800 README 文档重写：根目录 `README.md` 补齐 v1 能力说明、Monorepo 目录结构、Gateway/CLI/TUI/Web 快速启动步骤、环境变量与常用验证命令，移除“Web 占位”过时表述。
