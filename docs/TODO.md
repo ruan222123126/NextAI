@@ -1,6 +1,6 @@
 # NextAI TODO
 
-更新时间：2026-02-17 16:43:23 +0800
+更新时间：2026-02-17 17:37:38 +0800
 
 ## 执行约定（强制）
 - 每位接手 AI 开始前，必须先阅读本文件与 `/home/ruan/.codex/handoff/latest.md`。
@@ -29,6 +29,10 @@
 - [x] `docs/v1-roadmap.md`、`docs/contracts.md`、本地开发文档、部署文档与发布模板已完成。
 
 ## 6. 实操验证（汇总）
+- [x] 2026-02-17 17:37 +0800 Gateway 提示词拼装修复：`/agent/process` 调模型时的 system 提示由“仅注入 `docs/AI/AGENTS.md`”改为“按顺序拼接 `docs/AI/AGENTS.md` + `docs/AI/ai-tools.md`”，确保工具使用规范与总规则同时下发给模型。
+- [x] 2026-02-17 17:37 +0800 验证通过：`cd apps/gateway && go test ./internal/app`、`cd apps/gateway && go test ./...`。
+- [x] 2026-02-17 17:36 +0800 README 文档重写：根目录 `README.md` 补齐 v1 能力说明、Monorepo 目录结构、Gateway/CLI/TUI/Web 快速启动步骤、环境变量与常用验证命令，移除“Web 占位”过时表述。
+- [x] 2026-02-17 17:36 +0800 文档一致性校对：已对齐 `Makefile`、`apps/cli/package.json`、`apps/web/package.json`、`docs/development.md`、`docs/contracts.md` 中现有命令与能力描述；本次为文档改动，未触发代码测试。
 - [x] 2026-02-17 16:43 +0800 工作区整理分批提交（1/4）：提交 `f243dd1`（Gateway + OpenAPI/contract），新增 QQ 入站状态接口、`/agent/process` 渠道自动识别与上下文重置协议，契约同步 `channel` 可选与 `/channels/qq/state`。
 - [x] 2026-02-17 16:43 +0800 工作区整理分批提交（2/4）：提交 `9d3b74d`（Web），新增搜索页、聊天实时刷新、渠道配置面板与 Cron 交互增强，同步 e2e/smoke/unit 用例。
 - [x] 2026-02-17 16:43 +0800 工作区整理分批提交（3/4）：提交 `9084e3f`（CLI/TUI），新增 `nextai tui` 命令与 Ink 终端交互界面，补齐 slash/state/api-client 回归测试。

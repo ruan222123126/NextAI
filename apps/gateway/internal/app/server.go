@@ -4246,15 +4246,31 @@ func prependAIToolsGuide(input []domain.AgentInputMessage, guide string) []domai
 }
 
 func loadAIToolsGuide() (string, error) {
-	content, err := readAIToolsGuideRaw()
+	loadRequired := func(relativePath string) (string, error) {
+		_, content, err := readWorkspaceTextFileRawForPath(relativePath)
+		if err != nil {
+			return "", err
+		}
+		trimmed := strings.TrimSpace(content)
+		if trimmed == "" {
+			return "", fmt.Errorf("ai tools guide is empty: %s", relativePath)
+		}
+		return trimmed, nil
+	}
+
+	agentsGuide, err := loadRequired(aiToolsGuideRelativePath)
 	if err != nil {
 		return "", err
 	}
-	trimmed := strings.TrimSpace(content)
-	if trimmed == "" {
-		return "", errors.New("ai tools guide is empty")
+	toolsGuide, err := loadRequired(aiToolsGuideLegacyRelativePath)
+	if err != nil {
+		return "", err
 	}
-	return trimmed, nil
+
+	return strings.Join([]string{
+		fmt.Sprintf("## %s\n%s", aiToolsGuideRelativePath, agentsGuide),
+		fmt.Sprintf("## %s\n%s", aiToolsGuideLegacyRelativePath, toolsGuide),
+	}, "\n\n"), nil
 }
 
 func workspaceAIToolsFileEntry() (workspaceFileEntry, bool) {
