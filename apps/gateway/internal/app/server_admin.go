@@ -21,6 +21,7 @@ import (
 	"nextai/apps/gateway/internal/repo"
 	"nextai/apps/gateway/internal/runner"
 	modelservice "nextai/apps/gateway/internal/service/model"
+	systempromptservice "nextai/apps/gateway/internal/service/systemprompt"
 	workspaceservice "nextai/apps/gateway/internal/service/workspace"
 )
 
@@ -1322,88 +1323,17 @@ func safeMap(v map[string]interface{}) map[string]interface{} {
 	return v
 }
 
-type systemPromptLayer struct {
-	Name    string
-	Role    string
-	Source  string
-	Content string
-}
+type systemPromptLayer = systempromptservice.Layer
 
 func prependSystemLayers(input []domain.AgentInputMessage, layers []systemPromptLayer) []domain.AgentInputMessage {
-	effective := make([]domain.AgentInputMessage, 0, len(input)+len(layers))
-	for _, layer := range layers {
-		if strings.TrimSpace(layer.Content) == "" {
-			continue
-		}
-		effective = append(effective, domain.AgentInputMessage{
-			Role:    "system",
-			Type:    "message",
-			Content: []domain.RuntimeContent{{Type: "text", Text: layer.Content}},
-		})
-	}
-	effective = append(effective, input...)
-	return effective
+	return systempromptservice.PrependLayers(input, layers)
 }
 
 func (s *Server) buildSystemLayers() ([]systemPromptLayer, error) {
-	layers := make([]systemPromptLayer, 0, 5)
-
-	basePath, baseContent, err := loadRequiredSystemLayer([]string{aiToolsGuideRelativePath})
-	if err != nil {
-		return nil, err
-	}
-	layers = append(layers, systemPromptLayer{
-		Name:    "base_system",
-		Role:    "system",
-		Source:  basePath,
-		Content: formatLayerSourceContent(basePath, baseContent),
-	})
-
-	toolGuidePath, toolGuideContent, err := loadRequiredSystemLayer([]string{
-		aiToolsGuideLegacyRelativePath,
-		aiToolsGuideLegacyV0RelativePath,
-	})
-	if err != nil {
-		return nil, err
-	}
-	layers = append(layers, systemPromptLayer{
-		Name:    "tool_guide_system",
-		Role:    "system",
-		Source:  toolGuidePath,
-		Content: formatLayerSourceContent(toolGuidePath, toolGuideContent),
-	})
-
-	workspacePolicyLayer := systemPromptLayer{
-		Name:    "workspace_policy_system",
-		Role:    "system",
-		Source:  "",
-		Content: "",
-	}
-	layers = appendSystemLayerIfPresent(layers, workspacePolicyLayer)
-
-	sessionPolicyLayer := systemPromptLayer{
-		Name:    "session_policy_system",
-		Role:    "system",
-		Source:  "",
-		Content: "",
-	}
-	layers = appendSystemLayerIfPresent(layers, sessionPolicyLayer)
-
-	if s != nil && s.cfg.EnablePromptContextIntrospect {
-		layers = append(layers, buildEnvironmentContextLayer())
-	}
-	return layers, nil
-}
-
-func appendSystemLayerIfPresent(layers []systemPromptLayer, layer systemPromptLayer) []systemPromptLayer {
-	if strings.TrimSpace(layer.Content) == "" {
-		return layers
-	}
-	return append(layers, layer)
-}
-
-func formatLayerSourceContent(sourcePath, content string) string {
-	return fmt.Sprintf("## %s\n%s", sourcePath, content)
+	return s.getSystemPromptService().BuildLayers(
+		[]string{aiToolsGuideRelativePath},
+		[]string{aiToolsGuideLegacyRelativePath, aiToolsGuideLegacyV0RelativePath},
+	)
 }
 
 func loadRequiredSystemLayer(candidatePaths []string) (string, string, error) {
@@ -1429,109 +1359,12 @@ func loadRequiredSystemLayer(candidatePaths []string) (string, string, error) {
 	return "", "", fmt.Errorf("%w: no candidate paths configured", os.ErrNotExist)
 }
 
-func buildEnvironmentContextLayer() systemPromptLayer {
-	return systemPromptLayer{
-		Name:    "environment_context_system",
-		Role:    "system",
-		Source:  "runtime",
-		Content: buildEnvironmentContextContent(),
-	}
-}
-
-func buildEnvironmentContextContent() string {
-	cwd, err := os.Getwd()
-	if err != nil {
-		cwd = ""
-	}
-	shell := strings.TrimSpace(os.Getenv("SHELL"))
-	if shell == "" {
-		shell = "unknown"
-	}
-	network := strings.TrimSpace(os.Getenv("NEXTAI_NETWORK_ACCESS"))
-	if network == "" {
-		network = "unknown"
-	}
-
-	return fmt.Sprintf(
-		"<environment_context>\n  <cwd>%s</cwd>\n  <shell>%s</shell>\n  <network>%s</network>\n</environment_context>",
-		escapeXMLText(cwd),
-		escapeXMLText(shell),
-		escapeXMLText(network),
-	)
-}
-
-func escapeXMLText(v string) string {
-	return strings.NewReplacer(
-		"&", "&amp;",
-		"<", "&lt;",
-		">", "&gt;",
-		`"`, "&quot;",
-		"'", "&apos;",
-	).Replace(v)
-}
-
 func summarizeLayerPreview(text string, limit int) string {
-	normalized := strings.TrimSpace(text)
-	if normalized == "" || limit <= 0 {
-		return ""
-	}
-	runes := []rune(normalized)
-	if len(runes) <= limit {
-		return normalized
-	}
-	if limit <= 3 {
-		return string(runes[:limit])
-	}
-	return string(runes[:limit-3]) + "..."
+	return systempromptservice.SummarizeLayerPreview(text, limit)
 }
 
 func estimatePromptTokenCount(text string) int {
-	normalized := strings.TrimSpace(text)
-	if normalized == "" {
-		return 0
-	}
-
-	cjkCount := 0
-	remaining := make([]rune, 0, len(normalized))
-	for _, r := range normalized {
-		if isCJKTokenRune(r) {
-			cjkCount++
-			remaining = append(remaining, ' ')
-			continue
-		}
-		remaining = append(remaining, r)
-	}
-
-	estimate := cjkCount
-	for _, chunk := range strings.Fields(string(remaining)) {
-		runeLen := len([]rune(chunk))
-		if runeLen == 0 {
-			continue
-		}
-		tokenCount := (runeLen + 3) / 4
-		if tokenCount < 1 {
-			tokenCount = 1
-		}
-		estimate += tokenCount
-	}
-	return estimate
-}
-
-func isCJKTokenRune(r rune) bool {
-	switch {
-	case r >= 0x3400 && r <= 0x4DBF:
-		return true
-	case r >= 0x4E00 && r <= 0x9FFF:
-		return true
-	case r >= 0xF900 && r <= 0xFAFF:
-		return true
-	case r >= 0x3040 && r <= 0x30FF:
-		return true
-	case r >= 0xAC00 && r <= 0xD7AF:
-		return true
-	default:
-		return false
-	}
+	return systempromptservice.EstimateTokenCount(text)
 }
 
 func workspaceAIToolsFileEntry() (workspaceFileEntry, bool) {
@@ -1743,40 +1576,9 @@ func aiToolsGuidePathFromEnv() (string, bool, error) {
 }
 
 func normalizeAIToolsGuideRelativePath(raw string) (string, bool) {
-	trimmed := strings.TrimSpace(raw)
-	if trimmed == "" || filepath.IsAbs(trimmed) {
-		return "", false
-	}
-	clean := filepath.ToSlash(filepath.Clean(trimmed))
-	if clean == "." || strings.HasPrefix(clean, "../") || strings.Contains(clean, "/../") {
-		return "", false
-	}
-	parts := strings.Split(clean, "/")
-	for _, part := range parts {
-		if part == "" || part == "." || part == ".." {
-			return "", false
-		}
-	}
-	return clean, true
+	return systempromptservice.NormalizeRelativePath(raw)
 }
 
 func findRepoRoot() (string, error) {
-	start, err := os.Getwd()
-	if err != nil {
-		return "", err
-	}
-	current := start
-	for {
-		if _, err := os.Stat(filepath.Join(current, ".git")); err == nil {
-			return current, nil
-		}
-		parent := filepath.Dir(current)
-		if parent == current {
-			break
-		}
-		current = parent
-	}
-	// Release bundles do not contain .git metadata. In that case, treat the
-	// current working directory as the workspace root.
-	return start, nil
+	return systempromptservice.FindWorkspaceRoot()
 }

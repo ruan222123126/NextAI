@@ -1,6 +1,6 @@
 # NextAI TODO
 
-更新时间：2026-02-21 16:21:21 +0800
+更新时间：2026-02-21 16:25:54 +0800
 
 ## 执行约定（强制）
 - 每位接手 AI 开始前，必须先阅读本文件与 `/home/ruan/.codex/handoff/latest.md`。
@@ -29,6 +29,8 @@
 - [x] `docs/v1-roadmap.md`、`docs/contracts.md`、本地开发文档、部署文档与发布模板已完成。
 
 ## 6. 实操验证（汇总）
+- [x] 2026-02-21 16:25 +0800 阶段 4/5 SystemPrompt 收敛落地：新增 `apps/gateway/internal/service/systemprompt/{service,path_policy}.go` 与 `apps/gateway/internal/app/server_systemprompt_service.go`，将系统层构建、token 估算、路径规范化与 workspace root 解析下沉到 `systemprompt` service；`server_admin.go` 的 `buildSystemLayers`、`prependSystemLayers`、`summarizeLayerPreview`、`estimatePromptTokenCount` 改为委托 service。
+- [x] 2026-02-21 16:25 +0800 阶段 4/5 治理护栏与回归验证：新增 `apps/gateway/internal/app/architecture_guard_test.go`，限制已服务化 handler 直接访问 `store/channels/tools`；新增 `apps/gateway/internal/service/systemprompt/service_test.go` 覆盖 layer 构建与路径规范；执行 `cd apps/gateway && go test ./internal/app ./internal/service/systemprompt && go test ./...` 全部通过。
 - [x] 2026-02-21 16:21 +0800 阶段 3 Ports/Adapters 落地：新增 `apps/gateway/internal/service/ports/{agent,channel,state_store}.go` 与 `apps/gateway/internal/service/adapters/{agent_runtime,channel_resolver,repo_state_store}.go`，抽象 `StateStore/AgentRunner/ToolRuntime/ErrorMapper/ChannelResolver` 端口；`agent/cron/model/workspace` service 依赖统一切换到 ports；`apps/gateway/internal/app/server.go` 新增 `stateStore` 组合根注入，`server_*_service.go` wiring 改为通过 adapters 组装。
 - [x] 2026-02-21 16:21 +0800 阶段 3 单测与回归验证：执行 `cd apps/gateway && go test ./internal/service/agent ./internal/service/cron ./internal/service/model ./internal/service/workspace ./internal/app && go test ./...` 全部通过，行为语义保持兼容。
 - [x] 2026-02-21 16:05 +0800 阶段 2C Workspace/Model Service 落地：新增 `apps/gateway/internal/service/model/service.go`、`apps/gateway/internal/service/workspace/service.go` 及对应单测，将 provider/catalog/active-model 与 workspace files/import/export 编排下沉到 service；新增 `apps/gateway/internal/app/server_model_service.go`、`apps/gateway/internal/app/server_workspace_service.go` 完成 wiring，`apps/gateway/internal/app/server_admin.go` 收敛为 HTTP 协议适配与错误映射。

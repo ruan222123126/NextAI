@@ -30,6 +30,7 @@ import (
 	cronservice "nextai/apps/gateway/internal/service/cron"
 	modelservice "nextai/apps/gateway/internal/service/model"
 	"nextai/apps/gateway/internal/service/ports"
+	systempromptservice "nextai/apps/gateway/internal/service/systemprompt"
 	workspaceservice "nextai/apps/gateway/internal/service/workspace"
 )
 
@@ -102,16 +103,17 @@ type cronWorkflowPlan struct {
 }
 
 type Server struct {
-	cfg              config.Config
-	store            *repo.Store
-	stateStore       ports.StateStore
-	runner           *runner.Runner
-	channels         map[string]plugin.ChannelPlugin
-	tools            map[string]plugin.ToolPlugin
-	agentService     *agentservice.Service
-	cronService      *cronservice.Service
-	modelService     *modelservice.Service
-	workspaceService *workspaceservice.Service
+	cfg                 config.Config
+	store               *repo.Store
+	stateStore          ports.StateStore
+	runner              *runner.Runner
+	channels            map[string]plugin.ChannelPlugin
+	tools               map[string]plugin.ToolPlugin
+	agentService        *agentservice.Service
+	cronService         *cronservice.Service
+	modelService        *modelservice.Service
+	systemPromptService *systempromptservice.Service
+	workspaceService    *workspaceservice.Service
 
 	disabledTools map[string]struct{}
 	qqInboundMu   sync.RWMutex
@@ -166,6 +168,7 @@ func NewServer(cfg config.Config) (*Server, error) {
 	srv.agentService = srv.newAgentService()
 	srv.cronService = srv.newCronService()
 	srv.modelService = srv.newModelService()
+	srv.systemPromptService = srv.newSystemPromptService()
 	srv.workspaceService = srv.newWorkspaceService()
 	srv.startCronScheduler()
 	if !parseBool(os.Getenv(disableQQInboundSupervisorEnv)) {
