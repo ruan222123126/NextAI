@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"nextai/apps/gateway/internal/domain"
 )
@@ -54,7 +55,7 @@ func NewStore(dataDir string) (*Store, error) {
 }
 
 func defaultState(dataDir string) State {
-	return State{
+	state := State{
 		Chats:      map[string]domain.ChatSpec{},
 		Histories:  map[string][]domain.RuntimeMessage{},
 		CronJobs:   map[string]domain.CronJobSpec{},
@@ -90,6 +91,9 @@ func defaultState(dataDir string) State {
 			},
 		},
 	}
+	ensureDefaultChat(&state)
+	ensureDefaultCronJob(&state)
+	return state
 }
 
 func (s *Store) load() error {
@@ -184,6 +188,8 @@ func (s *Store) load() error {
 			"timeout_seconds": 8,
 		}
 	}
+	ensureDefaultChat(&state)
+	ensureDefaultCronJob(&state)
 	s.state = state
 	return nil
 }
@@ -195,11 +201,177 @@ func (s *Store) Save() error {
 }
 
 func (s *Store) saveLocked() error {
+	ensureDefaultChat(&s.state)
+	ensureDefaultCronJob(&s.state)
 	b, err := json.MarshalIndent(s.state, "", "  ")
 	if err != nil {
 		return err
 	}
 	return os.WriteFile(s.stateFile, b, 0o644)
+}
+
+func ensureDefaultChat(state *State) {
+	if state == nil {
+		return
+	}
+	if state.Chats == nil {
+		state.Chats = map[string]domain.ChatSpec{}
+	}
+	if state.Histories == nil {
+		state.Histories = map[string][]domain.RuntimeMessage{}
+	}
+
+	now := time.Now().UTC().Format(time.RFC3339)
+	defaultMeta := map[string]interface{}{
+		domain.ChatMetaSystemDefault: true,
+	}
+	defaultChat := domain.ChatSpec{
+		ID:        domain.DefaultChatID,
+		Name:      domain.DefaultChatName,
+		SessionID: domain.DefaultChatSessionID,
+		UserID:    domain.DefaultChatUserID,
+		Channel:   domain.DefaultChatChannel,
+		CreatedAt: now,
+		UpdatedAt: now,
+		Meta:      defaultMeta,
+	}
+
+	if current, ok := state.Chats[domain.DefaultChatID]; ok {
+		if strings.TrimSpace(current.CreatedAt) != "" {
+			defaultChat.CreatedAt = current.CreatedAt
+		}
+		if strings.TrimSpace(current.UpdatedAt) != "" {
+			defaultChat.UpdatedAt = current.UpdatedAt
+		}
+		if current.Meta != nil {
+			for key, value := range current.Meta {
+				defaultChat.Meta[key] = value
+			}
+		}
+		defaultChat.Meta[domain.ChatMetaSystemDefault] = true
+	}
+
+	state.Chats[domain.DefaultChatID] = defaultChat
+	if _, ok := state.Histories[domain.DefaultChatID]; !ok {
+		state.Histories[domain.DefaultChatID] = []domain.RuntimeMessage{}
+	}
+}
+
+func ensureDefaultCronJob(state *State) {
+	if state == nil {
+		return
+	}
+	if state.CronJobs == nil {
+		state.CronJobs = map[string]domain.CronJobSpec{}
+	}
+	if state.CronStates == nil {
+		state.CronStates = map[string]domain.CronJobState{}
+	}
+
+	defaultJob := domain.CronJobSpec{
+		ID:      domain.DefaultCronJobID,
+		Name:    domain.DefaultCronJobName,
+		Enabled: false,
+		Schedule: domain.CronScheduleSpec{
+			Type: "interval",
+			Cron: domain.DefaultCronJobInterval,
+		},
+		TaskType: "text",
+		Text:     domain.DefaultCronJobText,
+		Dispatch: domain.CronDispatchSpec{
+			Type:    "channel",
+			Channel: domain.DefaultChatChannel,
+			Target: domain.CronDispatchTarget{
+				UserID:    domain.DefaultChatUserID,
+				SessionID: domain.DefaultChatSessionID,
+			},
+			Mode: "",
+			Meta: map[string]interface{}{},
+		},
+		Runtime: domain.CronRuntimeSpec{
+			MaxConcurrency:      1,
+			TimeoutSeconds:      30,
+			MisfireGraceSeconds: 0,
+		},
+		Meta: map[string]interface{}{
+			domain.CronMetaSystemDefault: true,
+		},
+	}
+
+	current, ok := state.CronJobs[domain.DefaultCronJobID]
+	if !ok {
+		state.CronJobs[domain.DefaultCronJobID] = defaultJob
+		return
+	}
+
+	current.ID = domain.DefaultCronJobID
+	if strings.TrimSpace(current.Name) == "" {
+		current.Name = domain.DefaultCronJobName
+	}
+
+	scheduleType := strings.ToLower(strings.TrimSpace(current.Schedule.Type))
+	if scheduleType != "interval" && scheduleType != "cron" {
+		scheduleType = "interval"
+	}
+	current.Schedule.Type = scheduleType
+	if strings.TrimSpace(current.Schedule.Cron) == "" {
+		current.Schedule.Cron = domain.DefaultCronJobInterval
+	}
+
+	if strings.TrimSpace(current.Dispatch.Type) == "" {
+		current.Dispatch.Type = "channel"
+	}
+	if strings.TrimSpace(current.Dispatch.Channel) == "" {
+		current.Dispatch.Channel = domain.DefaultChatChannel
+	}
+	if strings.TrimSpace(current.Dispatch.Target.UserID) == "" {
+		current.Dispatch.Target.UserID = domain.DefaultChatUserID
+	}
+	if strings.TrimSpace(current.Dispatch.Target.SessionID) == "" {
+		current.Dispatch.Target.SessionID = domain.DefaultChatSessionID
+	}
+	if current.Dispatch.Meta == nil {
+		current.Dispatch.Meta = map[string]interface{}{}
+	}
+
+	if current.Runtime.MaxConcurrency <= 0 {
+		current.Runtime.MaxConcurrency = 1
+	}
+	if current.Runtime.TimeoutSeconds <= 0 {
+		current.Runtime.TimeoutSeconds = 30
+	}
+	if current.Runtime.MisfireGraceSeconds < 0 {
+		current.Runtime.MisfireGraceSeconds = 0
+	}
+
+	taskType := strings.ToLower(strings.TrimSpace(current.TaskType))
+	switch taskType {
+	case "workflow":
+		current.TaskType = "workflow"
+		if current.Workflow == nil {
+			current.TaskType = "text"
+			current.Text = domain.DefaultCronJobText
+		}
+	case "text":
+		current.TaskType = "text"
+		if strings.TrimSpace(current.Text) == "" {
+			current.Text = domain.DefaultCronJobText
+		}
+		current.Workflow = nil
+	default:
+		current.TaskType = "text"
+		current.Workflow = nil
+		if strings.TrimSpace(current.Text) == "" {
+			current.Text = domain.DefaultCronJobText
+		}
+	}
+
+	if current.Meta == nil {
+		current.Meta = map[string]interface{}{}
+	}
+	current.Meta[domain.CronMetaSystemDefault] = true
+
+	state.CronJobs[domain.DefaultCronJobID] = current
 }
 
 func (s *Store) Read(fn func(state *State)) {
