@@ -599,6 +599,7 @@ body.select-enhanced .options-list {
   z-index: 120;
   max-height: calc(40px + 38px * 3 + 20px);
   overflow: hidden;
+  scrollbar-gutter: auto;
   display: flex;
   flex-direction: column;
   gap: 6px;
@@ -658,8 +659,9 @@ body.select-enhanced .options-search-input:focus-visible {
 body.select-enhanced .options-body {
   flex: 1 1 auto;
   max-height: calc(38px * 3 + 8px);
-  padding: 0;
+  padding: 0 6px 6px;
   overflow-y: auto;
+  overflow-x: hidden;
   scrollbar-gutter: auto;
   scrollbar-width: none;
   -ms-overflow-style: none;
@@ -671,11 +673,13 @@ body.select-enhanced .options-body::-webkit-scrollbar {
 }
 
 body.select-enhanced .option {
+  width: 100%;
   padding: 10px 12px;
   min-height: 38px;
   display: flex;
   align-items: center;
-  border-radius: 0;
+  border-radius: 6px;
+  box-sizing: border-box;
   color: #374151;
   cursor: pointer;
   transition: background 0.1s;

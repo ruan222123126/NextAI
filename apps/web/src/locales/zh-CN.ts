@@ -47,7 +47,7 @@ export const zhCN = {
   "chat.toolbarReasoningHigh": "超高",
   "chat.statusLocal": "本地",
   "chat.statusFullAccess": "完全访问权限",
-  "chat.tokensEstimate": "\u4e0a\u4e0b\u6587: {{used}}/{{total}}",
+  "chat.tokensEstimate": "{{used}}/{{total}}",
   "chat.toolCallNotice": "调用任务 '{{target}}'",
   "chat.toolCallView": "查看",
   "chat.toolCallViewPath": "\u67e5\u770b\uff08{{path}}\uff09",

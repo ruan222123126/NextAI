@@ -5,7 +5,7 @@ import { ApiClient, ApiClientError } from "../client/api-client.js";
 import { resolveLocale, setLocale, t, type Locale } from "../i18n.js";
 import { applyAgentEvent, appendUserMessage, beginAssistantMessage, historyToViewMessages, settleAssistantMessage } from "./state.js";
 import { consumeSSEBuffer, parseAgentStreamData } from "./stream.js";
-import { filterSlashCommands, isSlashDraft, resolveSlashCommand } from "./slash.js";
+import { filterSlashCommands, isLocalSlashCommand, isSlashDraft, resolveSlashCommand } from "./slash.js";
 import type { ChatHistoryResponse, ChatSpec, TUIBootstrapOptions, TUIMessage, TUISettings } from "./types.js";
 
 const settingFields = ["apiBase", "apiKey", "userID", "channel", "locale"] as const;
@@ -17,10 +17,120 @@ const settingLabelKeys: Record<SettingField, "tui.settings.api_base" | "tui.sett
   channel: "tui.settings.channel",
   locale: "tui.settings.locale",
 };
+const PROMPT_TEMPLATE_PREFIX = "/prompts:";
+const PROMPT_TEMPLATE_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+const PROMPT_TEMPLATE_ARG_KEY_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const PROMPT_TEMPLATE_PLACEHOLDER_PATTERN = /\$([A-Za-z_][A-Za-z0-9_]*)/g;
+const promptTemplatesEnabled = parseEnvBool(process.env.NEXTAI_ENABLE_PROMPT_TEMPLATES);
 
 interface TUIAppProps {
   client: ApiClient;
   bootstrap: TUIBootstrapOptions;
+}
+
+interface PromptTemplateCommand {
+  templateName: string;
+  args: Map<string, string>;
+}
+
+function parseEnvBool(raw: string | undefined): boolean {
+  if (!raw) {
+    return false;
+  }
+  return raw.trim().toLowerCase() === "true";
+}
+
+function extractWorkspaceTextPayload(payload: unknown): string {
+  if (typeof payload === "string") {
+    return payload;
+  }
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return "";
+  }
+  const record = payload as Record<string, unknown>;
+  return typeof record.content === "string" ? record.content : "";
+}
+
+function parsePromptTemplateCommand(inputText: string): PromptTemplateCommand | null {
+  const trimmed = inputText.trim();
+  if (!trimmed.startsWith(PROMPT_TEMPLATE_PREFIX)) {
+    return null;
+  }
+
+  const segments = trimmed.split(/\s+/).filter((segment) => segment !== "");
+  const command = segments[0] ?? "";
+  const templateName = command.slice(PROMPT_TEMPLATE_PREFIX.length).trim();
+  if (templateName === "") {
+    throw new Error("prompt template name is required");
+  }
+  if (!PROMPT_TEMPLATE_NAME_PATTERN.test(templateName)) {
+    throw new Error(`invalid prompt template name: ${templateName}`);
+  }
+
+  const args = new Map<string, string>();
+  for (const segment of segments.slice(1)) {
+    const sepIndex = segment.indexOf("=");
+    if (sepIndex <= 0) {
+      throw new Error(`invalid prompt argument: ${segment} (expected KEY=VALUE)`);
+    }
+    const key = segment.slice(0, sepIndex).trim();
+    const value = segment.slice(sepIndex + 1);
+    if (!PROMPT_TEMPLATE_ARG_KEY_PATTERN.test(key)) {
+      throw new Error(`invalid prompt argument key: ${key}`);
+    }
+    args.set(key, value);
+  }
+  return { templateName, args };
+}
+
+async function loadPromptTemplateContent(client: ApiClient, templateName: string): Promise<string> {
+  const candidates = [`prompts/${templateName}.md`, `prompt/${templateName}.md`];
+  let lastError: unknown = null;
+  for (const path of candidates) {
+    try {
+      const payload = await client.workspaceCat(path);
+      const content = extractWorkspaceTextPayload(payload);
+      if (content.trim() === "") {
+        throw new Error(`prompt template is empty: ${path}`);
+      }
+      return content;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  const suffix = lastError ? ` (${errorToMessage(lastError)})` : "";
+  throw new Error(`prompt template not found: ${templateName}${suffix}`);
+}
+
+function applyPromptTemplateArgs(templateContent: string, args: Map<string, string>): string {
+  if (/\$[1-9]\b/.test(templateContent) || /\$ARGUMENTS\b/.test(templateContent)) {
+    throw new Error("positional prompt arguments are not supported yet");
+  }
+  const placeholderRegex = /\$([A-Za-z_][A-Za-z0-9_]*)/g;
+  const requiredKeys = new Set<string>();
+  for (const match of templateContent.matchAll(placeholderRegex)) {
+    const key = match[1];
+    if (key) {
+      requiredKeys.add(key);
+    }
+  }
+  const missingKeys = Array.from(requiredKeys).filter((key) => !args.has(key));
+  if (missingKeys.length > 0) {
+    throw new Error(`missing prompt arguments: ${missingKeys.join(", ")}`);
+  }
+  return templateContent.replace(PROMPT_TEMPLATE_PLACEHOLDER_PATTERN, (_match, key: string) => args.get(key) ?? "");
+}
+
+async function expandPromptTemplateIfNeeded(client: ApiClient, inputText: string): Promise<string> {
+  if (!promptTemplatesEnabled) {
+    return inputText;
+  }
+  const parsed = parsePromptTemplateCommand(inputText);
+  if (!parsed) {
+    return inputText;
+  }
+  const templateContent = await loadPromptTemplateContent(client, parsed.templateName);
+  return applyPromptTemplateArgs(templateContent, parsed.args);
 }
 
 function isBackspaceInput(input: string, key: { backspace: boolean; delete?: boolean; ctrl: boolean }): boolean {
@@ -362,6 +472,15 @@ export function TUIApp({ client, bootstrap }: TUIAppProps): React.ReactElement {
       return;
     }
 
+    let expandedText = text;
+    try {
+      expandedText = await expandPromptTemplateIfNeeded(client, text);
+    } catch (err) {
+      setErrorText(t("tui.error.fetch_failed", { message: errorToMessage(err) }));
+      setStatus(t("tui.status.ready"));
+      return;
+    }
+
     setDraft("");
     setStreaming(true);
     setErrorText("");
@@ -376,9 +495,9 @@ export function TUIApp({ client, bootstrap }: TUIAppProps): React.ReactElement {
         sessionID = created.session_id;
       }
 
-      setMessages((prev) => beginAssistantMessage(appendUserMessage(prev, text)));
+      setMessages((prev) => beginAssistantMessage(appendUserMessage(prev, expandedText)));
       const payload = {
-        input: [{ role: "user", type: "message", content: [{ type: "text", text }] }],
+        input: [{ role: "user", type: "message", content: [{ type: "text", text: expandedText }] }],
         session_id: sessionID,
         user_id: settings.userID,
         channel: settings.channel,
@@ -449,6 +568,9 @@ export function TUIApp({ client, bootstrap }: TUIAppProps): React.ReactElement {
 
   const runSlashCommand = useCallback(
     async (raw: string, selection: number): Promise<boolean> => {
+      if (!isLocalSlashCommand(raw, selection)) {
+        return false;
+      }
       const command = resolveSlashCommand(raw, selection);
       if (!command) {
         return false;

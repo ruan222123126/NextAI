@@ -2,14 +2,17 @@ package config
 
 import (
 	"os"
+	"strings"
 )
 
 type Config struct {
-	Host    string
-	Port    string
-	DataDir string
-	APIKey  string
-	WebDir  string
+	Host                          string
+	Port                          string
+	DataDir                       string
+	APIKey                        string
+	WebDir                        string
+	EnablePromptTemplates         bool
+	EnablePromptContextIntrospect bool
 }
 
 func Load() Config {
@@ -27,5 +30,19 @@ func Load() Config {
 	}
 	apiKey := os.Getenv("NEXTAI_API_KEY")
 	webDir := os.Getenv("NEXTAI_WEB_DIR")
-	return Config{Host: host, Port: port, DataDir: dataDir, APIKey: apiKey, WebDir: webDir}
+	enablePromptTemplates := parseEnvBool("NEXTAI_ENABLE_PROMPT_TEMPLATES")
+	enablePromptContextIntrospect := parseEnvBool("NEXTAI_ENABLE_PROMPT_CONTEXT_INTROSPECT")
+	return Config{
+		Host:                          host,
+		Port:                          port,
+		DataDir:                       dataDir,
+		APIKey:                        apiKey,
+		WebDir:                        webDir,
+		EnablePromptTemplates:         enablePromptTemplates,
+		EnablePromptContextIntrospect: enablePromptContextIntrospect,
+	}
+}
+
+func parseEnvBool(key string) bool {
+	return strings.EqualFold(strings.TrimSpace(os.Getenv(key)), "true")
 }

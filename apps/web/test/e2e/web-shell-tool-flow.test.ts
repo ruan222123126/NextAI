@@ -201,6 +201,178 @@ describe("web e2e: /shell command sends biz_params.tool", () => {
     }, 4000);
   });
 
+  it("开启 prompt 模板后，/prompts 命令会先展开再发送", async () => {
+    window.localStorage.setItem("nextai.feature.prompt_templates", "true");
+    let processCalled = false;
+    let sessionID = "";
+    let userID = "";
+    let channel = "";
+    let expandedText = "";
+    let capturedCommand = "";
+
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const rawURL = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      const url = new URL(rawURL);
+      const method = (init?.method ?? "GET").toUpperCase();
+
+      if (url.pathname === "/models/catalog" && method === "GET") {
+        return jsonResponse({
+          providers: [],
+          provider_types: [],
+          defaults: {},
+          active_llm: {
+            provider_id: "",
+            model: "",
+          },
+        });
+      }
+
+      if (url.pathname === "/chats" && method === "GET") {
+        if (!processCalled) {
+          return jsonResponse([]);
+        }
+        return jsonResponse([
+          {
+            id: "chat-template-1",
+            name: "template",
+            session_id: sessionID,
+            user_id: userID,
+            channel,
+            created_at: "2026-02-16T12:00:00Z",
+            updated_at: "2026-02-16T12:00:10Z",
+            meta: {},
+          },
+        ]);
+      }
+
+      if (url.pathname === `/workspace/files/${encodeURIComponent("prompts/quick-task.md")}` && method === "GET") {
+        return jsonResponse({ content: "/shell $CMD" });
+      }
+
+      if (url.pathname.startsWith("/workspace/files/") && method === "GET") {
+        return jsonResponse({ content: "" });
+      }
+
+      if (url.pathname === "/agent/process" && method === "POST") {
+        processCalled = true;
+        const payload = JSON.parse(String(init?.body ?? "{}")) as {
+          session_id?: string;
+          user_id?: string;
+          channel?: string;
+          input?: Array<{
+            content?: Array<{ text?: string }>;
+          }>;
+          biz_params?: {
+            tool?: {
+              name?: string;
+              input?: { command?: string };
+            };
+          };
+        };
+        sessionID = payload.session_id ?? "";
+        userID = payload.user_id ?? "";
+        channel = payload.channel ?? "";
+        expandedText = payload.input?.[0]?.content?.[0]?.text ?? "";
+        capturedCommand = payload.biz_params?.tool?.input?.command ?? "";
+        const sse = [
+          `data: ${JSON.stringify({ type: "assistant_delta", step: 1, delta: "ok" })}`,
+          `data: ${JSON.stringify({ type: "completed", step: 1, reply: "ok" })}`,
+          "data: [DONE]",
+          "",
+        ].join("\n\n");
+        return new Response(sse, {
+          status: 200,
+          headers: {
+            "content-type": "text/event-stream",
+          },
+        });
+      }
+
+      if (url.pathname === "/chats/chat-template-1" && method === "GET") {
+        return jsonResponse({
+          messages: [
+            {
+              id: "msg-user",
+              role: "user",
+              type: "message",
+              content: [{ type: "text", text: expandedText }],
+            },
+            {
+              id: "msg-assistant",
+              role: "assistant",
+              type: "message",
+              content: [{ type: "text", text: "ok" }],
+            },
+          ],
+        });
+      }
+
+      throw new Error(`unexpected request: ${method} ${url.pathname}`);
+    }) as typeof globalThis.fetch;
+
+    await import("../../src/main.ts");
+
+    const messageInput = document.getElementById("message-input") as HTMLTextAreaElement;
+    messageInput.value = "/prompts:quick-task CMD=printf_hello";
+    messageInput.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+
+    await waitFor(() => processCalled, 4000);
+    expect(expandedText).toBe("/shell printf_hello");
+    expect(capturedCommand).toBe("printf_hello");
+  });
+
+  it("prompt 模板缺少必填参数时会阻断发送", async () => {
+    window.localStorage.setItem("nextai.feature.prompt_templates", "true");
+    let processCalled = false;
+
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const rawURL = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      const url = new URL(rawURL);
+      const method = (init?.method ?? "GET").toUpperCase();
+
+      if (url.pathname === "/models/catalog" && method === "GET") {
+        return jsonResponse({
+          providers: [],
+          provider_types: [],
+          defaults: {},
+          active_llm: {
+            provider_id: "",
+            model: "",
+          },
+        });
+      }
+
+      if (url.pathname === "/chats" && method === "GET") {
+        return jsonResponse([]);
+      }
+
+      if (url.pathname === `/workspace/files/${encodeURIComponent("prompts/quick-task.md")}` && method === "GET") {
+        return jsonResponse({ content: "hello $NAME" });
+      }
+
+      if (url.pathname.startsWith("/workspace/files/") && method === "GET") {
+        return jsonResponse({ content: "" });
+      }
+
+      if (url.pathname === "/agent/process" && method === "POST") {
+        processCalled = true;
+        return new Response("unexpected", { status: 500 });
+      }
+
+      throw new Error(`unexpected request: ${method} ${url.pathname}`);
+    }) as typeof globalThis.fetch;
+
+    await import("../../src/main.ts");
+
+    const messageInput = document.getElementById("message-input") as HTMLTextAreaElement;
+    const statusLine = document.getElementById("status-line") as HTMLElement;
+    messageInput.value = "/prompts:quick-task";
+    messageInput.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+
+    await waitFor(() => (statusLine.textContent ?? "").includes("missing prompt arguments"), 4000);
+    expect(processCalled).toBe(false);
+  });
+
   it("按输出顺序渲染：文本和工具调用交错时保持时间线顺序", async () => {
     let processCalled = false;
     let capturedCommand = "";

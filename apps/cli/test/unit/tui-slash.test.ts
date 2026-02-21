@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { filterSlashCommands, isSlashDraft, resolveSlashCommand } from "../../src/tui/slash.js";
+import { filterSlashCommands, isLocalSlashCommand, isSlashDraft, resolveSlashCommand } from "../../src/tui/slash.js";
 
 describe("tui slash commands", () => {
   it("recognizes slash draft", () => {
@@ -18,5 +18,10 @@ describe("tui slash commands", () => {
     expect(resolveSlashCommand("/r", 0)?.name).toBe("/refresh");
     expect(resolveSlashCommand("/r", 100)?.name).toBe("/refresh");
     expect(resolveSlashCommand("/unknown", 0)).toBeNull();
+  });
+
+  it("only treats built-in slash as local commands", () => {
+    expect(isLocalSlashCommand("/history")).toBe(true);
+    expect(isLocalSlashCommand("/prompts:quick-task")).toBe(false);
   });
 });

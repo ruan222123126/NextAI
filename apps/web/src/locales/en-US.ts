@@ -49,7 +49,7 @@ export const enUS: WebMessages = {
   "chat.toolbarReasoningHigh": "Very High",
   "chat.statusLocal": "Local",
   "chat.statusFullAccess": "Full access",
-  "chat.tokensEstimate": "Context: {{used}}/{{total}}",
+  "chat.tokensEstimate": "{{used}}/{{total}}",
   "chat.toolCallNotice": "Calling task '{{target}}'",
   "chat.toolCallView": "View",
   "chat.toolCallViewPath": "View ({{path}})",
@@ -374,4 +374,3 @@ export const enUS: WebMessages = {
   "cron.run": "Run",
   "common.none": "-",
 };
-

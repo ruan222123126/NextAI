@@ -288,6 +288,29 @@ interface AgentStreamEvent {
   raw?: string;
 }
 
+interface AgentSystemLayerInfo {
+  name?: string;
+  role?: string;
+  source?: string;
+  content_preview?: string;
+  estimated_tokens?: number;
+}
+
+interface AgentSystemLayersResponse {
+  version?: string;
+  layers?: AgentSystemLayerInfo[];
+  estimated_tokens_total?: number;
+}
+
+interface RuntimeConfigFeatureFlags {
+  prompt_templates?: boolean;
+  prompt_context_introspect?: boolean;
+}
+
+interface RuntimeConfigResponse {
+  features?: RuntimeConfigFeatureFlags;
+}
+
 interface JSONRequestOptions {
   method?: HttpMethod;
   body?: unknown;
@@ -341,8 +364,15 @@ const SCROLLBAR_ACTIVE_CLASS = "is-scrollbar-scrolling";
 const SCROLLBAR_IDLE_HIDE_DELAY_MS = 520;
 const DEFAULT_OPENAI_MODEL_IDS = ["gpt-4o-mini", "gpt-4.1-mini"];
 const DEFAULT_MODEL_CONTEXT_LIMIT_TOKENS = 128000;
-const SYSTEM_PROMPT_WORKSPACE_PATHS = ["docs/AI/AGENTS.md", "docs/AI/ai-tools.md"] as const;
-const SYSTEM_PROMPT_WORKSPACE_PATH_SET = new Set(SYSTEM_PROMPT_WORKSPACE_PATHS.map((path) => path.toLowerCase()));
+const PROMPT_TEMPLATE_PREFIX = "/prompts:";
+const SYSTEM_PROMPT_LAYER_ENDPOINT = "/agent/system-layers";
+const SYSTEM_PROMPT_WORKSPACE_FALLBACK_PATHS = ["docs/AI/AGENTS.md", "docs/AI/ai-tools.md"] as const;
+const SYSTEM_PROMPT_WORKSPACE_PATH_SET = new Set(SYSTEM_PROMPT_WORKSPACE_FALLBACK_PATHS.map((path) => path.toLowerCase()));
+const PROMPT_TEMPLATE_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+const PROMPT_TEMPLATE_ARG_KEY_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const PROMPT_TEMPLATE_PLACEHOLDER_PATTERN = /\$([A-Za-z_][A-Za-z0-9_]*)/g;
+const FEATURE_FLAG_PROMPT_TEMPLATES = "nextai.feature.prompt_templates";
+const FEATURE_FLAG_PROMPT_CONTEXT_INTROSPECT = "nextai.feature.prompt_context_introspect";
 const SETTINGS_KEY = "nextai.web.chat.settings";
 const LOCALE_KEY = "nextai.web.locale";
 const BUILTIN_PROVIDER_IDS = new Set(["openai"]);
@@ -361,6 +391,10 @@ let syncingComposerModelSelectors = false;
 let systemPromptTokensLoaded = false;
 let systemPromptTokensInFlight: Promise<void> | null = null;
 let systemPromptTokens = 0;
+const runtimeFlags: Required<RuntimeConfigFeatureFlags> = {
+  prompt_templates: false,
+  prompt_context_introspect: false,
+};
 
 const apiBaseInput = mustElement<HTMLInputElement>("api-base");
 const apiKeyInput = mustElement<HTMLInputElement>("api-key");
@@ -556,6 +590,7 @@ const bootstrapTask = bootstrap();
 async function bootstrap(): Promise<void> {
   initLocale();
   restoreSettings();
+  await loadRuntimeConfig();
   bindEvents();
   initAutoHideScrollbars();
   initCronWorkflowEditor();
@@ -641,6 +676,67 @@ function markScrollbarScrolling(element: HTMLElement): void {
     scrollbarActivityTimers.delete(element);
   }, SCROLLBAR_IDLE_HIDE_DELAY_MS);
   scrollbarActivityTimers.set(element, timer);
+}
+
+function parseFeatureFlagValue(raw: string | null): boolean | null {
+  if (raw === null) {
+    return null;
+  }
+  const normalized = raw.trim().toLowerCase();
+  if (normalized === "") {
+    return null;
+  }
+  if (normalized === "1" || normalized === "true" || normalized === "yes" || normalized === "on") {
+    return true;
+  }
+  if (normalized === "0" || normalized === "false" || normalized === "no" || normalized === "off") {
+    return false;
+  }
+  return null;
+}
+
+function resolveClientFeatureFlag(key: string, runtimeValue: boolean): boolean {
+  try {
+    const queryValue = parseFeatureFlagValue(new URLSearchParams(window.location.search).get(key));
+    if (queryValue !== null) {
+      return queryValue;
+    }
+  } catch {
+    // ignore query parsing error
+  }
+
+  try {
+    const persisted = parseFeatureFlagValue(window.localStorage.getItem(key));
+    if (persisted !== null) {
+      return persisted;
+    }
+  } catch {
+    // ignore localStorage read error
+  }
+  return runtimeValue;
+}
+
+function parseRuntimeFeatureFlag(value: unknown): boolean {
+  return typeof value === "boolean" ? value : false;
+}
+
+function applyRuntimeFeatureOverrides(features: RuntimeConfigFeatureFlags): void {
+  const runtimePromptTemplates = parseRuntimeFeatureFlag(features.prompt_templates);
+  const runtimePromptContextIntrospect = parseRuntimeFeatureFlag(features.prompt_context_introspect);
+  runtimeFlags.prompt_templates = resolveClientFeatureFlag(FEATURE_FLAG_PROMPT_TEMPLATES, runtimePromptTemplates);
+  runtimeFlags.prompt_context_introspect = resolveClientFeatureFlag(
+    FEATURE_FLAG_PROMPT_CONTEXT_INTROSPECT,
+    runtimePromptContextIntrospect,
+  );
+}
+
+async function loadRuntimeConfig(): Promise<void> {
+  try {
+    const payload = await requestJSON<RuntimeConfigResponse>("/runtime-config");
+    applyRuntimeFeatureOverrides(payload.features ?? {});
+  } catch {
+    applyRuntimeFeatureOverrides({});
+  }
 }
 
 function renderComposerTokenEstimate(): void {
@@ -732,7 +828,19 @@ function extractWorkspaceFileText(payload: unknown): string {
 }
 
 async function loadSystemPromptTokens(): Promise<number> {
-  const tokenLoaders = SYSTEM_PROMPT_WORKSPACE_PATHS.map(async (path) => {
+  if (runtimeFlags.prompt_context_introspect) {
+    try {
+      const payload = await requestJSON<AgentSystemLayersResponse>(SYSTEM_PROMPT_LAYER_ENDPOINT);
+      const total = payload?.estimated_tokens_total;
+      if (typeof total === "number" && Number.isFinite(total) && total >= 0) {
+        return Math.floor(total);
+      }
+    } catch {
+      // Fallback to legacy estimation if introspection endpoint is unavailable.
+    }
+  }
+
+  const tokenLoaders = SYSTEM_PROMPT_WORKSPACE_FALLBACK_PATHS.map(async (path) => {
     try {
       const payload = await getWorkspaceFile(path);
       return estimateTokenCount(extractWorkspaceFileText(payload));
@@ -2263,6 +2371,92 @@ function startDraftSession(): void {
   renderComposerTokenEstimate();
 }
 
+interface PromptTemplateCommand {
+  templateName: string;
+  args: Map<string, string>;
+}
+
+function parsePromptTemplateCommand(inputText: string): PromptTemplateCommand | null {
+  const trimmed = inputText.trim();
+  if (!trimmed.startsWith(PROMPT_TEMPLATE_PREFIX)) {
+    return null;
+  }
+  const segments = trimmed.split(/\s+/).filter((segment) => segment !== "");
+  const command = segments[0] ?? "";
+  const templateName = command.slice(PROMPT_TEMPLATE_PREFIX.length).trim();
+  if (templateName === "") {
+    throw new Error("prompt template name is required");
+  }
+  if (!PROMPT_TEMPLATE_NAME_PATTERN.test(templateName)) {
+    throw new Error(`invalid prompt template name: ${templateName}`);
+  }
+
+  const args = new Map<string, string>();
+  for (const segment of segments.slice(1)) {
+    const sepIndex = segment.indexOf("=");
+    if (sepIndex <= 0) {
+      throw new Error(`invalid prompt argument: ${segment} (expected KEY=VALUE)`);
+    }
+    const key = segment.slice(0, sepIndex).trim();
+    const value = segment.slice(sepIndex + 1);
+    if (!PROMPT_TEMPLATE_ARG_KEY_PATTERN.test(key)) {
+      throw new Error(`invalid prompt argument key: ${key}`);
+    }
+    args.set(key, value);
+  }
+  return { templateName, args };
+}
+
+async function loadPromptTemplateContent(templateName: string): Promise<string> {
+  const candidates = [`prompts/${templateName}.md`, `prompt/${templateName}.md`];
+  let lastError: unknown = null;
+  for (const path of candidates) {
+    try {
+      const payload = await getWorkspaceFile(path);
+      const content = extractWorkspaceFileText(payload);
+      if (content.trim() === "") {
+        throw new Error(`prompt template is empty: ${path}`);
+      }
+      return content;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw new Error(`prompt template not found: ${templateName} (${asErrorMessage(lastError)})`);
+}
+
+function applyPromptTemplateArgs(templateContent: string, args: Map<string, string>): string {
+  if (/\$[1-9]\b/.test(templateContent) || /\$ARGUMENTS\b/.test(templateContent)) {
+    throw new Error("positional prompt arguments are not supported yet");
+  }
+  const placeholderRegex = /\$([A-Za-z_][A-Za-z0-9_]*)/g;
+  const requiredKeys = new Set<string>();
+  for (const match of templateContent.matchAll(placeholderRegex)) {
+    const key = match[1];
+    if (key) {
+      requiredKeys.add(key);
+    }
+  }
+  const missingKeys = Array.from(requiredKeys).filter((key) => !args.has(key));
+  if (missingKeys.length > 0) {
+    throw new Error(`missing prompt arguments: ${missingKeys.join(", ")}`);
+  }
+
+  return templateContent.replace(PROMPT_TEMPLATE_PLACEHOLDER_PATTERN, (_match, key: string) => args.get(key) ?? "");
+}
+
+async function expandPromptTemplateIfNeeded(inputText: string): Promise<string> {
+  if (!runtimeFlags.prompt_templates) {
+    return inputText;
+  }
+  const parsed = parsePromptTemplateCommand(inputText);
+  if (!parsed) {
+    return inputText;
+  }
+  const templateContent = await loadPromptTemplateContent(parsed.templateName);
+  return applyPromptTemplateArgs(templateContent, parsed.args);
+}
+
 async function sendMessage(): Promise<void> {
   await bootstrapTask;
   syncControlState();
@@ -2270,14 +2464,22 @@ async function sendMessage(): Promise<void> {
     return;
   }
 
-  const inputText = messageInput.value.trim();
-  if (inputText === "") {
+  const draftText = messageInput.value.trim();
+  if (draftText === "") {
     setStatus(t("status.inputRequired"), "error");
     return;
   }
 
   if (state.apiBase === "") {
     setStatus(t("status.controlsRequired"), "error");
+    return;
+  }
+
+  let inputText = draftText;
+  try {
+    inputText = await expandPromptTemplateIfNeeded(draftText);
+  } catch (error) {
+    setStatus(asErrorMessage(error), "error");
     return;
   }
 

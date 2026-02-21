@@ -2,6 +2,7 @@
 
 ## API
 - /version, /healthz
+- /runtime-config
 - /chats, /chats/{chat_id}, /chats/batch-delete
 - /agent/process
 - /channels/qq/inbound
@@ -112,3 +113,70 @@
 - Gateway always keeps one protected default cron job in state (`id=cron-default`).
 - Default cron job baseline fields: `name=浣犲ソ鏂囨湰浠诲姟`, `task_type=text`, `text=浣犲ソ`, `enabled=false`.
 - `DELETE /cron/jobs/{job_id}` rejects deleting `cron-default` with `400 default_cron_protected`.
+
+## Prompt Layering And Template Rollout (2026-02)
+
+### Phase 1: system layers (no external behavior change)
+- Gateway keeps `/agent/process` request/response contract unchanged.
+- Internal prompt injection changes from a single `system` message to ordered `system` layers:
+  1. `base_system`
+  2. `tool_guide_system`
+  3. `workspace_policy_system`
+  4. `session_policy_system`
+- Injection position is unchanged (still prepended before model generation loop).
+
+### Phase 2: `/prompts:<name>` command expansion (client side)
+- Template source is `prompts/*.md`.
+- Web and TUI expand `/prompts:<name>` before sending to `/agent/process`.
+- Phase 2 only supports named args: `KEY=VALUE`.
+- Expansion failure blocks sending and returns a client-side error.
+- Existing UI slash commands (`/history`, `/new`, `/refresh`, `/settings`, `/exit`) keep current behavior.
+
+### Phase 3: environment context and observability
+- Gateway adds a structured `environment_context` as an independent `system` layer when feature flag is enabled.
+- New read-only endpoint:
+  - `GET /agent/system-layers`
+  - Purpose: return effective injected layers and token estimate used for this runtime.
+
+Sample response:
+
+```json
+{
+  "version": "v1",
+  "layers": [
+    {
+      "name": "base_system",
+      "role": "system",
+      "source": "docs/AI/AGENTS.md",
+      "content_preview": "## docs/AI/AGENTS.md ...",
+      "estimated_tokens": 12
+    }
+  ],
+  "estimated_tokens_total": 12
+}
+```
+
+- Error model remains unchanged:
+  - `{ "error": { "code": "...", "message": "...", "details": ... } }`
+
+### Feature flags
+- `NEXTAI_ENABLE_PROMPT_TEMPLATES` (default: `false`).
+- `NEXTAI_ENABLE_PROMPT_CONTEXT_INTROSPECT` (default: `false`).
+
+## Runtime Config Endpoint (2026-02)
+- Gateway 提供公开只读接口（不含敏感信息）：`GET /runtime-config`。
+- 返回体：
+
+```json
+{
+  "features": {
+    "prompt_templates": false,
+    "prompt_context_introspect": false
+  }
+}
+```
+
+- 字段来源：
+  - `features.prompt_templates` <- `NEXTAI_ENABLE_PROMPT_TEMPLATES`
+  - `features.prompt_context_introspect` <- `NEXTAI_ENABLE_PROMPT_CONTEXT_INTROSPECT`
+- Web 侧特性开关优先级：`query > localStorage > runtime-config > false`。

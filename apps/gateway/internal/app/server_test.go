@@ -73,6 +73,21 @@ func newDocsAITestPath(t *testing.T, prefix string) (string, string) {
 	return rel, abs
 }
 
+func newPromptTemplateTestPath(t *testing.T, prefix string) (string, string) {
+	t.Helper()
+	repoRoot, err := findRepoRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rel := filepath.ToSlash(filepath.Join("prompts", fmt.Sprintf("%s-%d.md", prefix, time.Now().UnixNano())))
+	abs := filepath.Join(repoRoot, filepath.FromSlash(rel))
+	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Remove(abs) })
+	return rel, abs
+}
+
 func writeWebFixture(t *testing.T, baseDir string) string {
 	t.Helper()
 	webDir := filepath.Join(baseDir, "web")
@@ -251,6 +266,89 @@ func TestHealthz(t *testing.T) {
 	srv.Handler().ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
 		t.Fatalf("unexpected status: %d", w.Code)
+	}
+}
+
+func TestRuntimeConfigEndpointReflectsFeatureFlags(t *testing.T) {
+	t.Setenv("NEXTAI_DISABLE_QQ_INBOUND_SUPERVISOR", "true")
+	dir := t.TempDir()
+	srv, err := NewServer(config.Config{
+		Host:                          "127.0.0.1",
+		Port:                          "0",
+		DataDir:                       dir,
+		EnablePromptTemplates:         true,
+		EnablePromptContextIntrospect: false,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { srv.Close() })
+
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/runtime-config", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("runtime config status=%d body=%s", w.Code, w.Body.String())
+	}
+
+	var resp struct {
+		Features struct {
+			PromptTemplates         bool `json:"prompt_templates"`
+			PromptContextIntrospect bool `json:"prompt_context_introspect"`
+		} `json:"features"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode runtime config failed: %v body=%s", err, w.Body.String())
+	}
+	if !resp.Features.PromptTemplates {
+		t.Fatalf("expected prompt_templates=true, body=%s", w.Body.String())
+	}
+	if resp.Features.PromptContextIntrospect {
+		t.Fatalf("expected prompt_context_introspect=false, body=%s", w.Body.String())
+	}
+}
+
+func TestRuntimeConfigEndpointBypassesAPIKeyAuth(t *testing.T) {
+	t.Setenv("NEXTAI_DISABLE_QQ_INBOUND_SUPERVISOR", "true")
+	dir := t.TempDir()
+	srv, err := NewServer(config.Config{
+		Host:                          "127.0.0.1",
+		Port:                          "0",
+		DataDir:                       dir,
+		APIKey:                        "secret-token",
+		EnablePromptTemplates:         false,
+		EnablePromptContextIntrospect: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { srv.Close() })
+
+	runtimeConfigW := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(runtimeConfigW, httptest.NewRequest(http.MethodGet, "/runtime-config", nil))
+	if runtimeConfigW.Code != http.StatusOK {
+		t.Fatalf("runtime config should bypass auth, got=%d body=%s", runtimeConfigW.Code, runtimeConfigW.Body.String())
+	}
+
+	var resp struct {
+		Features struct {
+			PromptTemplates         bool `json:"prompt_templates"`
+			PromptContextIntrospect bool `json:"prompt_context_introspect"`
+		} `json:"features"`
+	}
+	if err := json.Unmarshal(runtimeConfigW.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode runtime config failed: %v body=%s", err, runtimeConfigW.Body.String())
+	}
+	if resp.Features.PromptTemplates {
+		t.Fatalf("expected prompt_templates=false, body=%s", runtimeConfigW.Body.String())
+	}
+	if !resp.Features.PromptContextIntrospect {
+		t.Fatalf("expected prompt_context_introspect=true, body=%s", runtimeConfigW.Body.String())
+	}
+
+	chatsW := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(chatsW, httptest.NewRequest(http.MethodGet, "/chats", nil))
+	if chatsW.Code != http.StatusUnauthorized {
+		t.Fatalf("chats without key should still require auth, got=%d body=%s", chatsW.Code, chatsW.Body.String())
 	}
 }
 
@@ -1264,11 +1362,207 @@ func TestProcessAgentRejectsShellToolWithoutCommand(t *testing.T) {
 	}
 }
 
+func TestPrependSystemLayersPreservesOrder(t *testing.T) {
+	input := []domain.AgentInputMessage{
+		{
+			Role: "user",
+			Type: "message",
+			Content: []domain.RuntimeContent{
+				{Type: "text", Text: "hello"},
+			},
+		},
+	}
+
+	layers := []systemPromptLayer{
+		{Name: "base_system", Role: "system", Content: "base"},
+		{Name: "tool_guide_system", Role: "system", Content: "tool"},
+		{Name: "workspace_policy_system", Role: "system", Content: ""},
+		{Name: "session_policy_system", Role: "system", Content: "session"},
+	}
+
+	out := prependSystemLayers(input, layers)
+	if len(out) != 4 {
+		t.Fatalf("expected 4 messages, got=%d", len(out))
+	}
+	if got := out[0].Content[0].Text; got != "base" {
+		t.Fatalf("first layer mismatch: %q", got)
+	}
+	if got := out[1].Content[0].Text; got != "tool" {
+		t.Fatalf("second layer mismatch: %q", got)
+	}
+	if got := out[2].Content[0].Text; got != "session" {
+		t.Fatalf("third layer mismatch: %q", got)
+	}
+	if got := out[3].Role; got != "user" {
+		t.Fatalf("last message should be user, got=%q", got)
+	}
+}
+
+func TestBuildSystemLayersOrder(t *testing.T) {
+	srv := newTestServer(t)
+
+	layers, err := srv.buildSystemLayers()
+	if err != nil {
+		t.Fatalf("buildSystemLayers failed: %v", err)
+	}
+	if len(layers) < 2 {
+		t.Fatalf("expected at least 2 layers, got=%d", len(layers))
+	}
+	if layers[0].Name != "base_system" {
+		t.Fatalf("first layer should be base_system, got=%q", layers[0].Name)
+	}
+	if layers[1].Name != "tool_guide_system" {
+		t.Fatalf("second layer should be tool_guide_system, got=%q", layers[1].Name)
+	}
+}
+
+func TestBuildSystemLayersMissingRequiredFileFails(t *testing.T) {
+	repoRoot, err := findRepoRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	agentsPath := filepath.Join(repoRoot, filepath.FromSlash(aiToolsGuideRelativePath))
+	backupPath := fmt.Sprintf("%s.bak-%d", agentsPath, time.Now().UnixNano())
+	if err := os.Rename(agentsPath, backupPath); err != nil {
+		t.Fatalf("rename agents file failed: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = os.Rename(backupPath, agentsPath)
+	})
+
+	srv := newTestServer(t)
+	if _, err := srv.buildSystemLayers(); err == nil {
+		t.Fatal("expected buildSystemLayers to fail when AGENTS file is missing")
+	}
+}
+
+func TestBuildSystemLayersFallsBackToLegacyToolGuidePath(t *testing.T) {
+	repoRoot, err := findRepoRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	primaryPath := filepath.Join(repoRoot, filepath.FromSlash(aiToolsGuideLegacyRelativePath))
+	primaryBackup := fmt.Sprintf("%s.bak-%d", primaryPath, time.Now().UnixNano())
+	if err := os.Rename(primaryPath, primaryBackup); err != nil {
+		t.Fatalf("rename primary tool guide failed: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = os.Rename(primaryBackup, primaryPath)
+	})
+
+	legacyPath := filepath.Join(repoRoot, filepath.FromSlash(aiToolsGuideLegacyV0RelativePath))
+	legacyOriginal, legacyReadErr := os.ReadFile(legacyPath)
+	legacyExisted := legacyReadErr == nil
+	if legacyReadErr != nil && !errors.Is(legacyReadErr, os.ErrNotExist) {
+		t.Fatalf("read legacy tool guide failed: %v", legacyReadErr)
+	}
+	if err := os.MkdirAll(filepath.Dir(legacyPath), 0o755); err != nil {
+		t.Fatalf("create legacy dir failed: %v", err)
+	}
+	const fallbackContent = "# fallback legacy tool guide"
+	if err := os.WriteFile(legacyPath, []byte(fallbackContent), 0o644); err != nil {
+		t.Fatalf("write legacy tool guide failed: %v", err)
+	}
+	t.Cleanup(func() {
+		if legacyExisted {
+			_ = os.WriteFile(legacyPath, legacyOriginal, 0o644)
+			return
+		}
+		_ = os.Remove(legacyPath)
+	})
+
+	srv := newTestServer(t)
+	layers, err := srv.buildSystemLayers()
+	if err != nil {
+		t.Fatalf("buildSystemLayers failed: %v", err)
+	}
+	if len(layers) < 2 {
+		t.Fatalf("expected at least 2 layers, got=%d", len(layers))
+	}
+	toolLayer := layers[1]
+	if toolLayer.Source != aiToolsGuideLegacyV0RelativePath {
+		t.Fatalf("expected fallback source=%q, got=%q", aiToolsGuideLegacyV0RelativePath, toolLayer.Source)
+	}
+	if !strings.Contains(toolLayer.Content, fallbackContent) {
+		t.Fatalf("fallback content not used, layer=%q", toolLayer.Content)
+	}
+}
+
+func TestGetAgentSystemLayersFeatureDisabled(t *testing.T) {
+	srv := newTestServer(t)
+
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/agent/system-layers", nil))
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got=%d body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"code":"feature_disabled"`) {
+		t.Fatalf("unexpected body: %s", w.Body.String())
+	}
+}
+
+func TestGetAgentSystemLayersReturnsLayersAndTokenEstimate(t *testing.T) {
+	t.Setenv("NEXTAI_DISABLE_QQ_INBOUND_SUPERVISOR", "true")
+	dir, err := os.MkdirTemp("", "nextai-gateway-system-layers-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	srv, err := NewServer(config.Config{
+		Host:                          "127.0.0.1",
+		Port:                          "0",
+		DataDir:                       dir,
+		EnablePromptContextIntrospect: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { srv.Close() })
+
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/agent/system-layers", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got=%d body=%s", w.Code, w.Body.String())
+	}
+
+	var body agentSystemLayersResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode response failed: %v", err)
+	}
+	if body.Version != "v1" {
+		t.Fatalf("unexpected version: %q", body.Version)
+	}
+	if len(body.Layers) < 3 {
+		t.Fatalf("expected at least 3 layers, got=%d", len(body.Layers))
+	}
+	if body.Layers[0].Name != "base_system" || body.Layers[1].Name != "tool_guide_system" {
+		t.Fatalf("unexpected first layers: %#v", body.Layers[:2])
+	}
+	foundEnvironment := false
+	for _, layer := range body.Layers {
+		if layer.Name == "environment_context_system" {
+			foundEnvironment = true
+			break
+		}
+	}
+	if !foundEnvironment {
+		t.Fatalf("environment_context_system layer missing: %#v", body.Layers)
+	}
+	if body.EstimatedTokensTotal <= 0 {
+		t.Fatalf("estimated_tokens_total should be positive, got=%d", body.EstimatedTokensTotal)
+	}
+}
+
 func TestWorkspaceFilesListIncludesConfigAndSkillFiles(t *testing.T) {
 	srv := newTestServer(t)
 	docsPath, docsAbsPath := newDocsAITestPath(t, "workspace-list")
 	if err := os.WriteFile(docsAbsPath, []byte("# workspace list test\n"), 0o644); err != nil {
 		t.Fatalf("seed docs/AI file failed: %v", err)
+	}
+	promptPath, promptAbsPath := newPromptTemplateTestPath(t, "workspace-list-prompt")
+	if err := os.WriteFile(promptAbsPath, []byte("prompt body"), 0o644); err != nil {
+		t.Fatalf("seed prompts file failed: %v", err)
 	}
 
 	createSkill := `{"name":"demo-skill","content":"## skill content"}`
@@ -1306,6 +1600,9 @@ func TestWorkspaceFilesListIncludesConfigAndSkillFiles(t *testing.T) {
 	if got := paths[docsPath]; got != "config" {
 		t.Fatalf("expected %s to be config, got=%q", docsPath, got)
 	}
+	if got := paths[promptPath]; got != "config" {
+		t.Fatalf("expected %s to be config, got=%q", promptPath, got)
+	}
 }
 
 func TestWorkspaceFileConfigAndSkillCRUD(t *testing.T) {
@@ -1313,6 +1610,10 @@ func TestWorkspaceFileConfigAndSkillCRUD(t *testing.T) {
 	docsPath, docsAbsPath := newDocsAITestPath(t, "workspace-crud")
 	if err := os.WriteFile(docsAbsPath, []byte("# before update\n"), 0o644); err != nil {
 		t.Fatalf("seed docs/AI file failed: %v", err)
+	}
+	promptPath, promptAbsPath := newPromptTemplateTestPath(t, "workspace-crud-prompt")
+	if err := os.WriteFile(promptAbsPath, []byte("hello $NAME"), 0o644); err != nil {
+		t.Fatalf("seed prompts file failed: %v", err)
 	}
 
 	envBody := `{"OPENAI_API_KEY":"sk-test"}`
@@ -1368,6 +1669,29 @@ func TestWorkspaceFileConfigAndSkillCRUD(t *testing.T) {
 	}
 	if strings.TrimSpace(string(updatedDocsRaw)) != "# after update" {
 		t.Fatalf("unexpected docs/AI file content: %s", string(updatedDocsRaw))
+	}
+
+	getPromptW := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(getPromptW, httptest.NewRequest(http.MethodGet, "/workspace/files/"+promptPath, nil))
+	if getPromptW.Code != http.StatusOK {
+		t.Fatalf("get prompts file status=%d body=%s", getPromptW.Code, getPromptW.Body.String())
+	}
+	if !strings.Contains(getPromptW.Body.String(), "hello $NAME") {
+		t.Fatalf("prompts file should return text content: %s", getPromptW.Body.String())
+	}
+
+	putPromptBody := `{"content":"updated $NAME"}`
+	putPromptW := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(putPromptW, httptest.NewRequest(http.MethodPut, "/workspace/files/"+promptPath, strings.NewReader(putPromptBody)))
+	if putPromptW.Code != http.StatusOK {
+		t.Fatalf("put prompts file status=%d body=%s", putPromptW.Code, putPromptW.Body.String())
+	}
+	updatedPromptRaw, err := os.ReadFile(promptAbsPath)
+	if err != nil {
+		t.Fatalf("read updated prompts file failed: %v", err)
+	}
+	if strings.TrimSpace(string(updatedPromptRaw)) != "updated $NAME" {
+		t.Fatalf("unexpected prompts file content: %s", string(updatedPromptRaw))
 	}
 
 	delSkillW := httptest.NewRecorder()

@@ -47,3 +47,7 @@ export function resolveSlashCommand(
   const index = Math.max(0, Math.min(matches.length - 1, selectionIndex));
   return matches[index] ?? null;
 }
+
+export function isLocalSlashCommand(raw: string, selectionIndex = 0, commands: SlashCommand[] = slashCommands): boolean {
+  return resolveSlashCommand(raw, selectionIndex, commands) !== null;
+}
