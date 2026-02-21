@@ -26,6 +26,7 @@ import (
 	"nextai/apps/gateway/internal/repo"
 	"nextai/apps/gateway/internal/runner"
 	agentservice "nextai/apps/gateway/internal/service/agent"
+	cronservice "nextai/apps/gateway/internal/service/cron"
 )
 
 const version = "0.1.0"
@@ -73,9 +74,9 @@ const (
 	defaultWebDirName     = "web"
 )
 
-var errCronJobNotFound = errors.New("cron_job_not_found")
-var errCronMaxConcurrencyReached = errors.New("cron_max_concurrency_reached")
-var errCronDefaultProtected = errors.New("cron_default_protected")
+var errCronJobNotFound = cronservice.ErrJobNotFound
+var errCronMaxConcurrencyReached = cronservice.ErrMaxConcurrencyReached
+var errCronDefaultProtected = cronservice.ErrDefaultProtected
 
 var cronWorkflowIfConditionPattern = regexp.MustCompile(`^\s*([A-Za-z_][A-Za-z0-9_]*)\s*(==|!=)\s*(?:"([^"]*)"|'([^']*)'|(\S+))\s*$`)
 
@@ -103,6 +104,7 @@ type Server struct {
 	channels     map[string]plugin.ChannelPlugin
 	tools        map[string]plugin.ToolPlugin
 	agentService *agentservice.Service
+	cronService  *cronservice.Service
 
 	disabledTools map[string]struct{}
 	qqInboundMu   sync.RWMutex
@@ -154,6 +156,7 @@ func NewServer(cfg config.Config) (*Server, error) {
 		srv.registerToolPlugin(searchTool)
 	}
 	srv.agentService = srv.newAgentService()
+	srv.cronService = srv.newCronService()
 	srv.startCronScheduler()
 	if !parseBool(os.Getenv(disableQQInboundSupervisorEnv)) {
 		srv.startQQInboundSupervisor()
@@ -301,80 +304,23 @@ func (s *Server) startCronScheduler() {
 	}()
 }
 
-type dueCronExecution struct {
-	JobID string
-}
-
 func (s *Server) cronSchedulerTick() {
-	now := time.Now().UTC()
-	stateUpdates := map[string]domain.CronJobState{}
-	dueJobs := make([]dueCronExecution, 0)
-	s.store.Read(func(st *repo.State) {
-		for id, job := range st.CronJobs {
-			current := st.CronStates[id]
-			next := normalizeCronPausedState(current)
-			if !cronJobSchedulable(job, next) {
-				next.NextRunAt = nil
-				if !cronStateEqual(current, next) {
-					stateUpdates[id] = next
-				}
-				continue
-			}
-
-			nextRunAt, dueAt, err := resolveCronNextRunAt(job, next.NextRunAt, now)
-			if err != nil {
-				msg := err.Error()
-				next.LastError = &msg
-				next.NextRunAt = nil
-				if !cronStateEqual(current, next) {
-					stateUpdates[id] = next
-				}
-				continue
-			}
-
-			nextRun := nextRunAt.Format(time.RFC3339)
-			next.NextRunAt = &nextRun
-			next.LastError = nil
-			if dueAt != nil && cronMisfireExceeded(dueAt, cronRuntimeSpec(job), now) {
-				failed := cronStatusFailed
-				msg := fmt.Sprintf("misfire skipped: scheduled_at=%s", dueAt.Format(time.RFC3339))
-				next.LastStatus = &failed
-				next.LastError = &msg
-				dueAt = nil
-			}
-			if !cronStateEqual(current, next) {
-				stateUpdates[id] = next
-			}
-			if dueAt != nil {
-				dueJobs = append(dueJobs, dueCronExecution{JobID: id})
-			}
-		}
-	})
-	if len(stateUpdates) > 0 {
-		if err := s.store.Write(func(st *repo.State) error {
-			for id, next := range stateUpdates {
-				if _, ok := st.CronJobs[id]; !ok {
-					continue
-				}
-				st.CronStates[id] = next
-			}
-			return nil
-		}); err != nil {
-			log.Printf("cron scheduler tick failed: %v", err)
-			return
-		}
+	dueJobs, err := s.getCronService().SchedulerTick(time.Now().UTC())
+	if err != nil {
+		log.Printf("cron scheduler tick failed: %v", err)
+		return
 	}
 
-	for _, due := range dueJobs {
+	for _, jobID := range dueJobs {
 		s.cronWG.Add(1)
-		go func(jobID string) {
+		go func(targetJobID string) {
 			defer s.cronWG.Done()
-			if err := s.executeCronJob(jobID); err != nil &&
+			if err := s.executeCronJob(targetJobID); err != nil &&
 				!errors.Is(err, errCronJobNotFound) &&
 				!errors.Is(err, errCronMaxConcurrencyReached) {
-				log.Printf("cron job %s execute failed: %v", jobID, err)
+				log.Printf("cron job %s execute failed: %v", targetJobID, err)
 			}
-		}(due.JobID)
+		}(jobID)
 	}
 }
 
