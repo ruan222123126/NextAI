@@ -1,4 +1,4 @@
-# API / CLI 最小契约
+﻿# API / CLI 鏈€灏忓绾?
 
 ## API
 - /version, /healthz
@@ -6,22 +6,22 @@
 - /agent/process
 - /channels/qq/inbound
 - /channels/qq/state
-- /cron/jobs 系列
-- /models 系列
-- /envs 系列
-- /skills 系列
+- /cron/jobs 绯诲垪
+- /models 绯诲垪
+- /envs 绯诲垪
+- /skills 绯诲垪
 - /workspace/files, /workspace/files/{file_path}
 - /workspace/export, /workspace/import
-- /config/channels 系列
+- /config/channels 绯诲垪
 
-### 渠道配置约定（/config/channels）
-- 支持类型：`console`、`webhook`、`qq`
-- `qq` 推荐字段：`enabled`、`app_id`、`client_secret`、`bot_prefix`、`target_type(c2c/group/guild)`、`target_id`、`api_base`、`token_url`、`timeout_seconds`
+### 娓犻亾閰嶇疆绾﹀畾锛?config/channels锛?
+- 鏀寔绫诲瀷锛歚console`銆乣webhook`銆乣qq`
+- `qq` 鎺ㄨ崘瀛楁锛歚enabled`銆乣app_id`銆乣client_secret`銆乣bot_prefix`銆乣target_type(c2c/group/guild)`銆乣target_id`銆乣api_base`銆乣token_url`銆乣timeout_seconds`
 
-### QQ 入站约定（/channels/qq/inbound）
-- 接受 QQ 入站事件（支持 `C2C_MESSAGE_CREATE`、`GROUP_AT_MESSAGE_CREATE`、`AT_MESSAGE_CREATE`、`DIRECT_MESSAGE_CREATE` 及兼容化 `message_type` 结构）。
-- 网关会将入站文本转换为 `channel=qq` 的内部 `/agent/process` 请求并自动回发。
-- 回发目标按事件动态覆盖 `target_type/target_id`，无需写死在全局配置里。
+### QQ 鍏ョ珯绾﹀畾锛?channels/qq/inbound锛?
+- 鎺ュ彈 QQ 鍏ョ珯浜嬩欢锛堟敮鎸?`C2C_MESSAGE_CREATE`銆乣GROUP_AT_MESSAGE_CREATE`銆乣AT_MESSAGE_CREATE`銆乣DIRECT_MESSAGE_CREATE` 鍙婂吋瀹瑰寲 `message_type` 缁撴瀯锛夈€?
+- 缃戝叧浼氬皢鍏ョ珯鏂囨湰杞崲涓?`channel=qq` 鐨勫唴閮?`/agent/process` 璇锋眰骞惰嚜鍔ㄥ洖鍙戙€?
+- 鍥炲彂鐩爣鎸変簨浠跺姩鎬佽鐩?`target_type/target_id`锛屾棤闇€鍐欐鍦ㄥ叏灞€閰嶇疆閲屻€?
 
 ## CLI
 - nextai app start
@@ -34,30 +34,30 @@
 - nextai channels list/types/get/set
 - nextai tui
 
-## /agent/process 多步 Agent 协议
+## /agent/process 澶氭 Agent 鍗忚
 
-`POST /agent/process` 支持两种模式：
+`POST /agent/process` 鏀寔涓ょ妯″紡锛?
 
-1. 常规对话（模型自治多步）
-2. 显式工具调用（推荐顶层 `view/edit/shell/browser/search`，兼容 `biz_params.tool`；上述工具的值均为对象数组，单次操作也需传 1 个元素）
+1. 甯歌瀵硅瘽锛堟ā鍨嬭嚜娌诲姝ワ級
+2. 鏄惧紡宸ュ叿璋冪敤锛堟帹鑽愰《灞?`view/edit/shell/browser/search`锛屽吋瀹?`biz_params.tool`锛涗笂杩板伐鍏风殑鍊煎潎涓哄璞℃暟缁勶紝鍗曟鎿嶄綔涔熼渶浼?1 涓厓绱狅級
 
-特殊指令约定：
+鐗规畩鎸囦护绾﹀畾锛?
 
-- 当用户文本输入为 `/new`（忽略前后空白）时，Gateway 不调用模型，直接清理当前 `session_id + user_id + channel` 对应会话历史，并返回确认回复（流式/非流式均适用）。
-- `channel` 字段在 `/agent/process` 中为可选；若请求未显式传值则默认 `console`。QQ 入站路径固定使用 `channel=qq`。
+- 褰撶敤鎴锋枃鏈緭鍏ヤ负 `/new`锛堝拷鐣ュ墠鍚庣┖鐧斤級鏃讹紝Gateway 涓嶈皟鐢ㄦā鍨嬶紝鐩存帴娓呯悊褰撳墠 `session_id + user_id + channel` 瀵瑰簲浼氳瘽鍘嗗彶锛屽苟杩斿洖纭鍥炲锛堟祦寮?闈炴祦寮忓潎閫傜敤锛夈€?
+- `channel` 瀛楁鍦?`/agent/process` 涓负鍙€夛紱鑻ヨ姹傛湭鏄惧紡浼犲€煎垯榛樿 `console`銆俀Q 鍏ョ珯璺緞鍥哄畾浣跨敤 `channel=qq`銆?
 
-工具启用策略：
+宸ュ叿鍚敤绛栫暐锛?
 
-- 默认注册工具可用。
-- 通过环境变量 `NEXTAI_DISABLED_TOOLS`（逗号分隔，如 `shell,edit`）按名称禁用工具。
-- 当调用被禁用工具时，返回 `403` 与错误码 `tool_disabled`。
-- 浏览器工具默认关闭；需设置 `NEXTAI_ENABLE_BROWSER_TOOL=true`，并提供 `NEXTAI_BROWSER_AGENT_DIR`（指向 `agent.js` 所在目录）后才会注册。
-- 搜索工具默认关闭；需设置 `NEXTAI_ENABLE_SEARCH_TOOL=true`。支持多 provider（`serpapi` / `tavily` / `brave`），各 provider 通过环境变量配置 key（可选 base url）：
+- 榛樿娉ㄥ唽宸ュ叿鍙敤銆?
+- 閫氳繃鐜鍙橀噺 `NEXTAI_DISABLED_TOOLS`锛堥€楀彿鍒嗛殧锛屽 `shell,edit`锛夋寜鍚嶇О绂佺敤宸ュ叿銆?
+- 褰撹皟鐢ㄨ绂佺敤宸ュ叿鏃讹紝杩斿洖 `403` 涓庨敊璇爜 `tool_disabled`銆?
+- 娴忚鍣ㄥ伐鍏烽粯璁ゅ叧闂紱闇€璁剧疆 `NEXTAI_ENABLE_BROWSER_TOOL=true`锛屽苟鎻愪緵 `NEXTAI_BROWSER_AGENT_DIR`锛堟寚鍚?`agent.js` 鎵€鍦ㄧ洰褰曪級鍚庢墠浼氭敞鍐屻€?
+- 鎼滅储宸ュ叿榛樿鍏抽棴锛涢渶璁剧疆 `NEXTAI_ENABLE_SEARCH_TOOL=true`銆傛敮鎸佸 provider锛坄serpapi` / `tavily` / `brave`锛夛紝鍚?provider 閫氳繃鐜鍙橀噺閰嶇疆 key锛堝彲閫?base url锛夛細
   - `NEXTAI_SEARCH_SERPAPI_KEY` / `NEXTAI_SEARCH_SERPAPI_BASE_URL`
   - `NEXTAI_SEARCH_TAVILY_KEY` / `NEXTAI_SEARCH_TAVILY_BASE_URL`
   - `NEXTAI_SEARCH_BRAVE_KEY` / `NEXTAI_SEARCH_BRAVE_BASE_URL`
 
-请求示例：
+璇锋眰绀轰緥锛?
 
 ```json
 {
@@ -65,7 +65,7 @@
     {
       "role": "user",
       "type": "message",
-      "content": [{ "type": "text", "text": "请读取配置并给出结论" }]
+      "content": [{ "type": "text", "text": "璇疯鍙栭厤缃苟缁欏嚭缁撹" }]
     }
   ],
   "session_id": "s1",
@@ -75,29 +75,40 @@
 }
 ```
 
-`stream=false` 返回：
+`stream=false` 杩斿洖锛?
 
 ```json
 {
-  "reply": "最终回复文本",
+  "reply": "鏈€缁堝洖澶嶆枃鏈?,
   "events": [
     { "type": "step_started", "step": 1 },
     { "type": "tool_call", "step": 1, "tool_call": { "name": "shell" } },
     { "type": "tool_result", "step": 1, "tool_result": { "name": "shell", "ok": true, "summary": "..." } },
     { "type": "assistant_delta", "step": 2, "delta": "..." },
-    { "type": "completed", "step": 2, "reply": "最终回复文本" }
+    { "type": "completed", "step": 2, "reply": "鏈€缁堝洖澶嶆枃鏈? }
   ]
 }
 ```
 
-`stream=true` 返回 SSE，`data` payload 与上面 `events` 同构；事件在执行过程中实时推送（每个事件写出后立即 flush），并以 `data: [DONE]` 结束。  
-其中常规对话的 `assistant_delta` 在 OpenAI-compatible 适配器下透传上游原生 token/delta（不再由 Gateway 按字符二次切片模拟）。若流式处理中途失败，额外发送 `{"type":"error","meta":{"code","message"}}` 后结束。
+`stream=true` 杩斿洖 SSE锛宍data` payload 涓庝笂闈?`events` 鍚屾瀯锛涗簨浠跺湪鎵ц杩囩▼涓疄鏃舵帹閫侊紙姣忎釜浜嬩欢鍐欏嚭鍚庣珛鍗?flush锛夛紝骞朵互 `data: [DONE]` 缁撴潫銆? 
+鍏朵腑甯歌瀵硅瘽鐨?`assistant_delta` 鍦?OpenAI-compatible 閫傞厤鍣ㄤ笅閫忎紶涓婃父鍘熺敓 token/delta锛堜笉鍐嶇敱 Gateway 鎸夊瓧绗︿簩娆″垏鐗囨ā鎷燂級銆傝嫢娴佸紡澶勭悊涓€斿け璐ワ紝棰濆鍙戦€?`{"type":"error","meta":{"code","message"}}` 鍚庣粨鏉熴€?
 
-事件类型：
+浜嬩欢绫诲瀷锛?
 
 - `step_started`
 - `tool_call`
 - `tool_result`
 - `assistant_delta`
 - `completed`
-- `error`（仅流式失败场景）
+- `error`锛堜粎娴佸紡澶辫触鍦烘櫙锛?
+
+## Chat Default Session Rule
+- Gateway always keeps one protected default chat in state (`id=chat-default`).
+- Default chat baseline fields: `session_id=session-default`, `user_id=demo-user`, `channel=console`.
+- Default chat carries `meta.system_default=true`.
+- `DELETE /chats/{chat_id}` and `POST /chats/batch-delete` reject deleting `chat-default` with `400 default_chat_protected`.
+
+## Cron Default Job Rule
+- Gateway always keeps one protected default cron job in state (`id=cron-default`).
+- Default cron job baseline fields: `name=浣犲ソ鏂囨湰浠诲姟`, `task_type=text`, `text=浣犲ソ`, `enabled=false`.
+- `DELETE /cron/jobs/{job_id}` rejects deleting `cron-default` with `400 default_cron_protected`.

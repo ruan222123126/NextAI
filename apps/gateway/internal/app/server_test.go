@@ -353,6 +353,136 @@ func TestChatCreateAndGetHistory(t *testing.T) {
 	}
 }
 
+func TestListChatsContainsDefaultChat(t *testing.T) {
+	srv := newTestServer(t)
+
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/chats?user_id=demo-user&channel=console", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("list chats status=%d body=%s", w.Code, w.Body.String())
+	}
+
+	var chats []domain.ChatSpec
+	if err := json.Unmarshal(w.Body.Bytes(), &chats); err != nil {
+		t.Fatalf("decode chats failed: %v body=%s", err, w.Body.String())
+	}
+
+	var defaultChat *domain.ChatSpec
+	for i := range chats {
+		if chats[i].ID == domain.DefaultChatID {
+			defaultChat = &chats[i]
+			break
+		}
+	}
+	if defaultChat == nil {
+		t.Fatalf("default chat should exist in list: %s", w.Body.String())
+	}
+	if defaultChat.SessionID != domain.DefaultChatSessionID {
+		t.Fatalf("unexpected default chat session_id: %q", defaultChat.SessionID)
+	}
+	if defaultChat.UserID != domain.DefaultChatUserID {
+		t.Fatalf("unexpected default chat user_id: %q", defaultChat.UserID)
+	}
+	if defaultChat.Channel != domain.DefaultChatChannel {
+		t.Fatalf("unexpected default chat channel: %q", defaultChat.Channel)
+	}
+	flag, ok := defaultChat.Meta[domain.ChatMetaSystemDefault].(bool)
+	if !ok || !flag {
+		t.Fatalf("default chat should have meta.system_default=true, meta=%#v", defaultChat.Meta)
+	}
+}
+
+func TestDeleteDefaultChatRejected(t *testing.T) {
+	srv := newTestServer(t)
+
+	deleteW := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(deleteW, httptest.NewRequest(http.MethodDelete, "/chats/"+domain.DefaultChatID, nil))
+	if deleteW.Code != http.StatusBadRequest {
+		t.Fatalf("delete default chat status=%d body=%s", deleteW.Code, deleteW.Body.String())
+	}
+	if !strings.Contains(deleteW.Body.String(), `"code":"default_chat_protected"`) {
+		t.Fatalf("unexpected delete error body: %s", deleteW.Body.String())
+	}
+
+	batchDeleteW := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(batchDeleteW, httptest.NewRequest(http.MethodPost, "/chats/batch-delete", strings.NewReader(`["`+domain.DefaultChatID+`"]`)))
+	if batchDeleteW.Code != http.StatusBadRequest {
+		t.Fatalf("batch delete default chat status=%d body=%s", batchDeleteW.Code, batchDeleteW.Body.String())
+	}
+	if !strings.Contains(batchDeleteW.Body.String(), `"code":"default_chat_protected"`) {
+		t.Fatalf("unexpected batch delete error body: %s", batchDeleteW.Body.String())
+	}
+
+	listW := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(listW, httptest.NewRequest(http.MethodGet, "/chats?user_id=demo-user&channel=console", nil))
+	if listW.Code != http.StatusOK {
+		t.Fatalf("list chats status=%d body=%s", listW.Code, listW.Body.String())
+	}
+	if !strings.Contains(listW.Body.String(), `"id":"`+domain.DefaultChatID+`"`) {
+		t.Fatalf("default chat should still exist after delete attempts: %s", listW.Body.String())
+	}
+}
+
+func TestListCronJobsContainsDefaultCronJob(t *testing.T) {
+	srv := newTestServer(t)
+
+	listW := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(listW, httptest.NewRequest(http.MethodGet, "/cron/jobs", nil))
+	if listW.Code != http.StatusOK {
+		t.Fatalf("list cron jobs status=%d body=%s", listW.Code, listW.Body.String())
+	}
+
+	var jobs []domain.CronJobSpec
+	if err := json.Unmarshal(listW.Body.Bytes(), &jobs); err != nil {
+		t.Fatalf("decode cron jobs failed: %v body=%s", err, listW.Body.String())
+	}
+
+	var defaultJob *domain.CronJobSpec
+	for i := range jobs {
+		if jobs[i].ID == domain.DefaultCronJobID {
+			defaultJob = &jobs[i]
+			break
+		}
+	}
+	if defaultJob == nil {
+		t.Fatalf("default cron job should exist in list: %s", listW.Body.String())
+	}
+	if defaultJob.TaskType != "text" {
+		t.Fatalf("unexpected default cron task_type: %q", defaultJob.TaskType)
+	}
+	if defaultJob.Text != domain.DefaultCronJobText {
+		t.Fatalf("unexpected default cron text: %q", defaultJob.Text)
+	}
+	if defaultJob.Enabled {
+		t.Fatalf("default cron job should be disabled by default")
+	}
+	flag, ok := defaultJob.Meta[domain.CronMetaSystemDefault].(bool)
+	if !ok || !flag {
+		t.Fatalf("default cron should have meta.system_default=true, meta=%#v", defaultJob.Meta)
+	}
+}
+
+func TestDeleteDefaultCronJobRejected(t *testing.T) {
+	srv := newTestServer(t)
+
+	deleteW := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(deleteW, httptest.NewRequest(http.MethodDelete, "/cron/jobs/"+domain.DefaultCronJobID, nil))
+	if deleteW.Code != http.StatusBadRequest {
+		t.Fatalf("delete default cron status=%d body=%s", deleteW.Code, deleteW.Body.String())
+	}
+	if !strings.Contains(deleteW.Body.String(), `"code":"default_cron_protected"`) {
+		t.Fatalf("unexpected delete default cron body: %s", deleteW.Body.String())
+	}
+
+	listW := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(listW, httptest.NewRequest(http.MethodGet, "/cron/jobs", nil))
+	if listW.Code != http.StatusOK {
+		t.Fatalf("list cron jobs status=%d body=%s", listW.Code, listW.Body.String())
+	}
+	if !strings.Contains(listW.Body.String(), `"id":"`+domain.DefaultCronJobID+`"`) {
+		t.Fatalf("default cron job should still exist after delete attempt: %s", listW.Body.String())
+	}
+}
 func TestProcessAgentReusesChatHistoryContext(t *testing.T) {
 	srv := newTestServer(t)
 
@@ -2424,6 +2554,66 @@ func TestSetActiveModelsResolvesAlias(t *testing.T) {
 	}
 }
 
+func TestConfigureProviderExposesModelAliasesInProviderInfo(t *testing.T) {
+	srv := newTestServer(t)
+
+	configProvider := `{"model_aliases":{"my-model":"my-model","fast":"gpt-4o-mini"},"headers":{"x-tenant":"nextai"},"timeout_ms":15000}`
+	w1 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w1, httptest.NewRequest(http.MethodPut, "/models/custom-openai/config", strings.NewReader(configProvider)))
+	if w1.Code != http.StatusOK {
+		t.Fatalf("config custom provider status=%d body=%s", w1.Code, w1.Body.String())
+	}
+
+	var configured domain.ProviderInfo
+	if err := json.Unmarshal(w1.Body.Bytes(), &configured); err != nil {
+		t.Fatalf("decode configure provider response failed: %v body=%s", err, w1.Body.String())
+	}
+	if configured.ModelAliases["my-model"] != "my-model" {
+		t.Fatalf("expected my-model alias in provider response, got=%v", configured.ModelAliases)
+	}
+	if configured.ModelAliases["fast"] != "gpt-4o-mini" {
+		t.Fatalf("expected fast alias in provider response, got=%v", configured.ModelAliases)
+	}
+	if configured.Headers["x-tenant"] != "nextai" {
+		t.Fatalf("expected header x-tenant in provider response, got=%v", configured.Headers)
+	}
+	if configured.TimeoutMS != 15000 {
+		t.Fatalf("expected timeout_ms in provider response, got=%d", configured.TimeoutMS)
+	}
+
+	w2 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w2, httptest.NewRequest(http.MethodGet, "/models/catalog", nil))
+	if w2.Code != http.StatusOK {
+		t.Fatalf("catalog status=%d body=%s", w2.Code, w2.Body.String())
+	}
+	var catalogOut struct {
+		Providers []domain.ProviderInfo `json:"providers"`
+	}
+	if err := json.Unmarshal(w2.Body.Bytes(), &catalogOut); err != nil {
+		t.Fatalf("decode catalog failed: %v body=%s", err, w2.Body.String())
+	}
+	providersByID := map[string]domain.ProviderInfo{}
+	for _, item := range catalogOut.Providers {
+		providersByID[item.ID] = item
+	}
+	custom, ok := providersByID["custom-openai"]
+	if !ok {
+		t.Fatalf("expected custom-openai in catalog, providers=%v", providersByID)
+	}
+	if custom.ModelAliases["my-model"] != "my-model" {
+		t.Fatalf("expected my-model alias in catalog provider, got=%v", custom.ModelAliases)
+	}
+	if custom.ModelAliases["fast"] != "gpt-4o-mini" {
+		t.Fatalf("expected fast alias in catalog provider, got=%v", custom.ModelAliases)
+	}
+	if custom.Headers["x-tenant"] != "nextai" {
+		t.Fatalf("expected header x-tenant in catalog provider, got=%v", custom.Headers)
+	}
+	if custom.TimeoutMS != 15000 {
+		t.Fatalf("expected timeout_ms in catalog provider, got=%d", custom.TimeoutMS)
+	}
+}
+
 func TestSetActiveModelsRejectsDisabledProvider(t *testing.T) {
 	srv := newTestServer(t)
 
@@ -2814,6 +3004,385 @@ func TestRunCronJobRoutesConsoleTextThroughAgent(t *testing.T) {
 	}
 	if len(last.Content) == 0 || last.Content[0].Text != "Echo: hello console cron" {
 		t.Fatalf("unexpected last message content: %+v", last.Content)
+	}
+}
+
+func TestCreateCronWorkflowJobAcceptsLinearGraph(t *testing.T) {
+	srv := newTestServer(t)
+	createReq := `{
+		"id":"job-workflow",
+		"name":"job-workflow",
+		"enabled":false,
+		"schedule":{"type":"interval","cron":"60s"},
+		"task_type":"workflow",
+		"workflow":{
+			"version":"v1",
+			"nodes":[
+				{"id":"start","type":"start","x":0,"y":0},
+				{"id":"n1","type":"text_event","x":120,"y":0,"text":"hello node"},
+				{"id":"n2","type":"delay","x":260,"y":0,"delay_seconds":0}
+			],
+			"edges":[
+				{"id":"e1","source":"start","target":"n1"},
+				{"id":"e2","source":"n1","target":"n2"}
+			]
+		},
+		"dispatch":{"target":{"user_id":"u1","session_id":"s1"}}
+	}`
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/cron/jobs", strings.NewReader(createReq)))
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected create workflow status=200, got=%d body=%s", w.Code, w.Body.String())
+	}
+	var out domain.CronJobSpec
+	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode workflow cron failed: %v body=%s", err, w.Body.String())
+	}
+	if out.TaskType != "workflow" {
+		t.Fatalf("expected task_type=workflow, got=%q", out.TaskType)
+	}
+	if out.Workflow == nil {
+		t.Fatalf("expected workflow payload to be persisted")
+	}
+	if out.Workflow.Version != "v1" {
+		t.Fatalf("expected workflow version=v1, got=%q", out.Workflow.Version)
+	}
+}
+
+func TestCreateCronWorkflowJobAcceptsIfEventNode(t *testing.T) {
+	srv := newTestServer(t)
+	createReq := `{
+		"id":"job-workflow-if",
+		"name":"job-workflow-if",
+		"enabled":false,
+		"schedule":{"type":"interval","cron":"60s"},
+		"task_type":"workflow",
+		"workflow":{
+			"version":"v1",
+			"nodes":[
+				{"id":"start","type":"start","x":0,"y":0},
+				{"id":"n-if","type":"if_event","x":120,"y":0,"if_condition":"channel == console"},
+				{"id":"n-text","type":"text_event","x":260,"y":0,"text":"hello after if"}
+			],
+			"edges":[
+				{"id":"e1","source":"start","target":"n-if"},
+				{"id":"e2","source":"n-if","target":"n-text"}
+			]
+		},
+		"dispatch":{"target":{"user_id":"u1","session_id":"s1"}}
+	}`
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/cron/jobs", strings.NewReader(createReq)))
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected create workflow-if status=200, got=%d body=%s", w.Code, w.Body.String())
+	}
+	var out domain.CronJobSpec
+	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode workflow-if cron failed: %v body=%s", err, w.Body.String())
+	}
+	if out.Workflow == nil {
+		t.Fatalf("expected workflow payload to be persisted")
+	}
+	var ifNode *domain.CronWorkflowNode
+	for i := range out.Workflow.Nodes {
+		node := &out.Workflow.Nodes[i]
+		if node.ID == "n-if" {
+			ifNode = node
+			break
+		}
+	}
+	if ifNode == nil {
+		t.Fatalf("expected n-if node in persisted workflow")
+	}
+	if ifNode.Type != "if_event" {
+		t.Fatalf("expected n-if type=if_event, got=%q", ifNode.Type)
+	}
+	if ifNode.IfCondition != "channel == console" {
+		t.Fatalf("expected n-if if_condition persisted, got=%q", ifNode.IfCondition)
+	}
+}
+
+func TestCreateCronWorkflowJobRejectsNonLinearGraph(t *testing.T) {
+	srv := newTestServer(t)
+	createReq := `{
+		"id":"job-workflow-invalid",
+		"name":"job-workflow-invalid",
+		"enabled":false,
+		"schedule":{"type":"interval","cron":"60s"},
+		"task_type":"workflow",
+		"workflow":{
+			"version":"v1",
+			"nodes":[
+				{"id":"start","type":"start","x":0,"y":0},
+				{"id":"a","type":"text_event","x":80,"y":0,"text":"A"},
+				{"id":"b","type":"text_event","x":80,"y":100,"text":"B"}
+			],
+			"edges":[
+				{"id":"e1","source":"start","target":"a"},
+				{"id":"e2","source":"start","target":"b"}
+			]
+		},
+		"dispatch":{"target":{"user_id":"u1","session_id":"s1"}}
+	}`
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/cron/jobs", strings.NewReader(createReq)))
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected create invalid workflow status=400, got=%d body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"code":"invalid_cron_workflow"`) {
+		t.Fatalf("expected invalid_cron_workflow code, body=%s", w.Body.String())
+	}
+}
+
+func TestRunCronWorkflowExecutesNodesInOrderAndRecordsExecution(t *testing.T) {
+	srv := newTestServer(t)
+
+	createChatReq := `{"name":"wf-chat","session_id":"s-wf-order","user_id":"u-wf-order","channel":"console","meta":{}}`
+	chatW := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(chatW, httptest.NewRequest(http.MethodPost, "/chats", strings.NewReader(createChatReq)))
+	if chatW.Code != http.StatusOK {
+		t.Fatalf("create chat status=%d body=%s", chatW.Code, chatW.Body.String())
+	}
+	var chat domain.ChatSpec
+	if err := json.Unmarshal(chatW.Body.Bytes(), &chat); err != nil {
+		t.Fatalf("decode created chat failed: %v body=%s", err, chatW.Body.String())
+	}
+
+	createReq := `{
+		"id":"job-workflow-order",
+		"name":"job-workflow-order",
+		"enabled":false,
+		"schedule":{"type":"interval","cron":"60s"},
+		"task_type":"workflow",
+		"workflow":{
+			"version":"v1",
+			"nodes":[
+				{"id":"start","type":"start","x":0,"y":0},
+				{"id":"n1","type":"text_event","x":120,"y":0,"text":"first step"},
+				{"id":"n2","type":"delay","x":260,"y":0,"delay_seconds":0},
+				{"id":"n3","type":"text_event","x":380,"y":0,"text":"second step"}
+			],
+			"edges":[
+				{"id":"e1","source":"start","target":"n1"},
+				{"id":"e2","source":"n1","target":"n2"},
+				{"id":"e3","source":"n2","target":"n3"}
+			]
+		},
+		"dispatch":{"channel":"console","target":{"user_id":"u-wf-order","session_id":"s-wf-order"}}
+	}`
+	createW := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(createW, httptest.NewRequest(http.MethodPost, "/cron/jobs", strings.NewReader(createReq)))
+	if createW.Code != http.StatusOK {
+		t.Fatalf("create workflow status=%d body=%s", createW.Code, createW.Body.String())
+	}
+
+	runW := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(runW, httptest.NewRequest(http.MethodPost, "/cron/jobs/job-workflow-order/run", nil))
+	if runW.Code != http.StatusOK {
+		t.Fatalf("run workflow status=%d body=%s", runW.Code, runW.Body.String())
+	}
+
+	state := getCronState(t, srv, "job-workflow-order")
+	if got, _ := state["last_status"].(string); got != cronStatusSucceeded {
+		t.Fatalf("expected workflow last_status=%q, got=%v", cronStatusSucceeded, state["last_status"])
+	}
+	lastExecution, ok := state["last_execution"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected last_execution map, got=%T", state["last_execution"])
+	}
+	nodeRuns, ok := lastExecution["nodes"].([]interface{})
+	if !ok || len(nodeRuns) != 3 {
+		t.Fatalf("expected 3 workflow node runs, got=%v", lastExecution["nodes"])
+	}
+	firstNode, _ := nodeRuns[0].(map[string]interface{})
+	secondNode, _ := nodeRuns[1].(map[string]interface{})
+	thirdNode, _ := nodeRuns[2].(map[string]interface{})
+	if firstNode["node_id"] != "n1" || secondNode["node_id"] != "n2" || thirdNode["node_id"] != "n3" {
+		t.Fatalf("unexpected node execution order: %+v", nodeRuns)
+	}
+	if firstNode["status"] != cronStatusSucceeded || secondNode["status"] != cronStatusSucceeded || thirdNode["status"] != cronStatusSucceeded {
+		t.Fatalf("expected all workflow nodes succeeded, got=%+v", nodeRuns)
+	}
+
+	historyW := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(historyW, httptest.NewRequest(http.MethodGet, "/chats/"+chat.ID, nil))
+	if historyW.Code != http.StatusOK {
+		t.Fatalf("get history status=%d body=%s", historyW.Code, historyW.Body.String())
+	}
+	var history domain.ChatHistory
+	if err := json.Unmarshal(historyW.Body.Bytes(), &history); err != nil {
+		t.Fatalf("decode history failed: %v body=%s", err, historyW.Body.String())
+	}
+	if len(history.Messages) < 4 {
+		t.Fatalf("expected at least 4 history messages, got=%d", len(history.Messages))
+	}
+}
+
+func TestRunCronWorkflowStopsWhenNodeFailsWithoutContinue(t *testing.T) {
+	srv := newTestServer(t)
+	createReq := `{
+		"id":"job-workflow-stop",
+		"name":"job-workflow-stop",
+		"enabled":false,
+		"schedule":{"type":"interval","cron":"60s"},
+		"task_type":"workflow",
+		"workflow":{
+			"version":"v1",
+			"nodes":[
+				{"id":"start","type":"start","x":0,"y":0},
+				{"id":"n1","type":"text_event","x":120,"y":0,"text":"fail first","continue_on_error":false},
+				{"id":"n2","type":"text_event","x":240,"y":0,"text":"should be skipped"}
+			],
+			"edges":[
+				{"id":"e1","source":"start","target":"n1"},
+				{"id":"e2","source":"n1","target":"n2"}
+			]
+		},
+		"dispatch":{"channel":"qq","target":{"user_id":"u1","session_id":"s1"}}
+	}`
+	createW := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(createW, httptest.NewRequest(http.MethodPost, "/cron/jobs", strings.NewReader(createReq)))
+	if createW.Code != http.StatusOK {
+		t.Fatalf("create workflow status=%d body=%s", createW.Code, createW.Body.String())
+	}
+
+	runW := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(runW, httptest.NewRequest(http.MethodPost, "/cron/jobs/job-workflow-stop/run", nil))
+	if runW.Code != http.StatusInternalServerError {
+		t.Fatalf("expected run failure status=500, got=%d body=%s", runW.Code, runW.Body.String())
+	}
+
+	state := getCronState(t, srv, "job-workflow-stop")
+	if got, _ := state["last_status"].(string); got != cronStatusFailed {
+		t.Fatalf("expected workflow last_status=%q, got=%v", cronStatusFailed, state["last_status"])
+	}
+	lastExecution, ok := state["last_execution"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected last_execution map, got=%T", state["last_execution"])
+	}
+	nodeRuns, ok := lastExecution["nodes"].([]interface{})
+	if !ok || len(nodeRuns) != 2 {
+		t.Fatalf("expected 2 workflow node runs, got=%v", lastExecution["nodes"])
+	}
+	firstNode, _ := nodeRuns[0].(map[string]interface{})
+	secondNode, _ := nodeRuns[1].(map[string]interface{})
+	if firstNode["status"] != cronStatusFailed {
+		t.Fatalf("expected first node failed, got=%v", firstNode["status"])
+	}
+	if secondNode["status"] != "skipped" {
+		t.Fatalf("expected second node skipped, got=%v", secondNode["status"])
+	}
+}
+
+func TestRunCronWorkflowContinuesWhenNodeFailsWithContinue(t *testing.T) {
+	srv := newTestServer(t)
+	createReq := `{
+		"id":"job-workflow-continue",
+		"name":"job-workflow-continue",
+		"enabled":false,
+		"schedule":{"type":"interval","cron":"60s"},
+		"task_type":"workflow",
+		"workflow":{
+			"version":"v1",
+			"nodes":[
+				{"id":"start","type":"start","x":0,"y":0},
+				{"id":"n1","type":"text_event","x":120,"y":0,"text":"will fail","continue_on_error":true},
+				{"id":"n2","type":"delay","x":240,"y":0,"delay_seconds":0}
+			],
+			"edges":[
+				{"id":"e1","source":"start","target":"n1"},
+				{"id":"e2","source":"n1","target":"n2"}
+			]
+		},
+		"dispatch":{"channel":"qq","target":{"user_id":"u1","session_id":"s1"}}
+	}`
+	createW := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(createW, httptest.NewRequest(http.MethodPost, "/cron/jobs", strings.NewReader(createReq)))
+	if createW.Code != http.StatusOK {
+		t.Fatalf("create workflow status=%d body=%s", createW.Code, createW.Body.String())
+	}
+
+	runW := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(runW, httptest.NewRequest(http.MethodPost, "/cron/jobs/job-workflow-continue/run", nil))
+	if runW.Code != http.StatusInternalServerError {
+		t.Fatalf("expected run failure status=500, got=%d body=%s", runW.Code, runW.Body.String())
+	}
+
+	state := getCronState(t, srv, "job-workflow-continue")
+	if got, _ := state["last_status"].(string); got != cronStatusFailed {
+		t.Fatalf("expected workflow last_status=%q, got=%v", cronStatusFailed, state["last_status"])
+	}
+	lastExecution, ok := state["last_execution"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected last_execution map, got=%T", state["last_execution"])
+	}
+	nodeRuns, ok := lastExecution["nodes"].([]interface{})
+	if !ok || len(nodeRuns) != 2 {
+		t.Fatalf("expected 2 workflow node runs, got=%v", lastExecution["nodes"])
+	}
+	firstNode, _ := nodeRuns[0].(map[string]interface{})
+	secondNode, _ := nodeRuns[1].(map[string]interface{})
+	if firstNode["status"] != cronStatusFailed {
+		t.Fatalf("expected first node failed, got=%v", firstNode["status"])
+	}
+	if secondNode["status"] != cronStatusSucceeded {
+		t.Fatalf("expected second node succeeded after continue_on_error, got=%v", secondNode["status"])
+	}
+}
+
+func TestRunCronWorkflowStopsWhenIfConditionFalse(t *testing.T) {
+	srv := newTestServer(t)
+	createReq := `{
+		"id":"job-workflow-if-stop",
+		"name":"job-workflow-if-stop",
+		"enabled":false,
+		"schedule":{"type":"interval","cron":"60s"},
+		"task_type":"workflow",
+		"workflow":{
+			"version":"v1",
+			"nodes":[
+				{"id":"start","type":"start","x":0,"y":0},
+				{"id":"n-if","type":"if_event","x":120,"y":0,"if_condition":"channel == qq"},
+				{"id":"n-text","type":"text_event","x":260,"y":0,"text":"should be skipped"}
+			],
+			"edges":[
+				{"id":"e1","source":"start","target":"n-if"},
+				{"id":"e2","source":"n-if","target":"n-text"}
+			]
+		},
+		"dispatch":{"channel":"console","target":{"user_id":"u1","session_id":"s1"}}
+	}`
+	createW := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(createW, httptest.NewRequest(http.MethodPost, "/cron/jobs", strings.NewReader(createReq)))
+	if createW.Code != http.StatusOK {
+		t.Fatalf("create workflow-if-stop status=%d body=%s", createW.Code, createW.Body.String())
+	}
+
+	runW := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(runW, httptest.NewRequest(http.MethodPost, "/cron/jobs/job-workflow-if-stop/run", nil))
+	if runW.Code != http.StatusOK {
+		t.Fatalf("run workflow-if-stop status=%d body=%s", runW.Code, runW.Body.String())
+	}
+
+	state := getCronState(t, srv, "job-workflow-if-stop")
+	if got, _ := state["last_status"].(string); got != cronStatusSucceeded {
+		t.Fatalf("expected workflow-if-stop last_status=%q, got=%v", cronStatusSucceeded, state["last_status"])
+	}
+	lastExecution, ok := state["last_execution"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected last_execution map, got=%T", state["last_execution"])
+	}
+	nodeRuns, ok := lastExecution["nodes"].([]interface{})
+	if !ok || len(nodeRuns) != 2 {
+		t.Fatalf("expected 2 workflow node runs, got=%v", lastExecution["nodes"])
+	}
+	firstNode, _ := nodeRuns[0].(map[string]interface{})
+	secondNode, _ := nodeRuns[1].(map[string]interface{})
+	if firstNode["node_id"] != "n-if" || firstNode["status"] != cronStatusSucceeded || firstNode["node_type"] != "if_event" {
+		t.Fatalf("unexpected first if_event execution: %+v", firstNode)
+	}
+	if secondNode["node_id"] != "n-text" || secondNode["status"] != cronWorkflowNodeExecutionSkipped {
+		t.Fatalf("expected text node skipped after false if_event, got=%+v", secondNode)
 	}
 }
 

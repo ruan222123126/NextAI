@@ -113,6 +113,7 @@ paths:
                 additionalProperties: true
   /cron/jobs:
     get:
+      description: List cron jobs. Gateway always keeps a protected default cron job (`cron-default`) in storage.
       responses:
         '200':
           description: ok
@@ -159,8 +160,10 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/CronJobSpec' }
     delete:
+      description: Delete cron job. The protected default cron job (`cron-default`) cannot be deleted.
       responses:
         '200': { description: ok }
+        '400': { description: default cron job cannot be deleted }
   /cron/jobs/{job_id}/pause:
     post:
       parameters:
@@ -585,8 +588,9 @@ components:
         name: { type: string, minLength: 1 }
         enabled: { type: boolean }
         schedule: { $ref: '#/components/schemas/CronScheduleSpec' }
-        task_type: { type: string, minLength: 1 }
+        task_type: { type: string, enum: [text, workflow] }
         text: { type: string }
+        workflow: { $ref: '#/components/schemas/CronWorkflowSpec' }
         request:
           type: object
           additionalProperties: true
@@ -639,12 +643,75 @@ components:
           nullable: true
         last_error: { type: string, nullable: true }
         paused: { type: boolean }
+        last_execution: { $ref: '#/components/schemas/CronWorkflowExecution' }
     CronJobView:
       type: object
       properties:
         spec: { $ref: '#/components/schemas/CronJobSpec' }
         state: { $ref: '#/components/schemas/CronJobState' }
       required: [spec, state]
+    CronWorkflowSpec:
+      type: object
+      properties:
+        version: { type: string, enum: [v1] }
+        viewport: { $ref: '#/components/schemas/CronWorkflowViewport' }
+        nodes:
+          type: array
+          minItems: 2
+          items: { $ref: '#/components/schemas/CronWorkflowNode' }
+        edges:
+          type: array
+          minItems: 1
+          items: { $ref: '#/components/schemas/CronWorkflowEdge' }
+      required: [version, nodes, edges]
+    CronWorkflowNode:
+      type: object
+      properties:
+        id: { type: string, minLength: 1 }
+        type: { type: string, enum: [start, text_event, delay, if_event] }
+        title: { type: string }
+        x: { type: number }
+        y: { type: number }
+        text: { type: string }
+        delay_seconds: { type: integer, minimum: 0 }
+        if_condition: { type: string }
+        continue_on_error: { type: boolean, default: false }
+      required: [id, type, x, y]
+    CronWorkflowEdge:
+      type: object
+      properties:
+        id: { type: string, minLength: 1 }
+        source: { type: string, minLength: 1 }
+        target: { type: string, minLength: 1 }
+      required: [id, source, target]
+    CronWorkflowViewport:
+      type: object
+      properties:
+        pan_x: { type: number, default: 0 }
+        pan_y: { type: number, default: 0 }
+        zoom: { type: number, default: 1.0 }
+    CronWorkflowExecution:
+      type: object
+      properties:
+        run_id: { type: string }
+        started_at: { type: string, format: date-time }
+        finished_at: { type: string, format: date-time, nullable: true }
+        had_failures: { type: boolean }
+        nodes:
+          type: array
+          items: { $ref: '#/components/schemas/CronWorkflowNodeExecution' }
+      required: [run_id, started_at, had_failures, nodes]
+    CronWorkflowNodeExecution:
+      type: object
+      properties:
+        node_id: { type: string }
+        node_type: { type: string, enum: [text_event, delay, if_event] }
+        status: { type: string, enum: [succeeded, failed, skipped] }
+        continue_on_error: { type: boolean }
+        started_at: { type: string, format: date-time }
+        finished_at: { type: string, format: date-time, nullable: true }
+        error: { type: string, nullable: true }
+      required: [node_id, node_type, status, continue_on_error, started_at]
     CronBoolResult:
       type: object
       additionalProperties:
@@ -719,6 +786,13 @@ components:
         has_api_key: { type: boolean }
         current_api_key: { type: string }
         current_base_url: { type: string }
+        headers:
+          type: object
+          additionalProperties: { type: string }
+        timeout_ms: { type: integer, minimum: 0 }
+        model_aliases:
+          type: object
+          additionalProperties: { type: string }
       required:
         [id, name, display_name, openai_compatible, api_key_prefix, models, allow_custom_base_url, enabled, has_api_key, current_api_key, current_base_url]
     ProviderTypeInfo:

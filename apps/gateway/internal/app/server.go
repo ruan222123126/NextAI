@@ -15,6 +15,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -46,6 +47,17 @@ const (
 	cronStatusSucceeded = "succeeded"
 	cronStatusFailed    = "failed"
 
+	cronTaskTypeText     = "text"
+	cronTaskTypeWorkflow = "workflow"
+
+	cronWorkflowVersionV1 = "v1"
+	cronWorkflowNodeStart = "start"
+	cronWorkflowNodeText  = "text_event"
+	cronWorkflowNodeDelay = "delay"
+	cronWorkflowNodeIf    = "if_event"
+
+	cronWorkflowNodeExecutionSkipped = "skipped"
+
 	cronLeaseDirName = "cron-leases"
 
 	aiToolsGuideRelativePath         = "docs/AI/AGENTS.md"
@@ -71,6 +83,26 @@ const (
 
 var errCronJobNotFound = errors.New("cron_job_not_found")
 var errCronMaxConcurrencyReached = errors.New("cron_max_concurrency_reached")
+var errCronDefaultProtected = errors.New("cron_default_protected")
+
+var cronWorkflowIfConditionPattern = regexp.MustCompile(`^\s*([A-Za-z_][A-Za-z0-9_]*)\s*(==|!=)\s*(?:"([^"]*)"|'([^']*)'|(\S+))\s*$`)
+
+var cronWorkflowIfAllowedFields = map[string]struct{}{
+	"job_id":     {},
+	"job_name":   {},
+	"channel":    {},
+	"user_id":    {},
+	"session_id": {},
+	"task_type":  {},
+}
+
+type cronWorkflowPlan struct {
+	Workflow domain.CronWorkflowSpec
+	StartID  string
+	NodeByID map[string]domain.CronWorkflowNode
+	NextByID map[string]string
+	Order    []domain.CronWorkflowNode
+}
 
 type Server struct {
 	cfg      config.Config
@@ -2176,8 +2208,8 @@ func (s *Server) createCronJob(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "invalid_json", "invalid request body", nil)
 		return
 	}
-	if req.ID == "" || req.Name == "" {
-		writeErr(w, http.StatusBadRequest, "invalid_cron", "id and name are required", nil)
+	if code, err := validateCronJobSpec(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, code, err.Error(), nil)
 		return
 	}
 	now := time.Now().UTC()
@@ -2222,6 +2254,10 @@ func (s *Server) updateCronJob(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "job_id_mismatch", "job_id mismatch", nil)
 		return
 	}
+	if code, err := validateCronJobSpec(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, code, err.Error(), nil)
+		return
+	}
 	now := time.Now().UTC()
 	if err := s.store.Write(func(st *repo.State) error {
 		if _, ok := st.CronJobs[id]; !ok {
@@ -2243,16 +2279,23 @@ func (s *Server) updateCronJob(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) deleteCronJob(w http.ResponseWriter, r *http.Request) {
-	id := chi.URLParam(r, "job_id")
+	id := strings.TrimSpace(chi.URLParam(r, "job_id"))
 	deleted := false
 	if err := s.store.Write(func(st *repo.State) error {
 		if _, ok := st.CronJobs[id]; ok {
+			if id == domain.DefaultCronJobID {
+				return errCronDefaultProtected
+			}
 			delete(st.CronJobs, id)
 			delete(st.CronStates, id)
 			deleted = true
 		}
 		return nil
 	}); err != nil {
+		if errors.Is(err, errCronDefaultProtected) {
+			writeErr(w, http.StatusBadRequest, "default_cron_protected", "default cron job cannot be deleted", map[string]string{"job_id": domain.DefaultCronJobID})
+			return
+		}
 		writeErr(w, http.StatusInternalServerError, "store_error", err.Error(), nil)
 		return
 	}
@@ -2379,7 +2422,7 @@ func (s *Server) executeCronJob(id string) error {
 
 	execCtx, cancel := context.WithTimeout(context.Background(), time.Duration(runtime.TimeoutSeconds)*time.Second)
 	defer cancel()
-	execErr := s.executeCronTask(execCtx, job)
+	lastExecution, execErr := s.executeCronTask(execCtx, job)
 	if errors.Is(execErr, context.DeadlineExceeded) {
 		execErr = fmt.Errorf("cron execution timeout after %ds", runtime.TimeoutSeconds)
 	}
@@ -2399,6 +2442,7 @@ func (s *Server) executeCronJob(id string) error {
 		state := st.CronStates[id]
 		state.LastStatus = &finalStatus
 		state.LastError = finalErr
+		state.LastExecution = lastExecution
 		st.CronStates[id] = state
 		return nil
 	}); err != nil {
@@ -2408,46 +2452,236 @@ func (s *Server) executeCronJob(id string) error {
 	return execErr
 }
 
-func (s *Server) executeCronTask(ctx context.Context, job domain.CronJobSpec) error {
+func (s *Server) executeCronTask(ctx context.Context, job domain.CronJobSpec) (*domain.CronWorkflowExecution, error) {
 	if s.cronTaskExecutor != nil {
-		return s.cronTaskExecutor(ctx, job)
+		return nil, s.cronTaskExecutor(ctx, job)
 	}
 	select {
 	case <-ctx.Done():
-		return ctx.Err()
+		return nil, ctx.Err()
 	default:
 	}
-	if job.TaskType == "text" && strings.TrimSpace(job.Text) != "" {
-		channelName := strings.ToLower(resolveCronDispatchChannel(job))
-		if channelName == qqChannelName {
-			return errors.New("cron dispatch channel \"qq\" is inbound-only; use channel \"console\" to persist chat history")
+
+	switch cronTaskType(job) {
+	case cronTaskTypeText:
+		text := strings.TrimSpace(job.Text)
+		if text == "" {
+			return nil, errors.New("cron text task requires non-empty text")
 		}
-		channelPlugin, channelCfg, resolvedChannelName, err := s.resolveChannel(channelName)
-		if err != nil {
-			return err
-		}
-		if resolvedChannelName == "console" {
-			return s.executeCronConsoleAgentTask(ctx, job)
-		}
-		if err := channelPlugin.SendText(ctx, job.Dispatch.Target.UserID, job.Dispatch.Target.SessionID, job.Text, channelCfg); err != nil {
-			return &channelError{
-				Code:    "channel_dispatch_failed",
-				Message: fmt.Sprintf("failed to dispatch cron job to channel %q", resolvedChannelName),
-				Err:     err,
-			}
+		return nil, s.executeCronTextTask(ctx, job, text)
+	case cronTaskTypeWorkflow:
+		execution, err := s.executeCronWorkflowTask(ctx, job)
+		return execution, err
+	default:
+		return nil, fmt.Errorf("unsupported cron task_type=%q", job.TaskType)
+	}
+}
+
+func (s *Server) executeCronTextTask(ctx context.Context, job domain.CronJobSpec, text string) error {
+	channelName := strings.ToLower(resolveCronDispatchChannel(job))
+	if channelName == qqChannelName {
+		return errors.New("cron dispatch channel \"qq\" is inbound-only; use channel \"console\" to persist chat history")
+	}
+	channelPlugin, channelCfg, resolvedChannelName, err := s.resolveChannel(channelName)
+	if err != nil {
+		return err
+	}
+	if resolvedChannelName == "console" {
+		return s.executeCronConsoleAgentTask(ctx, job, text)
+	}
+	if err := channelPlugin.SendText(ctx, job.Dispatch.Target.UserID, job.Dispatch.Target.SessionID, text, channelCfg); err != nil {
+		return &channelError{
+			Code:    "channel_dispatch_failed",
+			Message: fmt.Sprintf("failed to dispatch cron job to channel %q", resolvedChannelName),
+			Err:     err,
 		}
 	}
 	return nil
 }
 
-func (s *Server) executeCronConsoleAgentTask(ctx context.Context, job domain.CronJobSpec) error {
+func (s *Server) executeCronWorkflowTask(ctx context.Context, job domain.CronJobSpec) (*domain.CronWorkflowExecution, error) {
+	plan, err := buildCronWorkflowPlan(job.Workflow)
+	if err != nil {
+		return nil, fmt.Errorf("invalid cron workflow: %w", err)
+	}
+
+	startedAt := nowISO()
+	execution := &domain.CronWorkflowExecution{
+		RunID:       newCronRunID(),
+		StartedAt:   startedAt,
+		HadFailures: false,
+		Nodes:       make([]domain.CronWorkflowNodeExecution, 0, len(plan.Order)),
+	}
+
+	var firstErr error
+	for idx, node := range plan.Order {
+		step := domain.CronWorkflowNodeExecution{
+			NodeID:          node.ID,
+			NodeType:        node.Type,
+			ContinueOnError: node.ContinueOnError,
+			StartedAt:       nowISO(),
+		}
+
+		runResult, runErr := s.executeCronWorkflowNode(ctx, job, node)
+		finishedAt := nowISO()
+		step.FinishedAt = &finishedAt
+		if runErr != nil {
+			step.Status = cronStatusFailed
+			errText := runErr.Error()
+			step.Error = &errText
+			execution.HadFailures = true
+			if firstErr == nil {
+				firstErr = fmt.Errorf("workflow node %s failed: %w", node.ID, runErr)
+			}
+		} else {
+			step.Status = cronStatusSucceeded
+		}
+		execution.Nodes = append(execution.Nodes, step)
+
+		forceStop := runErr != nil && (errors.Is(runErr, context.Canceled) || errors.Is(runErr, context.DeadlineExceeded))
+		shouldStop := runResult.Stop || (runErr != nil && (!node.ContinueOnError || forceStop))
+		if !shouldStop {
+			continue
+		}
+		for j := idx + 1; j < len(plan.Order); j++ {
+			skippedNode := plan.Order[j]
+			skippedAt := nowISO()
+			skipped := domain.CronWorkflowNodeExecution{
+				NodeID:          skippedNode.ID,
+				NodeType:        skippedNode.Type,
+				Status:          cronWorkflowNodeExecutionSkipped,
+				ContinueOnError: skippedNode.ContinueOnError,
+				StartedAt:       skippedAt,
+				FinishedAt:      &skippedAt,
+			}
+			execution.Nodes = append(execution.Nodes, skipped)
+		}
+		break
+	}
+
+	finishedAt := nowISO()
+	execution.FinishedAt = &finishedAt
+	return execution, firstErr
+}
+
+type cronWorkflowNodeRunResult struct {
+	Stop bool
+}
+
+func (s *Server) executeCronWorkflowNode(ctx context.Context, job domain.CronJobSpec, node domain.CronWorkflowNode) (cronWorkflowNodeRunResult, error) {
+	switch node.Type {
+	case cronWorkflowNodeText:
+		text := strings.TrimSpace(node.Text)
+		if text == "" {
+			return cronWorkflowNodeRunResult{}, errors.New("workflow text_event requires non-empty text")
+		}
+		return cronWorkflowNodeRunResult{}, s.executeCronTextTask(ctx, job, text)
+	case cronWorkflowNodeDelay:
+		return cronWorkflowNodeRunResult{}, executeCronWorkflowDelay(ctx, node.DelaySeconds)
+	case cronWorkflowNodeIf:
+		matched, err := evaluateCronWorkflowIfCondition(node.IfCondition, job)
+		if err != nil {
+			return cronWorkflowNodeRunResult{}, err
+		}
+		if !matched {
+			return cronWorkflowNodeRunResult{Stop: true}, nil
+		}
+		return cronWorkflowNodeRunResult{}, nil
+	default:
+		return cronWorkflowNodeRunResult{}, fmt.Errorf("unsupported workflow node type=%q", node.Type)
+	}
+}
+
+func executeCronWorkflowDelay(ctx context.Context, seconds int) error {
+	if seconds < 0 {
+		return errors.New("workflow delay_seconds must be greater than or equal to 0")
+	}
+	if seconds == 0 {
+		return nil
+	}
+	timer := time.NewTimer(time.Duration(seconds) * time.Second)
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+type cronWorkflowIfCondition struct {
+	Field    string
+	Operator string
+	Value    string
+}
+
+func parseCronWorkflowIfCondition(raw string) (cronWorkflowIfCondition, error) {
+	condition := strings.TrimSpace(raw)
+	if condition == "" {
+		return cronWorkflowIfCondition{}, errors.New("if_condition is required")
+	}
+	parts := cronWorkflowIfConditionPattern.FindStringSubmatch(condition)
+	if len(parts) == 0 {
+		return cronWorkflowIfCondition{}, errors.New("if_condition must match `<field> == <value>` or `<field> != <value>`")
+	}
+	field := strings.ToLower(strings.TrimSpace(parts[1]))
+	if _, ok := cronWorkflowIfAllowedFields[field]; !ok {
+		return cronWorkflowIfCondition{}, fmt.Errorf("if_condition field %q is unsupported", field)
+	}
+	value := parts[3]
+	if value == "" {
+		value = parts[4]
+	}
+	if value == "" {
+		value = parts[5]
+	}
+	return cronWorkflowIfCondition{
+		Field:    field,
+		Operator: parts[2],
+		Value:    value,
+	}, nil
+}
+
+func evaluateCronWorkflowIfCondition(raw string, job domain.CronJobSpec) (bool, error) {
+	condition, err := parseCronWorkflowIfCondition(raw)
+	if err != nil {
+		return false, err
+	}
+	ctx := cronWorkflowIfContext(job)
+	left, ok := ctx[condition.Field]
+	if !ok {
+		return false, fmt.Errorf("if_condition field %q is unsupported", condition.Field)
+	}
+	switch condition.Operator {
+	case "==":
+		return left == condition.Value, nil
+	case "!=":
+		return left != condition.Value, nil
+	default:
+		return false, fmt.Errorf("if_condition operator %q is unsupported", condition.Operator)
+	}
+}
+
+func cronWorkflowIfContext(job domain.CronJobSpec) map[string]string {
+	return map[string]string{
+		"job_id":     strings.TrimSpace(job.ID),
+		"job_name":   strings.TrimSpace(job.Name),
+		"channel":    strings.ToLower(strings.TrimSpace(resolveCronDispatchChannel(job))),
+		"user_id":    strings.TrimSpace(job.Dispatch.Target.UserID),
+		"session_id": strings.TrimSpace(job.Dispatch.Target.SessionID),
+		"task_type":  strings.ToLower(strings.TrimSpace(job.TaskType)),
+	}
+}
+
+func (s *Server) executeCronConsoleAgentTask(ctx context.Context, job domain.CronJobSpec, text string) error {
 	sessionID := strings.TrimSpace(job.Dispatch.Target.SessionID)
 	userID := strings.TrimSpace(job.Dispatch.Target.UserID)
 	if sessionID == "" || userID == "" {
 		return errors.New("cron dispatch target requires non-empty session_id and user_id")
 	}
 
-	text := strings.TrimSpace(job.Text)
+	text = strings.TrimSpace(text)
 	if text == "" {
 		return nil
 	}
@@ -2510,6 +2744,237 @@ func buildCronBizParams(job domain.CronJobSpec) map[string]interface{} {
 	return map[string]interface{}{
 		"cron": cronPayload,
 	}
+}
+
+func validateCronJobSpec(job *domain.CronJobSpec) (string, error) {
+	if job == nil {
+		return "invalid_cron_task_type", errors.New("cron job is required")
+	}
+	job.ID = strings.TrimSpace(job.ID)
+	job.Name = strings.TrimSpace(job.Name)
+	if job.ID == "" || job.Name == "" {
+		return "invalid_cron_task_type", errors.New("id and name are required")
+	}
+
+	taskType := cronTaskType(*job)
+	switch taskType {
+	case cronTaskTypeText:
+		text := strings.TrimSpace(job.Text)
+		if text == "" {
+			return "invalid_cron_task_type", errors.New("text is required for task_type=text")
+		}
+		job.TaskType = cronTaskTypeText
+		job.Text = text
+		job.Workflow = nil
+		return "", nil
+	case cronTaskTypeWorkflow:
+		plan, err := buildCronWorkflowPlan(job.Workflow)
+		if err != nil {
+			return "invalid_cron_workflow", err
+		}
+		job.TaskType = cronTaskTypeWorkflow
+		job.Workflow = &plan.Workflow
+		job.Text = ""
+		return "", nil
+	default:
+		return "invalid_cron_task_type", fmt.Errorf("unsupported task_type=%q", strings.TrimSpace(job.TaskType))
+	}
+}
+
+func cronTaskType(job domain.CronJobSpec) string {
+	taskType := strings.ToLower(strings.TrimSpace(job.TaskType))
+	if taskType != "" {
+		return taskType
+	}
+	if job.Workflow != nil {
+		return cronTaskTypeWorkflow
+	}
+	if strings.TrimSpace(job.Text) != "" {
+		return cronTaskTypeText
+	}
+	return taskType
+}
+
+func buildCronWorkflowPlan(workflow *domain.CronWorkflowSpec) (*cronWorkflowPlan, error) {
+	if workflow == nil {
+		return nil, errors.New("workflow is required for task_type=workflow")
+	}
+
+	version := strings.ToLower(strings.TrimSpace(workflow.Version))
+	if version != cronWorkflowVersionV1 {
+		return nil, fmt.Errorf("unsupported workflow version=%q", workflow.Version)
+	}
+	if len(workflow.Nodes) < 2 {
+		return nil, errors.New("workflow requires at least 2 nodes")
+	}
+	if len(workflow.Edges) < 1 {
+		return nil, errors.New("workflow requires at least 1 edge")
+	}
+
+	nodeByID := make(map[string]domain.CronWorkflowNode, len(workflow.Nodes))
+	normalizedNodes := make([]domain.CronWorkflowNode, 0, len(workflow.Nodes))
+	startID := ""
+
+	for _, rawNode := range workflow.Nodes {
+		node := rawNode
+		node.ID = strings.TrimSpace(node.ID)
+		node.Type = strings.ToLower(strings.TrimSpace(node.Type))
+		node.Title = strings.TrimSpace(node.Title)
+		node.Text = strings.TrimSpace(node.Text)
+		node.IfCondition = strings.TrimSpace(node.IfCondition)
+
+		if node.ID == "" {
+			return nil, errors.New("workflow node id is required")
+		}
+		if _, exists := nodeByID[node.ID]; exists {
+			return nil, fmt.Errorf("workflow node id duplicated: %s", node.ID)
+		}
+
+		switch node.Type {
+		case cronWorkflowNodeStart:
+			node.ContinueOnError = false
+			node.DelaySeconds = 0
+			node.Text = ""
+			node.IfCondition = ""
+			if startID != "" {
+				return nil, errors.New("workflow requires exactly one start node")
+			}
+			startID = node.ID
+		case cronWorkflowNodeText:
+			node.DelaySeconds = 0
+			node.IfCondition = ""
+			if node.Text == "" {
+				return nil, fmt.Errorf("workflow node %s requires non-empty text", node.ID)
+			}
+		case cronWorkflowNodeDelay:
+			node.Text = ""
+			node.IfCondition = ""
+			if node.DelaySeconds < 0 {
+				return nil, fmt.Errorf("workflow node %s delay_seconds must be greater than or equal to 0", node.ID)
+			}
+		case cronWorkflowNodeIf:
+			node.Text = ""
+			node.DelaySeconds = 0
+			if _, err := parseCronWorkflowIfCondition(node.IfCondition); err != nil {
+				return nil, fmt.Errorf("workflow node %s if_condition invalid: %w", node.ID, err)
+			}
+		default:
+			return nil, fmt.Errorf("workflow node %s has unsupported type=%q", node.ID, node.Type)
+		}
+
+		nodeByID[node.ID] = node
+		normalizedNodes = append(normalizedNodes, node)
+	}
+
+	if startID == "" {
+		return nil, errors.New("workflow requires exactly one start node")
+	}
+
+	edgeIDSet := map[string]struct{}{}
+	nextByID := map[string]string{}
+	inDegree := map[string]int{}
+	outDegree := map[string]int{}
+	normalizedEdges := make([]domain.CronWorkflowEdge, 0, len(workflow.Edges))
+
+	for _, rawEdge := range workflow.Edges {
+		edge := rawEdge
+		edge.ID = strings.TrimSpace(edge.ID)
+		edge.Source = strings.TrimSpace(edge.Source)
+		edge.Target = strings.TrimSpace(edge.Target)
+
+		if edge.ID == "" {
+			return nil, errors.New("workflow edge id is required")
+		}
+		if _, exists := edgeIDSet[edge.ID]; exists {
+			return nil, fmt.Errorf("workflow edge id duplicated: %s", edge.ID)
+		}
+		edgeIDSet[edge.ID] = struct{}{}
+
+		if edge.Source == "" || edge.Target == "" {
+			return nil, fmt.Errorf("workflow edge %s requires source and target", edge.ID)
+		}
+		if edge.Source == edge.Target {
+			return nil, fmt.Errorf("workflow edge %s cannot link node to itself", edge.ID)
+		}
+		if _, ok := nodeByID[edge.Source]; !ok {
+			return nil, fmt.Errorf("workflow edge %s source not found: %s", edge.ID, edge.Source)
+		}
+		if _, ok := nodeByID[edge.Target]; !ok {
+			return nil, fmt.Errorf("workflow edge %s target not found: %s", edge.ID, edge.Target)
+		}
+
+		outDegree[edge.Source]++
+		if outDegree[edge.Source] > 1 {
+			return nil, fmt.Errorf("workflow node %s has more than one outgoing edge", edge.Source)
+		}
+		inDegree[edge.Target]++
+		if inDegree[edge.Target] > 1 {
+			return nil, fmt.Errorf("workflow node %s has more than one incoming edge", edge.Target)
+		}
+		nextByID[edge.Source] = edge.Target
+		normalizedEdges = append(normalizedEdges, edge)
+	}
+
+	if inDegree[startID] > 0 {
+		return nil, errors.New("workflow start node cannot have incoming edge")
+	}
+	if outDegree[startID] == 0 {
+		return nil, errors.New("workflow start node must connect to at least one executable node")
+	}
+
+	reachable := map[string]bool{startID: true}
+	order := make([]domain.CronWorkflowNode, 0, len(nodeByID)-1)
+	cursor := startID
+	for {
+		nextID, ok := nextByID[cursor]
+		if !ok {
+			break
+		}
+		if reachable[nextID] {
+			return nil, errors.New("workflow graph must be acyclic")
+		}
+		reachable[nextID] = true
+		nextNode := nodeByID[nextID]
+		if nextNode.Type == cronWorkflowNodeStart {
+			return nil, errors.New("workflow start node cannot be targeted by execution path")
+		}
+		order = append(order, nextNode)
+		cursor = nextID
+	}
+
+	if len(order) == 0 {
+		return nil, errors.New("workflow requires at least one executable node")
+	}
+	for nodeID, node := range nodeByID {
+		if node.Type == cronWorkflowNodeStart {
+			continue
+		}
+		if !reachable[nodeID] {
+			return nil, fmt.Errorf("workflow node %s is not reachable from start", nodeID)
+		}
+	}
+
+	var viewport *domain.CronWorkflowViewport
+	if workflow.Viewport != nil {
+		v := *workflow.Viewport
+		if v.Zoom <= 0 {
+			v.Zoom = 1
+		}
+		viewport = &v
+	}
+
+	return &cronWorkflowPlan{
+		Workflow: domain.CronWorkflowSpec{
+			Version:  cronWorkflowVersionV1,
+			Viewport: viewport,
+			Nodes:    normalizedNodes,
+			Edges:    normalizedEdges,
+		},
+		StartID:  startID,
+		NodeByID: nodeByID,
+		NextByID: nextByID,
+		Order:    order,
+	}, nil
 }
 
 func alignCronStateForMutation(job domain.CronJobSpec, state domain.CronJobState, now time.Time) domain.CronJobState {
@@ -2702,6 +3167,14 @@ func newCronLeaseID() string {
 		return fmt.Sprintf("%d-%d", os.Getpid(), time.Now().UnixNano())
 	}
 	return fmt.Sprintf("%d-%x", os.Getpid(), buf)
+}
+
+func newCronRunID() string {
+	buf := make([]byte, 6)
+	if _, err := rand.Read(buf); err != nil {
+		return fmt.Sprintf("run-%d-%d", os.Getpid(), time.Now().UnixNano())
+	}
+	return fmt.Sprintf("run-%d-%x", os.Getpid(), buf)
 }
 
 func (s *Server) markCronExecutionSkipped(id, message string) error {
@@ -4250,6 +4723,9 @@ func buildProviderInfo(providerID string, setting repo.ProviderSetting) domain.P
 		OpenAICompatible:   provider.ResolveAdapter(providerID) == provider.AdapterOpenAICompatible,
 		APIKeyPrefix:       spec.APIKeyPrefix,
 		Models:             provider.ResolveModels(providerID, setting.ModelAliases),
+		Headers:            sanitizeStringMap(setting.Headers),
+		TimeoutMS:          setting.TimeoutMS,
+		ModelAliases:       sanitizeStringMap(setting.ModelAliases),
 		AllowCustomBaseURL: spec.AllowCustomBaseURL,
 		Enabled:            providerEnabled(setting),
 		HasAPIKey:          strings.TrimSpace(apiKey) != "",

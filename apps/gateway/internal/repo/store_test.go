@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"nextai/apps/gateway/internal/domain"
 )
 
 func TestLoadKeepsCustomProviderAndActiveProvider(t *testing.T) {
@@ -119,6 +121,103 @@ func TestLoadDropsLegacyDemoProvider(t *testing.T) {
 		}
 		if st.ActiveLLM.ProviderID != "" || st.ActiveLLM.Model != "" {
 			t.Fatalf("expected active_llm to be cleared when demo is removed, got=%+v", st.ActiveLLM)
+		}
+	})
+}
+func TestLoadEnsuresDefaultChat(t *testing.T) {
+	dir := t.TempDir()
+	statePath := filepath.Join(dir, "state.json")
+	raw := `{
+  "chats": {},
+  "histories": {},
+  "providers": {
+    "openai": {"enabled": true}
+  }
+}`
+	if err := os.WriteFile(statePath, []byte(raw), 0o644); err != nil {
+		t.Fatalf("write state failed: %v", err)
+	}
+
+	store, err := NewStore(dir)
+	if err != nil {
+		t.Fatalf("new store failed: %v", err)
+	}
+
+	store.Read(func(st *State) {
+		chat, ok := st.Chats[domain.DefaultChatID]
+		if !ok {
+			t.Fatalf("default chat should exist")
+		}
+		if chat.SessionID != domain.DefaultChatSessionID {
+			t.Fatalf("default chat session mismatch: %q", chat.SessionID)
+		}
+		if chat.UserID != domain.DefaultChatUserID {
+			t.Fatalf("default chat user mismatch: %q", chat.UserID)
+		}
+		if chat.Channel != domain.DefaultChatChannel {
+			t.Fatalf("default chat channel mismatch: %q", chat.Channel)
+		}
+		flag, ok := chat.Meta[domain.ChatMetaSystemDefault].(bool)
+		if !ok || !flag {
+			t.Fatalf("default chat meta.system_default should be true, meta=%#v", chat.Meta)
+		}
+		if _, ok := st.Histories[domain.DefaultChatID]; !ok {
+			t.Fatalf("default chat history should exist")
+		}
+	})
+}
+
+func TestLoadEnsuresDefaultCronJob(t *testing.T) {
+	dir := t.TempDir()
+	statePath := filepath.Join(dir, "state.json")
+	raw := `{
+  "cron_jobs": {},
+  "cron_states": {},
+  "providers": {
+    "openai": {"enabled": true}
+  }
+}`
+	if err := os.WriteFile(statePath, []byte(raw), 0o644); err != nil {
+		t.Fatalf("write state failed: %v", err)
+	}
+
+	store, err := NewStore(dir)
+	if err != nil {
+		t.Fatalf("new store failed: %v", err)
+	}
+
+	store.Read(func(st *State) {
+		job, ok := st.CronJobs[domain.DefaultCronJobID]
+		if !ok {
+			t.Fatalf("default cron job should exist")
+		}
+		if job.Name != domain.DefaultCronJobName {
+			t.Fatalf("default cron job name mismatch: %q", job.Name)
+		}
+		if job.TaskType != "text" {
+			t.Fatalf("default cron job task_type mismatch: %q", job.TaskType)
+		}
+		if job.Text != domain.DefaultCronJobText {
+			t.Fatalf("default cron job text mismatch: %q", job.Text)
+		}
+		if job.Enabled {
+			t.Fatalf("default cron job should be disabled by default")
+		}
+		if job.Schedule.Type != "interval" || job.Schedule.Cron != domain.DefaultCronJobInterval {
+			t.Fatalf("default cron schedule mismatch: %+v", job.Schedule)
+		}
+		if job.Dispatch.Channel != domain.DefaultChatChannel {
+			t.Fatalf("default cron channel mismatch: %q", job.Dispatch.Channel)
+		}
+		if job.Dispatch.Target.UserID != domain.DefaultChatUserID {
+			t.Fatalf("default cron user_id mismatch: %q", job.Dispatch.Target.UserID)
+		}
+		if job.Dispatch.Target.SessionID != domain.DefaultChatSessionID {
+			t.Fatalf("default cron session_id mismatch: %q", job.Dispatch.Target.SessionID)
+		}
+		flag, ok := job.Meta[domain.CronMetaSystemDefault].(bool)
+		if !ok || !flag {
+			t.Fatalf("default cron meta.system_default should be true, meta=%#v", job.Meta)
 		}
 	})
 }
