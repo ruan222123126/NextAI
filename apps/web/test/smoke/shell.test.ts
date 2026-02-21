@@ -8,33 +8,40 @@ describe("web shell smoke", () => {
     const html = readFileSync(join(process.cwd(), "src/index.html"), "utf8");
 
     expect(html).toContain('data-tab="chat"');
-    expect(html).toContain('data-tab="search"');
-    expect(html).toContain('data-tab="models"');
-    expect(html).toContain('data-tab="channels"');
-    expect(html).toContain('data-tab="workspace"');
     expect(html).toContain('data-tab="cron"');
 
     expect(html).toContain('id="panel-chat"');
-    expect(html).toContain('id="panel-search"');
+    expect(html).toContain('id="composer"');
+    expect(html).toContain('id="message-input"');
+    expect(html).toContain('id="send-btn"');
+    expect(html).toContain('id="composer-token-estimate"');
+    expect(html).toContain('id="chat-search-toggle"');
+    expect(html).toContain('id="search-modal"');
     expect(html).toContain('id="search-chat-input"');
     expect(html).toContain('id="search-chat-results"');
-    expect(html).toContain('id="panel-models"');
-    expect(html).toContain('id="models-active-form"');
-    expect(html).toContain('id="models-active-provider-select"');
-    expect(html).toContain('id="models-active-model-select"');
-    expect(html).toContain('id="models-set-active-btn"');
-    expect(html).toContain('id="models-add-provider-btn"');
-    expect(html).toContain('id="models-provider-form"');
-    expect(html).toContain('id="models-provider-type-select"');
-    expect(html).toContain('id="models-provider-name-input"');
-    expect(html).toContain('id="panel-channels"');
-    expect(html).toContain('id="qq-channel-form"');
-    expect(html).toContain('id="qq-channel-api-env"');
-    expect(html).toContain('id="panel-workspace"');
+
+    expect(html).toContain('data-settings-section="models"');
+    expect(html).toContain('data-settings-section-panel="models"');
+    expect(html).toContain('data-settings-section="channels"');
+    expect(html).toContain('data-settings-section-panel="channels"');
+    expect(html).toContain('data-settings-section="workspace"');
+    expect(html).toContain('data-settings-section-panel="workspace"');
+
     expect(html).toContain('id="workspace-files-body"');
     expect(html).toContain('id="workspace-editor-form"');
     expect(html).toContain('id="workspace-file-content"');
     expect(html).toContain('id="workspace-import-form"');
     expect(html).toContain('id="panel-cron"');
+    expect(html).toContain('id="chat-cron-toggle"');
+    expect(html).toContain('id="cron-chat-toggle"');
+    expect(html).toContain('id="cron-task-type"');
+    expect(html).toContain('id="cron-workflow-viewport"');
+    expect(html).toContain('id="cron-workflow-canvas"');
+    expect(html).toContain('id="cron-workflow-edges"');
+    expect(html).toContain('id="cron-workflow-nodes"');
+    expect(html).toContain('id="cron-reset-workflow"');
+    expect(html).toContain('id="cron-workflow-fullscreen-btn"');
+    expect(html).toContain('id="cron-workflow-node-editor"');
+    expect(html).toContain('id="cron-workflow-execution-list"');
   });
 });

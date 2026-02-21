@@ -5,14 +5,13 @@ Current scope:
   - Session list (`GET /chats`)
   - Chat history (`GET /chats/{chat_id}`)
   - Streaming send (`POST /agent/process` with SSE parsing)
-  - Tool call raw payload in chat message (`tool_call` -> 原始 SSE JSON 文本)
-- Models tab
+  - Shell tool call output in chat message (`tool_result.summary` -> 命令执行输出摘要)
+- Console settings -> Models section
   - Providers catalog (`GET /models/catalog`, fallback to `GET /models`)
-  - Active model view (`GET /models/active`)
-  - Set active model (`PUT /models/active`)
-- Channels tab
+  - Active model bootstrap fallback (`PUT /models/active` when catalog `active_llm` is empty)
+- Console settings -> Channels section
   - QQ channel config (`GET/PUT /config/channels/qq`)
-- Config tab
+- Console settings -> Config section
   - File list (`GET /workspace/files`)
   - File read/edit/save/delete (`GET/PUT/DELETE /workspace/files/{file_path}`)
   - JSON import (`POST /workspace/import`)
@@ -24,7 +23,7 @@ Current scope:
 Notes:
 - One shared status area handles all panel feedback.
 - Error parsing prefers `{ error: { code, message } }`.
-- API Base / User ID / Channel controls are shared by all tabs.
+- API Base / User ID / Channel controls are managed in Console settings and shared by all tabs.
 - Locale supports `zh-CN` and `en-US` via top-bar selector and persists with `localStorage` key `nextai.web.locale`.
 
 Error handling convention:

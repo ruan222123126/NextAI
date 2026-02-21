@@ -165,6 +165,7 @@ describe("web e2e: /shell command sends biz_params.tool", () => {
     messageInput.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
 
     await waitFor(() => processCalled, 4000);
+    expect(sessionID).toMatch(/^[a-z0-9]{6}$/);
     expect(capturedCommand).toBe("printf hello");
 
     await waitFor(() => {
@@ -177,9 +178,8 @@ describe("web e2e: /shell command sends biz_params.tool", () => {
           return (
             item.textContent?.includes("shell done") &&
             summary.includes("bash printf hello") &&
-            raw.includes('"type":"tool_call"') &&
-            raw.includes('"name":"shell"') &&
-            raw.includes('"command":"printf hello"') &&
+            raw.includes("done") &&
+            !raw.includes('"command":"printf hello"') &&
             firstClass === "tool-call-list"
           );
         },
@@ -197,7 +197,7 @@ describe("web e2e: /shell command sends biz_params.tool", () => {
       const firstClass = assistant.firstElementChild?.className ?? "";
       const summary = assistant.querySelector<HTMLElement>(".tool-call-summary")?.textContent ?? "";
       const raw = assistant.querySelector<HTMLElement>(".tool-call-raw")?.textContent ?? "";
-      return firstClass === "tool-call-list" && summary.includes("bash printf hello") && raw.includes('"command":"printf hello"');
+      return firstClass === "tool-call-list" && summary.includes("bash printf hello") && !raw.includes('"command":"printf hello"');
     }, 4000);
   });
 
@@ -528,14 +528,19 @@ describe("web e2e: /shell command sends biz_params.tool", () => {
     }, 4000);
   });
 
-  it("Cron 任务创建后支持编辑和删除", async () => {
+  it("Cron text 模式任务创建后支持编辑和删除", async () => {
     type CronJobPayload = {
       id: string;
       name: string;
       enabled: boolean;
       schedule: { type: string; cron: string; timezone?: string };
-      task_type: string;
+      task_type: "text" | "workflow";
       text?: string;
+      workflow?: {
+        version: "v1";
+        nodes: Array<Record<string, unknown>>;
+        edges: Array<Record<string, unknown>>;
+      };
       dispatch: {
         type?: string;
         channel?: string;
@@ -554,7 +559,7 @@ describe("web e2e: /shell command sends biz_params.tool", () => {
     let cronJobs: CronJobPayload[] = [];
     let chatsGetCount = 0;
     let createCalled = false;
-    let updateCalled = false;
+    let updateCallCount = 0;
     let deleteCalled = false;
     const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
 
@@ -604,7 +609,7 @@ describe("web e2e: /shell command sends biz_params.tool", () => {
         return jsonResponse({ started: true });
       }
       if (jobMatch && method === "PUT") {
-        updateCalled = true;
+        updateCallCount += 1;
         const payload = JSON.parse(String(init?.body ?? "{}")) as CronJobPayload;
         cronJobs = cronJobs.map((item) => (item.id === payload.id ? payload : item));
         return jsonResponse(payload);
@@ -628,15 +633,25 @@ describe("web e2e: /shell command sends biz_params.tool", () => {
     await waitFor(() => document.getElementById("cron-create-open-btn") !== null, 4000);
 
     const openCreateButton = document.getElementById("cron-create-open-btn") as HTMLButtonElement;
+    const cronWorkbench = document.getElementById("cron-workbench") as HTMLElement;
     const cronForm = document.getElementById("cron-create-form") as HTMLFormElement;
     const cronID = document.getElementById("cron-id") as HTMLInputElement;
     const cronName = document.getElementById("cron-name") as HTMLInputElement;
     const cronInterval = document.getElementById("cron-interval") as HTMLInputElement;
     const cronSessionID = document.getElementById("cron-session-id") as HTMLInputElement;
+    const cronTaskType = document.getElementById("cron-task-type") as HTMLSelectElement;
     const cronText = document.getElementById("cron-text") as HTMLTextAreaElement;
     const cronSubmit = document.getElementById("cron-submit-btn") as HTMLButtonElement;
+    const cronTaskTypeContainer = cronTaskType.closest<HTMLDivElement>(".custom-select-container");
 
+    expect(cronWorkbench.dataset.cronView).toBe("jobs");
+    expect(cronTaskTypeContainer).not.toBeNull();
+    expect(cronTaskTypeContainer?.querySelector<HTMLInputElement>(".options-search-input")).toBeNull();
     openCreateButton.click();
+    expect(cronWorkbench.dataset.cronView).toBe("editor");
+    expect(openCreateButton.hidden).toBe(true);
+    cronTaskType.value = "text";
+    cronTaskType.dispatchEvent(new Event("change", { bubbles: true }));
     cronID.value = "job-demo";
     cronName.value = "初始任务";
     cronInterval.value = "60s";
@@ -646,8 +661,17 @@ describe("web e2e: /shell command sends biz_params.tool", () => {
 
     await waitFor(() => createCalled, 4000);
     await waitFor(() => document.querySelector<HTMLButtonElement>('button[data-cron-edit="job-demo"]') !== null, 4000);
+    expect(cronJobs[0]?.task_type).toBe("text");
+    expect(cronJobs[0]?.text).toBe("hello cron");
     expect(cronJobs[0]?.dispatch.channel).toBe("console");
     expect(cronJobs[0]?.dispatch.target.user_id).toBe("demo-user");
+    const enabledToggle = document.querySelector<HTMLInputElement>('input[data-cron-toggle-enabled="job-demo"]');
+    expect(enabledToggle).not.toBeNull();
+    expect(enabledToggle?.checked).toBe(true);
+    const updatesBeforeToggle = updateCallCount;
+    enabledToggle?.click();
+    await waitFor(() => updateCallCount > updatesBeforeToggle, 4000);
+    expect(cronJobs[0]?.enabled).toBe(false);
 
     cronJobs = cronJobs.map((job) => ({
       ...job,
@@ -668,11 +692,12 @@ describe("web e2e: /shell command sends biz_params.tool", () => {
     editButton?.click();
     expect(cronID.readOnly).toBe(true);
     expect(cronSubmit.textContent ?? "").toContain("PUT /cron/jobs/{job_id}");
+    const updatesBeforeEdit = updateCallCount;
 
     cronName.value = "已更新任务";
     cronForm.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
 
-    await waitFor(() => updateCalled, 4000);
+    await waitFor(() => updateCallCount > updatesBeforeEdit, 4000);
     expect(cronJobs[0]?.name).toBe("已更新任务");
     expect(cronJobs[0]?.dispatch.channel).toBe("console");
     expect(cronJobs[0]?.dispatch.target.user_id).toBe("demo-user");
@@ -682,11 +707,6 @@ describe("web e2e: /shell command sends biz_params.tool", () => {
     runButton?.click();
     await waitFor(() => chatsGetCount > chatsCountBeforeRun, 4000);
 
-    const searchTabButton = document.querySelector<HTMLButtonElement>('button[data-tab="search"]');
-    const chatsCountBeforeSearchTab = chatsGetCount;
-    searchTabButton?.click();
-    await waitFor(() => chatsGetCount > chatsCountBeforeSearchTab, 4000);
-
     const deleteButton = document.querySelector<HTMLButtonElement>('button[data-cron-delete="job-demo"]');
     deleteButton?.click();
 
@@ -694,6 +714,490 @@ describe("web e2e: /shell command sends biz_params.tool", () => {
     expect(confirmSpy).toHaveBeenCalled();
     await waitFor(() => document.querySelector<HTMLButtonElement>('button[data-cron-edit="job-demo"]') === null, 4000);
     confirmSpy.mockRestore();
+  });
+
+  it("Cron 默认 workflow 模式可添加节点连线并提交", async () => {
+    type CronWorkflowNodePayload = {
+      id: string;
+      type: "start" | "text_event" | "delay" | "if_event";
+      text?: string;
+      delay_seconds?: number;
+      if_condition?: string;
+    };
+    type CronWorkflowEdgePayload = {
+      id: string;
+      source: string;
+      target: string;
+    };
+    type CronJobPayload = {
+      id: string;
+      name: string;
+      enabled: boolean;
+      schedule: { type: string; cron: string; timezone?: string };
+      task_type: "text" | "workflow";
+      text?: string;
+      workflow?: {
+        version: "v1";
+        nodes: CronWorkflowNodePayload[];
+        edges: CronWorkflowEdgePayload[];
+      };
+      dispatch: {
+        type?: string;
+        channel?: string;
+        target: { user_id: string; session_id: string };
+        mode?: string;
+        meta?: Record<string, unknown>;
+      };
+      runtime: {
+        max_concurrency?: number;
+        timeout_seconds?: number;
+        misfire_grace_seconds?: number;
+      };
+    };
+
+    let createdPayload: CronJobPayload | null = null;
+    let cronJobs: CronJobPayload[] = [];
+
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const rawURL = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      const url = new URL(rawURL);
+      const method = (init?.method ?? "GET").toUpperCase();
+
+      if (url.pathname === "/models/catalog" && method === "GET") {
+        return jsonResponse({
+          providers: [],
+          provider_types: [],
+          defaults: {},
+          active_llm: {
+            provider_id: "",
+            model: "",
+          },
+        });
+      }
+
+      if (url.pathname === "/chats" && method === "GET") {
+        return jsonResponse([]);
+      }
+
+      if (url.pathname === "/cron/jobs" && method === "GET") {
+        return jsonResponse(cronJobs);
+      }
+
+      if (url.pathname === "/cron/jobs" && method === "POST") {
+        createdPayload = JSON.parse(String(init?.body ?? "{}")) as CronJobPayload;
+        cronJobs = [createdPayload];
+        return jsonResponse(createdPayload);
+      }
+
+      const stateMatch = url.pathname.match(/^\/cron\/jobs\/([^/]+)\/state$/);
+      if (stateMatch && method === "GET") {
+        return jsonResponse({
+          next_run_at: "2026-02-17T13:40:00Z",
+        });
+      }
+
+      throw new Error(`unexpected request: ${method} ${url.pathname}`);
+    }) as typeof globalThis.fetch;
+
+    await import("../../src/main.ts");
+
+    document.querySelector<HTMLButtonElement>('button[data-tab="cron"]')?.click();
+    await waitFor(() => document.getElementById("cron-create-open-btn") !== null, 4000);
+
+    const openCreateButton = document.getElementById("cron-create-open-btn") as HTMLButtonElement;
+    const cronForm = document.getElementById("cron-create-form") as HTMLFormElement;
+    const cronID = document.getElementById("cron-id") as HTMLInputElement;
+    const cronName = document.getElementById("cron-name") as HTMLInputElement;
+    const cronSessionID = document.getElementById("cron-session-id") as HTMLInputElement;
+    const cronTaskType = document.getElementById("cron-task-type") as HTMLSelectElement;
+    const cronWorkflowSection = document.getElementById("cron-workflow-section") as HTMLElement;
+    const cronWorkflowFullscreenButton = document.getElementById("cron-workflow-fullscreen-btn") as HTMLButtonElement;
+    const workflowNodesLayer = document.getElementById("cron-workflow-nodes") as HTMLElement;
+
+    openCreateButton.click();
+    expect(cronTaskType.value).toBe("workflow");
+    expect(cronWorkflowSection.classList.contains("is-pseudo-fullscreen")).toBe(false);
+    expect(cronWorkflowFullscreenButton.textContent ?? "").toContain("全屏");
+    cronWorkflowFullscreenButton.click();
+    expect(cronWorkflowSection.classList.contains("is-pseudo-fullscreen")).toBe(true);
+    expect(cronWorkflowFullscreenButton.textContent ?? "").toContain("退出全屏");
+    cronWorkflowFullscreenButton.click();
+    expect(cronWorkflowSection.classList.contains("is-pseudo-fullscreen")).toBe(false);
+
+    cronID.value = "job-workflow-create";
+    cronName.value = "workflow-create";
+    cronSessionID.value = "session-workflow-create";
+
+    const openNodeEditorFromContextMenu = async (nodeID: string): Promise<void> => {
+      const card = document.querySelector<HTMLElement>(`[data-cron-node-id="${nodeID}"]`);
+      expect(card).not.toBeNull();
+      card?.dispatchEvent(new MouseEvent("contextmenu", {
+        bubbles: true,
+        cancelable: true,
+        button: 2,
+        clientX: 120,
+        clientY: 120,
+      }));
+      await waitFor(
+        () => document.querySelector<HTMLButtonElement>(".cron-node-context-menu button[data-cron-node-menu-action='edit']") !== null,
+        4000,
+      );
+      const editButton = document.querySelector<HTMLButtonElement>(
+        ".cron-node-context-menu button[data-cron-node-menu-action='edit']",
+      );
+      expect(editButton).not.toBeNull();
+      editButton?.click();
+    };
+
+    await openNodeEditorFromContextMenu("node-1");
+    const node1TextInput = document.querySelector<HTMLTextAreaElement>("#cron-workflow-node-editor textarea");
+    expect(node1TextInput).not.toBeNull();
+    if (node1TextInput) {
+      node1TextInput.value = "first message";
+      node1TextInput.dispatchEvent(new Event("input", { bubbles: true }));
+    }
+
+    const addNodeFromCanvasContextMenu = async (
+      action: "add-text" | "add-if" | "add-delay",
+      clientX: number,
+      clientY: number,
+    ): Promise<void> => {
+      workflowNodesLayer.dispatchEvent(new MouseEvent("contextmenu", {
+        bubbles: true,
+        cancelable: true,
+        button: 2,
+        clientX,
+        clientY,
+      }));
+      await waitFor(() => {
+        const menu = document.querySelector<HTMLElement>(".cron-node-context-menu");
+        const actionButton = document.querySelector<HTMLButtonElement>(
+          `.cron-node-context-menu button[data-cron-node-menu-action='${action}']`,
+        );
+        return Boolean(menu && !menu.classList.contains("is-hidden") && actionButton && !actionButton.hidden);
+      }, 4000);
+      const addButton = document.querySelector<HTMLButtonElement>(
+        `.cron-node-context-menu button[data-cron-node-menu-action='${action}']`,
+      );
+      expect(addButton).not.toBeNull();
+      addButton?.click();
+    };
+
+    await addNodeFromCanvasContextMenu("add-if", 560, 300);
+    await waitFor(() => document.querySelector<HTMLElement>('[data-cron-node-id="node-2"]') !== null, 4000);
+
+    const node2Card = document.querySelector<HTMLElement>('[data-cron-node-id="node-2"]');
+    node2Card?.dispatchEvent(new MouseEvent("contextmenu", {
+      bubbles: true,
+      cancelable: true,
+      button: 2,
+      clientX: 132,
+      clientY: 132,
+    }));
+    await waitFor(
+      () => document.querySelector<HTMLButtonElement>(".cron-node-context-menu button[data-cron-node-menu-action='delete']") !== null,
+      4000,
+    );
+    const node2DeleteMenuButton = document.querySelector<HTMLButtonElement>(
+      ".cron-node-context-menu button[data-cron-node-menu-action='delete']",
+    );
+    expect(node2DeleteMenuButton?.disabled).toBe(false);
+    const node2EditMenuButton = document.querySelector<HTMLButtonElement>(
+      ".cron-node-context-menu button[data-cron-node-menu-action='edit']",
+    );
+    node2EditMenuButton?.click();
+    const node2IfInput = document.querySelector<HTMLInputElement>("#cron-workflow-node-editor input[type='text'][placeholder='channel == console']");
+    expect(node2IfInput).not.toBeNull();
+    if (node2IfInput) {
+      node2IfInput.value = "channel == console";
+      node2IfInput.dispatchEvent(new Event("input", { bubbles: true }));
+      node2IfInput.blur();
+    }
+
+    await addNodeFromCanvasContextMenu("add-delay", 720, 420);
+    await waitFor(() => document.querySelector<HTMLElement>('[data-cron-node-id="node-3"]') !== null, 4000);
+
+    const node1Out = document.querySelector<HTMLButtonElement>('[data-cron-node-out="node-1"]');
+    node1Out?.click();
+    const node2In = document.querySelector<HTMLButtonElement>('[data-cron-node-in="node-2"]');
+    node2In?.click();
+
+    const node2Out = document.querySelector<HTMLButtonElement>('[data-cron-node-out="node-2"]');
+    node2Out?.click();
+    const node3In = document.querySelector<HTMLButtonElement>('[data-cron-node-in="node-3"]');
+    node3In?.click();
+
+    await waitFor(
+      () => document.querySelector<SVGPathElement>('[data-edge-id="edge-node-2-node-3"]') !== null,
+      4000,
+    );
+    const node2ToNode3Edge = document.querySelector<SVGPathElement>('[data-edge-id="edge-node-2-node-3"]');
+    node2ToNode3Edge?.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Delete", bubbles: true, cancelable: true }));
+    await waitFor(
+      () => document.querySelector<SVGPathElement>('[data-edge-id="edge-node-2-node-3"]') === null,
+      4000,
+    );
+
+    const reconnectNode2Out = document.querySelector<HTMLButtonElement>('[data-cron-node-out="node-2"]');
+    reconnectNode2Out?.click();
+    const reconnectNode3In = document.querySelector<HTMLButtonElement>('[data-cron-node-in="node-3"]');
+    reconnectNode3In?.click();
+    await waitFor(
+      () => document.querySelector<SVGPathElement>('[data-edge-id="edge-node-2-node-3"]') !== null,
+      4000,
+    );
+
+    cronForm.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    await waitFor(() => createdPayload !== null, 4000);
+
+    expect(createdPayload?.task_type).toBe("workflow");
+    expect(createdPayload?.text).toBeUndefined();
+    expect(createdPayload?.workflow?.version).toBe("v1");
+    expect(createdPayload?.workflow?.nodes.some((item) => item.id === "node-2" && item.type === "if_event")).toBe(true);
+    expect(createdPayload?.workflow?.nodes.some((item) => item.id === "node-2" && item.if_condition === "channel == console")).toBe(true);
+    expect(createdPayload?.workflow?.nodes.some((item) => item.id === "node-3" && item.type === "delay")).toBe(true);
+    expect(
+      createdPayload?.workflow?.edges.some((item) => item.source === "node-1" && item.target === "node-2"),
+    ).toBe(true);
+    expect(
+      createdPayload?.workflow?.edges.some((item) => item.source === "node-2" && item.target === "node-3"),
+    ).toBe(true);
+    expect(
+      createdPayload?.workflow?.nodes.some((item) => item.id === "node-1" && item.type === "text_event" && item.text === "first message"),
+    ).toBe(true);
+  });
+
+  it("编辑 workflow 任务时可回显节点与最近执行明细", async () => {
+    type CronJobPayload = {
+      id: string;
+      name: string;
+      enabled: boolean;
+      schedule: { type: string; cron: string; timezone?: string };
+      task_type: "text" | "workflow";
+      workflow?: {
+        version: "v1";
+        nodes: Array<{
+          id: string;
+          type: "start" | "text_event" | "delay" | "if_event";
+          x: number;
+          y: number;
+          text?: string;
+          delay_seconds?: number;
+          if_condition?: string;
+        }>;
+        edges: Array<{ id: string; source: string; target: string }>;
+      };
+      dispatch: {
+        type?: string;
+        channel?: string;
+        target: { user_id: string; session_id: string };
+      };
+      runtime: {
+        max_concurrency?: number;
+        timeout_seconds?: number;
+        misfire_grace_seconds?: number;
+      };
+    };
+
+    const cronJobs: CronJobPayload[] = [
+      {
+        id: "job-workflow-edit",
+        name: "workflow-edit",
+        enabled: true,
+        schedule: {
+          type: "interval",
+          cron: "60s",
+        },
+        task_type: "workflow",
+        workflow: {
+          version: "v1",
+          nodes: [
+            { id: "start", type: "start", x: 80, y: 80 },
+            { id: "node-1", type: "text_event", x: 360, y: 80, text: "alpha" },
+            { id: "node-2", type: "delay", x: 640, y: 80, delay_seconds: 5 },
+          ],
+          edges: [
+            { id: "edge-start-node-1", source: "start", target: "node-1" },
+            { id: "edge-node-1-node-2", source: "node-1", target: "node-2" },
+          ],
+        },
+        dispatch: {
+          type: "channel",
+          channel: "console",
+          target: {
+            user_id: "demo-user",
+            session_id: "session-workflow-edit",
+          },
+        },
+        runtime: {
+          max_concurrency: 1,
+          timeout_seconds: 30,
+          misfire_grace_seconds: 0,
+        },
+      },
+    ];
+
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const rawURL = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      const url = new URL(rawURL);
+      const method = (init?.method ?? "GET").toUpperCase();
+
+      if (url.pathname === "/models/catalog" && method === "GET") {
+        return jsonResponse({
+          providers: [],
+          provider_types: [],
+          defaults: {},
+          active_llm: {
+            provider_id: "",
+            model: "",
+          },
+        });
+      }
+
+      if (url.pathname === "/chats" && method === "GET") {
+        return jsonResponse([]);
+      }
+
+      if (url.pathname === "/cron/jobs" && method === "GET") {
+        return jsonResponse(cronJobs);
+      }
+
+      const stateMatch = url.pathname.match(/^\/cron\/jobs\/([^/]+)\/state$/);
+      if (stateMatch && method === "GET") {
+        return jsonResponse({
+          next_run_at: "2026-02-17T14:00:00Z",
+          last_execution: {
+            run_id: "run-1",
+            started_at: "2026-02-17T14:00:00Z",
+            finished_at: "2026-02-17T14:00:08Z",
+            had_failures: true,
+            nodes: [
+              {
+                node_id: "node-1",
+                node_type: "text_event",
+                status: "failed",
+                continue_on_error: true,
+                started_at: "2026-02-17T14:00:01Z",
+                finished_at: "2026-02-17T14:00:02Z",
+                error: "dispatch failed",
+              },
+              {
+                node_id: "node-2",
+                node_type: "delay",
+                status: "succeeded",
+                continue_on_error: true,
+                started_at: "2026-02-17T14:00:03Z",
+                finished_at: "2026-02-17T14:00:08Z",
+              },
+            ],
+          },
+        });
+      }
+
+      throw new Error(`unexpected request: ${method} ${url.pathname}`);
+    }) as typeof globalThis.fetch;
+
+    await import("../../src/main.ts");
+
+    document.querySelector<HTMLButtonElement>('button[data-tab="cron"]')?.click();
+    await waitFor(() => document.querySelector<HTMLButtonElement>('button[data-cron-edit="job-workflow-edit"]') !== null, 4000);
+
+    document.querySelector<HTMLButtonElement>('button[data-cron-edit="job-workflow-edit"]')?.click();
+    await waitFor(() => document.getElementById("cron-create-modal")?.classList.contains("is-hidden") === false, 4000);
+
+    const cronWorkbench = document.getElementById("cron-workbench") as HTMLElement;
+    expect(cronWorkbench.dataset.cronView).toBe("editor");
+    const cronTaskType = document.getElementById("cron-task-type") as HTMLSelectElement;
+    expect(cronTaskType.value).toBe("workflow");
+    expect(document.querySelector<HTMLElement>('[data-cron-node-id="node-2"]')).not.toBeNull();
+    expect(document.querySelector<HTMLElement>("#cron-workflow-nodes")?.textContent ?? "").toContain("alpha");
+
+    const executionListText = document.getElementById("cron-workflow-execution-list")?.textContent ?? "";
+    expect(executionListText).toContain("node-1");
+    expect(executionListText).toContain("文本事件");
+    expect(executionListText).toContain("失败");
+    expect(executionListText).toContain("dispatch failed");
+    expect(executionListText).toContain("node-2");
+    expect(executionListText).toContain("延时");
+    expect(executionListText).toContain("成功");
+  });
+
+  it("cron 面板可返回聊天页并恢复会话列表可见", async () => {
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const rawURL = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      const url = new URL(rawURL);
+      const method = (init?.method ?? "GET").toUpperCase();
+
+      if (url.pathname === "/models/catalog" && method === "GET") {
+        return jsonResponse({
+          providers: [],
+          provider_types: [],
+          defaults: {},
+          active_llm: {
+            provider_id: "",
+            model: "",
+          },
+        });
+      }
+
+      if (url.pathname === "/chats" && method === "GET") {
+        if (url.searchParams.get("channel") === "qq") {
+          return jsonResponse([]);
+        }
+        return jsonResponse([
+          {
+            id: "chat-return-1",
+            name: "Return target",
+            session_id: "session-return-1",
+            user_id: "demo-user",
+            channel: "console",
+            created_at: "2026-02-17T12:00:00Z",
+            updated_at: "2026-02-17T12:00:10Z",
+            meta: {},
+          },
+        ]);
+      }
+
+      if (url.pathname === "/chats/chat-return-1" && method === "GET") {
+        return jsonResponse({
+          messages: [
+            {
+              id: "msg-return-1",
+              role: "assistant",
+              type: "message",
+              content: [{ type: "text", text: "return ok" }],
+            },
+          ],
+        });
+      }
+
+      if (url.pathname === "/cron/jobs" && method === "GET") {
+        return jsonResponse([]);
+      }
+
+      throw new Error(`unexpected request: ${method} ${url.pathname}`);
+    }) as typeof globalThis.fetch;
+
+    await import("../../src/main.ts");
+
+    await waitFor(() => document.querySelector<HTMLButtonElement>("#chat-list .chat-item-btn") !== null, 4000);
+
+    const openCronButton = document.getElementById("chat-cron-toggle") as HTMLButtonElement | null;
+    expect(openCronButton).not.toBeNull();
+    openCronButton?.click();
+
+    await waitFor(() => document.getElementById("panel-cron")?.classList.contains("is-active") === true, 4000);
+
+    const backToChatButton = document.getElementById("cron-chat-toggle") as HTMLButtonElement | null;
+    expect(backToChatButton).not.toBeNull();
+    backToChatButton?.click();
+
+    await waitFor(() => document.getElementById("panel-chat")?.classList.contains("is-active") === true, 4000);
+    await waitFor(() => {
+      const listText = document.querySelector<HTMLElement>("#chat-list")?.textContent ?? "";
+      return listText.includes("Return target");
+    }, 4000);
   });
 
   it("聊天页打开会话后应自动刷新后台新增消息", async () => {
@@ -879,7 +1383,7 @@ describe("web e2e: /shell command sends biz_params.tool", () => {
     await waitFor(() => qqChatsRequested, 4000);
     await waitFor(() => {
       const text = document.querySelector<HTMLElement>("#chat-list")?.textContent ?? "";
-      return text.includes("qq:c2c:u-c2c");
+      return text.includes("QQ inbound");
     }, 4000);
 
     const searchTabButton = document.querySelector<HTMLButtonElement>('button[data-tab="search"]');
@@ -896,7 +1400,7 @@ describe("web e2e: /shell command sends biz_params.tool", () => {
     let chats = [
       {
         id: "chat-delete-1",
-        name: "待删除会话",
+        name: "Delete target",
         session_id: "session-delete-1",
         user_id: "demo-user",
         channel: "console",
@@ -906,7 +1410,7 @@ describe("web e2e: /shell command sends biz_params.tool", () => {
       },
       {
         id: "chat-delete-2",
-        name: "保留会话",
+        name: "Keep target",
         session_id: "session-delete-2",
         user_id: "demo-user",
         channel: "console",
@@ -978,7 +1482,7 @@ describe("web e2e: /shell command sends biz_params.tool", () => {
     await waitFor(() => document.querySelectorAll("#chat-list .chat-delete-btn").length === 2, 4000);
 
     const deleteListItem = Array.from(document.querySelectorAll<HTMLLIElement>("#chat-list .chat-list-item")).find((item) =>
-      (item.textContent ?? "").includes("session-delete-1"),
+      (item.textContent ?? "").includes("Delete target"),
     );
     const deleteButton = deleteListItem?.querySelector<HTMLButtonElement>(".chat-delete-btn") ?? null;
     expect(deleteButton).not.toBeNull();
@@ -987,11 +1491,11 @@ describe("web e2e: /shell command sends biz_params.tool", () => {
     await waitFor(() => deleteCalled, 4000);
     await waitFor(() => {
       const items = Array.from(document.querySelectorAll<HTMLButtonElement>("#chat-list .chat-item-btn"));
-      return items.length === 1 && (items[0].textContent ?? "").includes("session-delete-2");
+      return items.length === 1;
     }, 4000);
 
     expect(confirmSpy).toHaveBeenCalledWith("确认删除会话 session-delete-1？该操作不可恢复。");
-    expect((document.getElementById("chat-title")?.textContent ?? "").includes("保留会话")).toBe(true);
+    expect((document.getElementById("chat-title")?.textContent ?? "").includes("Keep target")).toBe(true);
     expect((document.getElementById("status-line")?.textContent ?? "").includes("已删除会话：session-delete-1")).toBe(true);
 
     confirmSpy.mockRestore();
@@ -1085,6 +1589,14 @@ describe("web e2e: /shell command sends biz_params.tool", () => {
     searchTabButton?.click();
 
     const searchInput = document.getElementById("search-chat-input") as HTMLInputElement;
+    searchInput.value = "job-demo";
+    searchInput.dispatchEvent(new Event("input", { bubbles: true }));
+
+    await waitFor(() => {
+      const buttons = Array.from(document.querySelectorAll<HTMLButtonElement>("#search-chat-results .search-result-btn"));
+      return buttons.length === 1 && (buttons[0].textContent ?? "").includes("session-alpha-2");
+    }, 4000);
+
     searchInput.value = "session-alpha-1";
     searchInput.dispatchEvent(new Event("input", { bubbles: true }));
 
@@ -1166,6 +1678,14 @@ describe("web e2e: /shell command sends biz_params.tool", () => {
     channelsTabButton?.click();
 
     await waitFor(() => qqConfigLoaded, 4000);
+    expect(document.getElementById("channels-level1-view")?.hasAttribute("hidden")).toBe(false);
+    expect(document.getElementById("channels-level2-view")?.hasAttribute("hidden")).toBe(true);
+
+    const qqChannelCard = document.querySelector<HTMLButtonElement>('button[data-channel-action="open"][data-channel-id="qq"]');
+    expect(qqChannelCard).not.toBeNull();
+    qqChannelCard?.click();
+
+    await waitFor(() => document.getElementById("channels-level2-view")?.hasAttribute("hidden") === false, 4000);
 
     const envSelect = document.getElementById("qq-channel-api-env") as HTMLSelectElement;
     const qqForm = document.getElementById("qq-channel-form") as HTMLFormElement;
@@ -1177,6 +1697,8 @@ describe("web e2e: /shell command sends biz_params.tool", () => {
 
     await waitFor(() => qqConfigSaved, 4000);
     expect(savedAPIBase).toBe("https://sandbox.api.sgroup.qq.com");
+    await waitFor(() => document.getElementById("channels-level1-view")?.hasAttribute("hidden") === false, 4000);
+    expect(document.getElementById("channels-level2-view")?.hasAttribute("hidden")).toBe(true);
     expect(workspaceFilesRequested).toBe(false);
   });
 
@@ -1261,5 +1783,198 @@ describe("web e2e: /shell command sends biz_params.tool", () => {
 
     await waitFor(() => workspaceFileSaved, 4000);
     expect(savedContent).toBe(newContent);
+  });
+
+  it("keeps settings popover open when closing workspace editor modal", async () => {
+    const filePath = "docs/AI/AGENTS.md";
+    const rawContent = "# AI Tool Guide";
+    let workspaceFileLoaded = false;
+
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const rawURL = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      const url = new URL(rawURL);
+      const method = (init?.method ?? "GET").toUpperCase();
+
+      if (url.pathname === "/models/catalog" && method === "GET") {
+        return jsonResponse({
+          providers: [],
+          provider_types: [],
+          defaults: {},
+          active_llm: {
+            provider_id: "",
+            model: "",
+          },
+        });
+      }
+
+      if (url.pathname === "/chats" && method === "GET") {
+        return jsonResponse([]);
+      }
+
+      if (url.pathname === "/workspace/files" && method === "GET") {
+        return jsonResponse({
+          files: [{ path: filePath, kind: "config", size: rawContent.length }],
+        });
+      }
+
+      if (url.pathname === `/workspace/files/${encodeURIComponent(filePath)}` && method === "GET") {
+        workspaceFileLoaded = true;
+        return jsonResponse({ content: rawContent });
+      }
+
+      throw new Error(`unexpected request: ${method} ${url.pathname}`);
+    }) as typeof globalThis.fetch;
+
+    await import("../../src/main.ts");
+
+    const settingsToggleButton = document.getElementById("settings-toggle") as HTMLButtonElement | null;
+    expect(settingsToggleButton).not.toBeNull();
+    settingsToggleButton?.click();
+
+    const workspaceSectionButton = document.querySelector<HTMLButtonElement>('button[data-settings-section="workspace"]');
+    expect(workspaceSectionButton).not.toBeNull();
+    workspaceSectionButton?.click();
+
+    await waitFor(() => document.querySelector<HTMLButtonElement>(`button[data-workspace-open="${filePath}"]`) !== null, 4000);
+    const openButton = document.querySelector<HTMLButtonElement>(`button[data-workspace-open="${filePath}"]`);
+    openButton?.click();
+
+    await waitFor(() => workspaceFileLoaded, 4000);
+    await waitFor(() => !((document.getElementById("workspace-editor-modal") as HTMLElement).classList.contains("is-hidden")), 4000);
+
+    const settingsPopover = document.getElementById("settings-popover") as HTMLElement;
+    const workspaceEditorModal = document.getElementById("workspace-editor-modal") as HTMLElement;
+    const editorCloseButton = document.getElementById("workspace-editor-modal-close-btn") as HTMLButtonElement;
+    expect(settingsPopover.classList.contains("is-hidden")).toBe(false);
+    expect(workspaceEditorModal.classList.contains("is-hidden")).toBe(false);
+
+    editorCloseButton.click();
+    await waitFor(() => workspaceEditorModal.classList.contains("is-hidden"), 4000);
+    expect(settingsPopover.classList.contains("is-hidden")).toBe(false);
+  });
+
+  it("disables delete action for protected default cron job but keeps enable toggle editable", async () => {
+    type CronJobPayload = {
+      id: string;
+      name: string;
+      enabled: boolean;
+      schedule: { type: string; cron: string; timezone?: string };
+      task_type: "text" | "workflow";
+      text?: string;
+      dispatch: {
+        type?: string;
+        channel?: string;
+        target: { user_id: string; session_id: string };
+        mode?: string;
+        meta?: Record<string, unknown>;
+      };
+      runtime: {
+        max_concurrency?: number;
+        timeout_seconds?: number;
+        misfire_grace_seconds?: number;
+      };
+      meta?: Record<string, unknown>;
+    };
+
+    let updateCallCount = 0;
+    let deleteCalled = false;
+    let cronJobs: CronJobPayload[] = [
+      {
+        id: "cron-default",
+        name: "你好文本任务",
+        enabled: false,
+        schedule: { type: "interval", cron: "60s" },
+        task_type: "text",
+        text: "你好",
+        dispatch: {
+          type: "channel",
+          channel: "console",
+          target: {
+            user_id: "demo-user",
+            session_id: "session-default",
+          },
+          mode: "",
+          meta: {},
+        },
+        runtime: {
+          max_concurrency: 1,
+          timeout_seconds: 30,
+          misfire_grace_seconds: 0,
+        },
+        meta: {
+          system_default: true,
+        },
+      },
+    ];
+
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const rawURL = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      const url = new URL(rawURL);
+      const method = (init?.method ?? "GET").toUpperCase();
+
+      if (url.pathname === "/models/catalog" && method === "GET") {
+        return jsonResponse({
+          providers: [],
+          provider_types: [],
+          defaults: {},
+          active_llm: {
+            provider_id: "",
+            model: "",
+          },
+        });
+      }
+
+      if (url.pathname === "/chats" && method === "GET") {
+        return jsonResponse([]);
+      }
+
+      if (url.pathname === "/cron/jobs" && method === "GET") {
+        return jsonResponse(cronJobs);
+      }
+
+      const stateMatch = url.pathname.match(/^\/cron\/jobs\/([^/]+)\/state$/);
+      if (stateMatch && method === "GET") {
+        return jsonResponse({});
+      }
+
+      const updateMatch = url.pathname.match(/^\/cron\/jobs\/([^/]+)$/);
+      if (updateMatch && method === "PUT") {
+        updateCallCount += 1;
+        const payload = JSON.parse(String(init?.body ?? "{}")) as CronJobPayload;
+        cronJobs = cronJobs.map((job) => (job.id === payload.id ? payload : job));
+        return jsonResponse(payload);
+      }
+
+      if (updateMatch && method === "DELETE") {
+        deleteCalled = true;
+        return jsonResponse({ deleted: true });
+      }
+
+      throw new Error(`unexpected request: ${method} ${url.pathname}`);
+    }) as typeof globalThis.fetch;
+
+    await import("../../src/main.ts");
+
+    document.querySelector<HTMLButtonElement>('button[data-tab="cron"]')?.click();
+    await waitFor(() => document.querySelector<HTMLButtonElement>('button[data-cron-delete="cron-default"]') !== null, 4000);
+
+    const deleteButton = document.querySelector<HTMLButtonElement>('button[data-cron-delete="cron-default"]');
+    expect(deleteButton).not.toBeNull();
+    expect(deleteButton?.disabled).toBe(true);
+    expect(deleteButton?.title).toContain("默认定时任务不可删除");
+    deleteButton?.click();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(confirmSpy).not.toHaveBeenCalled();
+    expect(deleteCalled).toBe(false);
+
+    const enabledToggle = document.querySelector<HTMLInputElement>('input[data-cron-toggle-enabled="cron-default"]');
+    expect(enabledToggle).not.toBeNull();
+    expect(enabledToggle?.checked).toBe(false);
+    enabledToggle?.click();
+    await waitFor(() => updateCallCount > 0, 4000);
+    expect(cronJobs[0]?.enabled).toBe(true);
+
+    confirmSpy.mockRestore();
   });
 });
