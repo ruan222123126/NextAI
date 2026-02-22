@@ -167,9 +167,6 @@
                                     <circle cx="10" cy="10" r="2.6" />
                                   </svg>
                                 </button>
-                                <button id="models-provider-test-btn" type="button" class="secondary-btn provider-test-btn" data-i18n="models.testProvider">
-                                  Test
-                                </button>
                               </div>
                             </div>
                             <div class="provider-edit-block-input">
@@ -490,25 +487,46 @@
                       <path d="M16 16L21 21"></path>
                     </svg>
                   </button>
-                  <label class="chat-prompt-mode-toggle" for="chat-prompt-mode-toggle">
-                    <input id="chat-prompt-mode-toggle" class="chat-prompt-mode-toggle-input" type="checkbox" role="switch" />
-                    <span data-i18n="chat.codexPromptMode">Codex 提示词</span>
+                  <label class="chat-prompt-mode-toggle" for="chat-prompt-mode-select">
+                    <span data-i18n="chat.promptMode">提示词模式</span>
+                    <select id="chat-prompt-mode-select" class="chat-prompt-mode-select" data-select-search="off">
+                      <option value="default" data-i18n="chat.promptModeDefault">默认</option>
+                      <option value="codex" data-i18n="chat.promptModeCodex">Codex</option>
+                      <option value="claude" data-i18n="chat.promptModeClaude">Claude</option>
+                    </select>
                   </label>
                   <span id="chat-session" class="session-badge"></span>
                 </div>
               </div>
 
-              <ul id="message-list" class="messages"></ul>
+              <ul id="message-list" class="messages">
+                <li id="thinking-indicator" class="thinking-indicator" hidden aria-live="polite" aria-atomic="true">
+                  <span class="thinking-indicator-text" data-i18n="chat.thinking">正在思考</span>
+                </li>
+              </ul>
 
               <form id="composer" class="composer">
                 <div class="composer-shell">
-                  <div class="composer-main">
+                  <div id="composer-main" class="composer-main">
                     <textarea
                       id="message-input"
                       rows="3"
                       placeholder="Ask NextAI anything, @ add files, / open commands"
                       data-i18n-placeholder="chat.inputPlaceholder"
                     ></textarea>
+                    <div
+                      id="composer-slash-panel"
+                      class="composer-slash-panel is-hidden"
+                      role="listbox"
+                      aria-hidden="true"
+                      data-i18n-aria-label="chat.slashPanelAria"
+                    >
+                      <div class="composer-slash-panel-head">
+                        <span class="composer-slash-panel-title" data-i18n="chat.slashPanelTitle">命令</span>
+                        <span class="composer-slash-panel-hint" data-i18n="chat.slashPanelHint">继续输入筛选</span>
+                      </div>
+                      <ul id="composer-slash-list" class="composer-slash-list"></ul>
+                    </div>
                     <button id="send-btn" class="composer-send-btn" type="submit" data-i18n-aria-label="chat.sendAria">
                       <svg viewBox="0 0 20 20" fill="none" aria-hidden="true">
                         <path d="M10 4.25V15.75" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" />

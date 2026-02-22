@@ -5,6 +5,7 @@ import {
   validateCronWorkflowSpec,
 } from "./cron-workflow.js";
 import { DEFAULT_LOCALE, getLocale, isWebMessageKey, setLocale, t } from "./i18n.js";
+import { renderMarkdownToFragment } from "./markdown.js";
 
 type Tone = "neutral" | "info" | "error";
 type TabKey = "chat" | "cron";
@@ -13,11 +14,12 @@ type ModelsSettingsLevel = "list" | "edit";
 type ChannelsSettingsLevel = "list" | "edit";
 type WorkspaceSettingsLevel = "list" | "config" | "prompt" | "codex";
 type WorkspaceCardKey = "config" | "prompt" | "codex";
-type PromptMode = "default" | "codex";
+type PromptMode = "default" | "codex" | "claude";
 type HttpMethod = "GET" | "POST" | "PUT" | "DELETE";
 type ProviderKVKind = "headers" | "aliases";
 type WorkspaceEditorMode = "json" | "text";
 type CronModalMode = "create" | "edit";
+type I18nKey = Parameters<typeof t>[0];
 
 const TRASH_ICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path fill="currentColor" d="M7 21q-.825 0-1.412-.587T5 19V6H4V4h5V3h6v1h5v2h-1v13q0 .825-.587 1.413T17 21zM17 6H7v13h10zM9 17h2V8H9zm4 0h2V8h-2zM7 6v13z"/></svg>`;
 
@@ -137,6 +139,13 @@ interface WorkspaceFileInfo {
   path: string;
   kind: "config" | "skill";
   size: number | null;
+}
+
+interface WorkspaceUploadResponse {
+  uploaded?: boolean;
+  path?: string;
+  name?: string;
+  size?: number;
 }
 
 interface WorkspaceCodexTreeNode {
@@ -363,6 +372,15 @@ interface CustomSelectInstance {
   isSearchEnabled: boolean;
 }
 
+interface ComposerSlashCommand {
+  id: string;
+  command: string;
+  insertText: string;
+  titleKey: I18nKey;
+  descriptionKey: I18nKey;
+  keywords: string[];
+}
+
 const DEFAULT_API_BASE = "http://127.0.0.1:8088";
 const DEFAULT_API_KEY = "";
 const DEFAULT_USER_ID = "demo-user";
@@ -379,6 +397,8 @@ const CHAT_LIVE_REFRESH_INTERVAL_MS = 1500;
 const PROVIDER_AUTO_SAVE_DELAY_MS = 900;
 const REQUEST_SOURCE_HEADER = "X-NextAI-Source";
 const REQUEST_SOURCE_WEB = "web";
+const AGENT_RAW_REQUEST_LOG_LABEL = "[NextAI][agent-process][raw-request]";
+const AGENT_RAW_RESPONSE_LOG_LABEL = "[NextAI][agent-process][raw-response]";
 const CUSTOM_SELECT_OPTIONS_VERTICAL_GAP_PX = 6;
 const CUSTOM_SELECT_VISIBLE_OPTIONS_COUNT = 3;
 const CUSTOM_SELECT_OPTION_ROW_HEIGHT_PX = 38;
@@ -415,6 +435,64 @@ const PROMPT_MODE_META_KEY = "prompt_mode";
 const SETTINGS_KEY = "nextai.web.chat.settings";
 const LOCALE_KEY = "nextai.web.locale";
 const BUILTIN_PROVIDER_IDS = new Set(["openai"]);
+const COMPOSER_SLASH_COMMANDS: ComposerSlashCommand[] = [
+  {
+    id: "shell",
+    command: "/shell",
+    insertText: "/shell ",
+    titleKey: "chat.slashShellTitle",
+    descriptionKey: "chat.slashShellDesc",
+    keywords: ["shell", "command", "terminal", "tool", "执行", "命令"],
+  },
+  {
+    id: "prompts-check-fix",
+    command: "/prompts:check-fix",
+    insertText: "/prompts:check-fix ",
+    titleKey: "chat.slashCheckFixTitle",
+    descriptionKey: "chat.slashCheckFixDesc",
+    keywords: ["prompts", "check", "fix", "repair", "修复", "检查"],
+  },
+  {
+    id: "prompts-refactor",
+    command: "/prompts:refactor",
+    insertText: "/prompts:refactor ",
+    titleKey: "chat.slashRefactorTitle",
+    descriptionKey: "chat.slashRefactorDesc",
+    keywords: ["prompts", "refactor", "cleanup", "重构", "整理"],
+  },
+  {
+    id: "new-session",
+    command: "/new",
+    insertText: "/new",
+    titleKey: "chat.slashNewSessionTitle",
+    descriptionKey: "chat.slashNewSessionDesc",
+    keywords: ["new", "session", "chat", "清理", "新会话"],
+  },
+  {
+    id: "review",
+    command: "/review",
+    insertText: "/review ",
+    titleKey: "chat.slashReviewTitle",
+    descriptionKey: "chat.slashReviewDesc",
+    keywords: ["review", "audit", "quality", "代码审查", "风险"],
+  },
+  {
+    id: "plan",
+    command: "/plan",
+    insertText: "/plan ",
+    titleKey: "chat.slashPlanTitle",
+    descriptionKey: "chat.slashPlanDesc",
+    keywords: ["plan", "roadmap", "step", "计划", "拆解"],
+  },
+  {
+    id: "status",
+    command: "/status",
+    insertText: "/status",
+    titleKey: "chat.slashStatusTitle",
+    descriptionKey: "chat.slashStatusDesc",
+    keywords: ["status", "state", "progress", "状态", "进度"],
+  },
+];
 const TABS: TabKey[] = ["chat", "cron"];
 const customSelectInstances = new Map<HTMLSelectElement, CustomSelectInstance>();
 const scrollbarActivityTimers = new WeakMap<HTMLElement, number>();
@@ -427,6 +505,8 @@ let providerAutoSaveInFlight = false;
 let providerAutoSaveQueued = false;
 let activeSettingsSection: SettingsSectionKey = "models";
 let syncingComposerModelSelectors = false;
+let composerFileDragDepth = 0;
+let composerSlashSelectionIndex = 0;
 let systemPromptTokensLoaded = false;
 let systemPromptTokensInFlight: Promise<void> | null = null;
 let systemPromptTokens = 0;
@@ -463,12 +543,16 @@ const newChatButton = mustElement<HTMLButtonElement>("new-chat");
 const chatList = mustElement<HTMLUListElement>("chat-list");
 const chatTitle = mustElement<HTMLElement>("chat-title");
 const chatSession = mustElement<HTMLElement>("chat-session");
-const chatPromptModeToggle = mustElement<HTMLInputElement>("chat-prompt-mode-toggle");
+const chatPromptModeSelect = mustElement<HTMLSelectElement>("chat-prompt-mode-select");
 const searchChatInput = mustElement<HTMLInputElement>("search-chat-input");
 const searchChatResults = mustElement<HTMLUListElement>("search-chat-results");
 const messageList = mustElement<HTMLUListElement>("message-list");
+const thinkingIndicator = mustElement<HTMLElement>("thinking-indicator");
 const composerForm = mustElement<HTMLFormElement>("composer");
+const composerMain = mustElement<HTMLElement>("composer-main");
 const messageInput = mustElement<HTMLTextAreaElement>("message-input");
+const composerSlashPanel = mustElement<HTMLElement>("composer-slash-panel");
+const composerSlashList = mustElement<HTMLUListElement>("composer-slash-list");
 const sendButton = mustElement<HTMLButtonElement>("send-btn");
 const composerAttachButton = mustElement<HTMLButtonElement>("composer-attach-btn");
 const composerAttachInput = mustElement<HTMLInputElement>("composer-attach-input");
@@ -651,6 +735,7 @@ async function bootstrap(): Promise<void> {
   renderChatList();
   renderSearchChatResults();
   renderMessages();
+  setThinkingIndicatorVisible(false);
   renderComposerModelSelectors();
   renderComposerTokenEstimate();
   void ensureSystemPromptTokensLoaded();
@@ -1107,8 +1192,8 @@ function bindChatHeaderEvents(): void {
     setStatus(t("status.draftReady"), "info");
   });
 
-  chatPromptModeToggle.addEventListener("change", () => {
-    setActivePromptMode(chatPromptModeToggle.checked ? "codex" : "default", { announce: true });
+  chatPromptModeSelect.addEventListener("change", () => {
+    setActivePromptMode(normalizePromptMode(chatPromptModeSelect.value), { announce: true });
   });
 }
 
@@ -1143,6 +1228,9 @@ function bindComposerEvents(): void {
     await sendMessage();
   });
   messageInput.addEventListener("keydown", (event) => {
+    if (handleComposerSlashPanelKeydown(event)) {
+      return;
+    }
     if (
       event.key !== "Enter" ||
       event.shiftKey ||
@@ -1158,13 +1246,62 @@ function bindComposerEvents(): void {
   });
   messageInput.addEventListener("input", () => {
     renderComposerTokenEstimate();
+    renderComposerSlashPanel();
+  });
+  messageInput.addEventListener("focus", () => {
+    renderComposerSlashPanel();
   });
   composerAttachButton.addEventListener("click", () => {
     composerAttachInput.click();
   });
   composerAttachInput.addEventListener("change", () => {
-    appendComposerAttachmentMentions(composerAttachInput.files);
+    void handleComposerAttachmentFiles(composerAttachInput.files);
     composerAttachInput.value = "";
+  });
+  composerMain.addEventListener("dragenter", (event) => {
+    if (!isFileDragEvent(event)) {
+      return;
+    }
+    event.preventDefault();
+    composerFileDragDepth += 1;
+    composerMain.classList.add("is-file-drag-over");
+  });
+  composerMain.addEventListener("dragover", (event) => {
+    if (!isFileDragEvent(event)) {
+      return;
+    }
+    event.preventDefault();
+    if (event.dataTransfer) {
+      event.dataTransfer.dropEffect = "copy";
+    }
+    composerMain.classList.add("is-file-drag-over");
+  });
+  composerMain.addEventListener("dragleave", (event) => {
+    if (!composerMain.classList.contains("is-file-drag-over")) {
+      return;
+    }
+    event.preventDefault();
+    composerFileDragDepth = Math.max(0, composerFileDragDepth - 1);
+    if (composerFileDragDepth === 0) {
+      composerMain.classList.remove("is-file-drag-over");
+    }
+  });
+  composerMain.addEventListener("drop", (event) => {
+    if (!isFileDragEvent(event)) {
+      return;
+    }
+    event.preventDefault();
+    clearComposerFileDragState();
+    void handleComposerAttachmentFiles(
+      event.dataTransfer?.files ?? null,
+      extractDroppedFilePaths(event.dataTransfer ?? null),
+    );
+  });
+  window.addEventListener("drop", () => {
+    clearComposerFileDragState();
+  });
+  window.addEventListener("dragend", () => {
+    clearComposerFileDragState();
   });
   composerProviderSelect.addEventListener("change", () => {
     void handleComposerProviderSelectChange();
@@ -1172,6 +1309,198 @@ function bindComposerEvents(): void {
   composerModelSelect.addEventListener("change", () => {
     void handleComposerModelSelectChange();
   });
+  composerSlashPanel.addEventListener("mousedown", (event) => {
+    event.preventDefault();
+  });
+  composerSlashList.addEventListener("click", (event) => {
+    const target = event.target;
+    if (!(target instanceof Element)) {
+      return;
+    }
+    const commandButton = target.closest<HTMLButtonElement>("button[data-composer-slash-index]");
+    if (!commandButton) {
+      return;
+    }
+    const indexRaw = Number(commandButton.dataset.composerSlashIndex ?? "");
+    if (!Number.isInteger(indexRaw)) {
+      return;
+    }
+    const commands = resolveComposerSlashPanelCommands();
+    const selected = commands[indexRaw];
+    if (!selected) {
+      return;
+    }
+    applyComposerSlashCommand(selected);
+  });
+  document.addEventListener("click", (event) => {
+    if (!isComposerSlashPanelOpen()) {
+      return;
+    }
+    const target = event.target;
+    if (target instanceof Node && composerMain.contains(target)) {
+      return;
+    }
+    hideComposerSlashPanel();
+  });
+}
+
+function resolveComposerSlashQuery(rawInput: string): string | null {
+  const normalized = rawInput.replace(/\r/g, "");
+  const trimmedLeading = normalized.trimStart();
+  if (!trimmedLeading.startsWith("/")) {
+    return null;
+  }
+  const firstLine = trimmedLeading.split("\n")[0] ?? "";
+  if (firstLine.includes(" ") || firstLine.includes("\t")) {
+    return null;
+  }
+  return firstLine.slice(1).trim().toLowerCase();
+}
+
+function resolveComposerSlashPanelCommands(rawInput = messageInput.value): ComposerSlashCommand[] {
+  const query = resolveComposerSlashQuery(rawInput);
+  if (query === null) {
+    return [];
+  }
+  if (query === "") {
+    return COMPOSER_SLASH_COMMANDS;
+  }
+  return COMPOSER_SLASH_COMMANDS.filter((command) => {
+    if (command.command.slice(1).toLowerCase().startsWith(query)) {
+      return true;
+    }
+    if (t(command.titleKey).toLowerCase().includes(query)) {
+      return true;
+    }
+    if (t(command.descriptionKey).toLowerCase().includes(query)) {
+      return true;
+    }
+    return command.keywords.some((keyword) => keyword.toLowerCase().includes(query));
+  });
+}
+
+function isComposerSlashPanelOpen(): boolean {
+  return !composerSlashPanel.classList.contains("is-hidden");
+}
+
+function hideComposerSlashPanel(): void {
+  if (!isComposerSlashPanelOpen()) {
+    return;
+  }
+  composerSlashPanel.classList.add("is-hidden");
+  composerSlashPanel.setAttribute("aria-hidden", "true");
+  messageInput.setAttribute("aria-expanded", "false");
+  composerSlashList.innerHTML = "";
+  composerSlashSelectionIndex = 0;
+}
+
+function renderComposerSlashPanel(): void {
+  const query = resolveComposerSlashQuery(messageInput.value);
+  if (query === null) {
+    hideComposerSlashPanel();
+    return;
+  }
+  const commands = resolveComposerSlashPanelCommands();
+  composerSlashList.innerHTML = "";
+  if (commands.length === 0) {
+    const emptyItem = document.createElement("li");
+    emptyItem.className = "composer-slash-empty";
+    emptyItem.textContent = t("chat.slashPanelEmpty");
+    composerSlashList.appendChild(emptyItem);
+  } else {
+    composerSlashSelectionIndex = Math.max(0, Math.min(composerSlashSelectionIndex, commands.length - 1));
+    commands.forEach((command, index) => {
+      const item = document.createElement("li");
+      const option = document.createElement("button");
+      option.type = "button";
+      option.className = "composer-slash-item-btn";
+      if (index === composerSlashSelectionIndex) {
+        option.classList.add("is-active");
+      }
+      option.dataset.composerSlashIndex = String(index);
+      option.setAttribute("role", "option");
+      option.setAttribute("aria-selected", index === composerSlashSelectionIndex ? "true" : "false");
+
+      const commandText = document.createElement("span");
+      commandText.className = "composer-slash-item-command";
+      commandText.textContent = command.command;
+
+      const titleText = document.createElement("span");
+      titleText.className = "composer-slash-item-title";
+      titleText.textContent = t(command.titleKey);
+
+      const descText = document.createElement("span");
+      descText.className = "composer-slash-item-desc";
+      descText.textContent = t(command.descriptionKey);
+
+      option.append(commandText, titleText, descText);
+      item.appendChild(option);
+      composerSlashList.appendChild(item);
+    });
+  }
+  composerSlashPanel.classList.remove("is-hidden");
+  composerSlashPanel.setAttribute("aria-hidden", "false");
+  messageInput.setAttribute("aria-expanded", "true");
+}
+
+function moveComposerSlashSelection(step: number): void {
+  const commands = resolveComposerSlashPanelCommands();
+  if (commands.length === 0) {
+    return;
+  }
+  const normalizedStep = step < 0 ? -1 : 1;
+  const nextIndex = composerSlashSelectionIndex + normalizedStep;
+  composerSlashSelectionIndex = (nextIndex + commands.length) % commands.length;
+  renderComposerSlashPanel();
+}
+
+function applyComposerSlashCommand(command: ComposerSlashCommand): void {
+  messageInput.value = command.insertText;
+  messageInput.focus();
+  const cursor = messageInput.value.length;
+  messageInput.setSelectionRange(cursor, cursor);
+  renderComposerTokenEstimate();
+  renderComposerSlashPanel();
+}
+
+function handleComposerSlashPanelKeydown(event: KeyboardEvent): boolean {
+  if (!isComposerSlashPanelOpen()) {
+    return false;
+  }
+  if (event.key === "Escape") {
+    event.preventDefault();
+    hideComposerSlashPanel();
+    return true;
+  }
+  if (event.key === "ArrowDown") {
+    event.preventDefault();
+    moveComposerSlashSelection(1);
+    return true;
+  }
+  if (event.key === "ArrowUp") {
+    event.preventDefault();
+    moveComposerSlashSelection(-1);
+    return true;
+  }
+  if (event.key === "Tab") {
+    event.preventDefault();
+    moveComposerSlashSelection(event.shiftKey ? -1 : 1);
+    return true;
+  }
+  if (event.key !== "Enter") {
+    return false;
+  }
+  const commands = resolveComposerSlashPanelCommands();
+  if (commands.length === 0) {
+    return false;
+  }
+  const selected = commands[Math.max(0, Math.min(composerSlashSelectionIndex, commands.length - 1))];
+  if (!selected) {
+    return false;
+  }
+  event.preventDefault();
+  applyComposerSlashCommand(selected);
+  return true;
 }
 
 function bindModelEvents(): void {
@@ -2249,6 +2578,7 @@ function applyLocaleToDocument(): void {
   renderMessages();
   renderComposerModelSelectors();
   renderComposerTokenEstimate();
+  renderComposerSlashPanel();
   if (state.tabLoaded.models) {
     renderModelsPanel();
   }
@@ -2618,6 +2948,39 @@ async function expandPromptTemplateIfNeeded(inputText: string): Promise<string> 
   return applyPromptTemplateArgs(templateContent, parsed.args);
 }
 
+function setThinkingIndicatorVisible(visible: boolean): void {
+  thinkingIndicator.hidden = !visible;
+  thinkingIndicator.classList.toggle("is-visible", visible);
+  thinkingIndicator.setAttribute("aria-hidden", visible ? "false" : "true");
+  if (!visible) {
+    if (thinkingIndicator.parentElement) {
+      thinkingIndicator.remove();
+    }
+    return;
+  }
+  syncThinkingIndicatorPosition();
+  messageList.scrollTop = messageList.scrollHeight;
+}
+
+function syncThinkingIndicatorPosition(): void {
+  if (thinkingIndicator.hidden) {
+    return;
+  }
+  if (thinkingIndicator.parentElement !== messageList || messageList.lastElementChild !== thinkingIndicator) {
+    messageList.appendChild(thinkingIndicator);
+  }
+}
+
+function waitForNextPaint(): Promise<void> {
+  return new Promise((resolve) => {
+    if (typeof window.requestAnimationFrame === "function") {
+      window.requestAnimationFrame(() => resolve());
+      return;
+    }
+    window.setTimeout(resolve, 0);
+  });
+}
+
 async function sendMessage(): Promise<void> {
   await bootstrapTask;
   syncControlState();
@@ -2635,6 +2998,7 @@ async function sendMessage(): Promise<void> {
     setStatus(t("status.controlsRequired"), "error");
     return;
   }
+  hideComposerSlashPanel();
 
   let inputText = draftText;
   try {
@@ -2686,24 +3050,33 @@ async function sendMessage(): Promise<void> {
   renderMessages();
   messageInput.value = "";
   renderComposerTokenEstimate();
+  setThinkingIndicatorVisible(true);
+  await waitForNextPaint();
   setStatus(t("status.streamingReply"), "info");
 
   try {
-    await streamReply(
-      inputText,
-      bizParams,
-      (delta) => {
-        const target = state.messages.find((item) => item.id === assistantID);
-        if (!target) {
-          return;
-        }
-        appendAssistantDelta(target, delta);
-        renderMessageInPlace(assistantID);
-      },
-      (event) => {
-        handleToolCallEvent(event, assistantID);
-      },
-    );
+    try {
+      await streamReply(
+        inputText,
+        bizParams,
+        (delta) => {
+          const target = state.messages.find((item) => item.id === assistantID);
+          if (!target) {
+            return;
+          }
+          if (delta.trim() !== "") {
+            setThinkingIndicatorVisible(false);
+          }
+          appendAssistantDelta(target, delta);
+          renderMessageInPlace(assistantID);
+        },
+        (event) => {
+          handleToolCallEvent(event, assistantID);
+        },
+      );
+    } finally {
+      setThinkingIndicatorVisible(false);
+    }
     setStatus(t("status.replyCompleted"), "info");
 
     await reloadChats();
@@ -2725,26 +3098,95 @@ async function sendMessage(): Promise<void> {
     fillAssistantErrorMessageIfPending(assistantID, message);
     setStatus(message, "error");
   } finally {
+    setThinkingIndicatorVisible(false);
     state.sending = false;
     sendButton.disabled = false;
     renderComposerTokenEstimate();
   }
 }
 
-function appendComposerAttachmentMentions(files: FileList | null): void {
+function isFileDragEvent(event: DragEvent): boolean {
+  const types = event.dataTransfer?.types;
+  if (!types) {
+    return false;
+  }
+  return Array.from(types).includes("Files");
+}
+
+function clearComposerFileDragState(): void {
+  composerFileDragDepth = 0;
+  composerMain.classList.remove("is-file-drag-over");
+}
+
+async function handleComposerAttachmentFiles(files: FileList | null, droppedFilePaths: string[] = []): Promise<void> {
   if (!files || files.length === 0) {
     return;
   }
+  try {
+    const uploadedPaths = await uploadComposerAttachmentPaths(files, droppedFilePaths);
+    const mentionCount = appendComposerAttachmentMentions(uploadedPaths);
+    if (mentionCount === 0) {
+      throw new Error("uploaded attachment path is empty");
+    }
+    setStatus(
+      t("status.composerAttachmentsAdded", {
+        count: mentionCount,
+      }),
+      "info",
+    );
+  } catch (error) {
+    setStatus(asErrorMessage(error), "error");
+  }
+}
+
+async function uploadComposerAttachmentPaths(files: FileList, droppedFilePaths: string[]): Promise<string[]> {
   const mentions: string[] = [];
-  for (const file of Array.from(files)) {
-    const normalizedName = normalizeAttachmentName(file.name);
+  const rows = Array.from(files);
+  for (let index = 0; index < rows.length; index += 1) {
+    const file = rows[index];
+    const sourcePath = normalizeAttachmentName(resolveAttachmentPathForMention(file, index, droppedFilePaths));
+    const uploadedPath = await uploadWorkspaceAttachment(file, sourcePath);
+    const normalizedUploadedPath = normalizeAttachmentName(uploadedPath);
+    if (normalizedUploadedPath === "") {
+      continue;
+    }
+    mentions.push(normalizedUploadedPath);
+  }
+  return mentions;
+}
+
+async function uploadWorkspaceAttachment(file: File, sourcePath: string): Promise<string> {
+  const formData = new FormData();
+  const fileName = normalizeAttachmentName(file.name) || "upload.bin";
+  formData.append("file", file, fileName);
+  if (sourcePath !== "") {
+    formData.append("source_path", sourcePath);
+  }
+  const payload = await requestJSON<WorkspaceUploadResponse>("/workspace/uploads", {
+    method: "POST",
+    body: formData,
+  });
+  const uploadedPath = typeof payload.path === "string" ? normalizeAttachmentName(payload.path) : "";
+  if (uploadedPath === "") {
+    throw new Error("workspace upload response missing file path");
+  }
+  return uploadedPath;
+}
+
+function appendComposerAttachmentMentions(paths: string[]): number {
+  if (paths.length === 0) {
+    return 0;
+  }
+  const mentions: string[] = [];
+  for (const path of paths) {
+    const normalizedName = normalizeAttachmentName(path);
     if (normalizedName === "") {
       continue;
     }
     mentions.push(`@${normalizedName}`);
   }
   if (mentions.length === 0) {
-    return;
+    return 0;
   }
   const mentionLine = mentions.join(" ");
   const existing = messageInput.value.trimEnd();
@@ -2753,16 +3195,101 @@ function appendComposerAttachmentMentions(files: FileList | null): void {
   const cursor = messageInput.value.length;
   messageInput.setSelectionRange(cursor, cursor);
   renderComposerTokenEstimate();
-  setStatus(
-    t("status.composerAttachmentsAdded", {
-      count: mentions.length,
-    }),
-    "info",
-  );
+  renderComposerSlashPanel();
+  return mentions.length;
 }
 
 function normalizeAttachmentName(raw: string): string {
   return raw.replace(/[\r\n\t]+/g, " ").trim();
+}
+
+function resolveAttachmentPathForMention(file: File, index: number, droppedFilePaths: string[]): string {
+  const fromFileObject = extractFilePathFromFileObject(file);
+  if (fromFileObject !== "") {
+    return fromFileObject;
+  }
+  const fromDropData = droppedFilePaths[index] ?? "";
+  if (fromDropData !== "") {
+    return fromDropData;
+  }
+  return file.name;
+}
+
+function extractFilePathFromFileObject(file: File): string {
+  const withPath = file as File & { path?: unknown };
+  if (typeof withPath.path === "string") {
+    const normalized = normalizeAttachmentName(withPath.path);
+    if (normalized !== "") {
+      return normalized;
+    }
+  }
+  return "";
+}
+
+function extractDroppedFilePaths(dataTransfer: DataTransfer | null): string[] {
+  if (!dataTransfer) {
+    return [];
+  }
+  const uriListPaths = parseDroppedPathsFromRawText(dataTransfer.getData("text/uri-list"));
+  if (uriListPaths.length > 0) {
+    return uriListPaths;
+  }
+  return parseDroppedPathsFromRawText(dataTransfer.getData("text/plain"));
+}
+
+function parseDroppedPathsFromRawText(raw: string): string[] {
+  const normalizedRaw = raw.trim();
+  if (normalizedRaw === "") {
+    return [];
+  }
+  const paths: string[] = [];
+  const lines = normalizedRaw.split(/\r?\n/);
+  for (const line of lines) {
+    const value = line.trim();
+    if (value === "" || value.startsWith("#")) {
+      continue;
+    }
+    const localPath = parseDroppedLocalPath(value);
+    if (localPath === "") {
+      continue;
+    }
+    paths.push(localPath);
+  }
+  return paths;
+}
+
+function parseDroppedLocalPath(raw: string): string {
+  const directPath = normalizePossibleLocalPath(raw);
+  if (directPath !== "") {
+    return directPath;
+  }
+  try {
+    const parsed = new URL(raw);
+    if (parsed.protocol !== "file:") {
+      return "";
+    }
+    const pathname = decodeURIComponent(parsed.pathname ?? "");
+    if (pathname === "") {
+      return "";
+    }
+    let resolved = pathname;
+    if (/^\/[A-Za-z]:[\\/]/.test(resolved)) {
+      resolved = resolved.slice(1);
+    }
+    if (parsed.hostname && parsed.hostname.toLowerCase() !== "localhost") {
+      resolved = `//${parsed.hostname}${resolved}`;
+    }
+    return normalizeAttachmentName(resolved);
+  } catch {
+    return "";
+  }
+}
+
+function normalizePossibleLocalPath(raw: string): string {
+  if (raw.startsWith("/") || raw.startsWith("\\\\") || /^[A-Za-z]:[\\/]/.test(raw)) {
+    return normalizeAttachmentName(raw);
+  }
+  return "";
 }
 
 async function streamReply(
@@ -2786,15 +3313,20 @@ async function streamReply(
   });
   applyAuthHeaders(headers);
   applyRequestSourceHeader(headers);
+  const requestBody = JSON.stringify(payload);
+  logAgentRawRequest(requestBody);
 
   const response = await fetch(toAbsoluteURL("/agent/process"), {
     method: "POST",
     headers,
-    body: JSON.stringify(payload),
+    body: requestBody,
   });
 
   if (!response.ok) {
-    throw new Error(await readErrorMessage(response));
+    const fallback = t("error.requestFailed", { status: response.status });
+    const raw = await response.text();
+    logAgentRawResponse(raw);
+    throw new Error(parseErrorMessage(raw, response.status, fallback));
   }
   if (!response.body) {
     throw new Error(t("error.streamUnsupported"));
@@ -2803,27 +3335,35 @@ async function streamReply(
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
+  let rawOutput = "";
   let doneReceived = false;
-
-  while (!doneReceived) {
-    const chunk = await reader.read();
-    if (chunk.done) {
-      break;
+  try {
+    while (!doneReceived) {
+      const chunk = await reader.read();
+      if (chunk.done) {
+        break;
+      }
+      const decodedChunk = decoder.decode(chunk.value, { stream: true });
+      rawOutput += decodedChunk;
+      buffer += decodedChunk.replaceAll("\r", "");
+      const result = consumeSSEBuffer(buffer, onDelta, onEvent);
+      buffer = result.rest;
+      doneReceived = result.done;
     }
-    buffer += decoder.decode(chunk.value, { stream: true }).replaceAll("\r", "");
-    const result = consumeSSEBuffer(buffer, onDelta, onEvent);
-    buffer = result.rest;
-    doneReceived = result.done;
-  }
 
-  buffer += decoder.decode().replaceAll("\r", "");
-  if (!doneReceived && buffer.trim() !== "") {
-    const result = consumeSSEBuffer(`${buffer}\n\n`, onDelta, onEvent);
-    doneReceived = result.done;
-  }
+    const flushedChunk = decoder.decode();
+    rawOutput += flushedChunk;
+    buffer += flushedChunk.replaceAll("\r", "");
+    if (!doneReceived && buffer.trim() !== "") {
+      const result = consumeSSEBuffer(`${buffer}\n\n`, onDelta, onEvent);
+      doneReceived = result.done;
+    }
 
-  if (!doneReceived) {
-    throw new Error(t("error.sseEndedEarly"));
+    if (!doneReceived) {
+      throw new Error(t("error.sseEndedEarly"));
+    }
+  } finally {
+    logAgentRawResponse(rawOutput);
   }
 }
 
@@ -2839,9 +3379,7 @@ function parseChatBizParams(inputText: string): Record<string, unknown> | undefi
   return {
     tool: {
       name: "shell",
-      input: {
-        command,
-      },
+      items: [{ command }],
     },
   };
 }
@@ -3059,7 +3597,14 @@ function normalizePromptMode(raw: unknown): PromptMode {
   if (typeof raw !== "string") {
     return "default";
   }
-  return raw.trim().toLowerCase() === "codex" ? "codex" : "default";
+  const normalized = raw.trim().toLowerCase();
+  if (normalized === "codex") {
+    return "codex";
+  }
+  if (normalized === "claude") {
+    return "claude";
+  }
+  return "default";
 }
 
 function resolveChatPromptMode(meta: Record<string, unknown> | undefined): PromptMode {
@@ -3076,7 +3621,7 @@ function mergePromptModeBizParams(
 }
 
 function setActivePromptMode(nextMode: PromptMode, options: { announce?: boolean } = {}): void {
-  const normalized = nextMode === "codex" ? "codex" : "default";
+  const normalized = normalizePromptMode(nextMode);
   const changed = state.activePromptMode !== normalized;
   state.activePromptMode = normalized;
   const active = state.chats.find((chat) => chat.id === state.activeChatId);
@@ -3088,7 +3633,13 @@ function setActivePromptMode(nextMode: PromptMode, options: { announce?: boolean
   }
   renderChatHeader();
   if (options.announce && changed) {
-    setStatus(t(normalized === "codex" ? "status.promptModeCodexEnabled" : "status.promptModeDefaultEnabled"), "info");
+    let statusKey: I18nKey = "status.promptModeDefaultEnabled";
+    if (normalized === "codex") {
+      statusKey = "status.promptModeCodexEnabled";
+    } else if (normalized === "claude") {
+      statusKey = "status.promptModeClaudeEnabled";
+    }
+    setStatus(t(statusKey), "info");
   }
 }
 
@@ -3101,8 +3652,7 @@ function renderChatHeader(): void {
   const sessionId = state.activeSessionId;
   chatSession.textContent = sessionId;
   chatSession.title = sessionId;
-  chatPromptModeToggle.checked = state.activePromptMode === "codex";
-  chatPromptModeToggle.setAttribute("aria-checked", chatPromptModeToggle.checked ? "true" : "false");
+  chatPromptModeSelect.value = state.activePromptMode;
 }
 
 function syncActiveChatSelections(): void {
@@ -3125,10 +3675,15 @@ function renderMessages(options: { animate?: boolean } = {}): void {
     empty.className = "message-empty-fill";
     empty.setAttribute("aria-hidden", "true");
     messageList.appendChild(empty);
+    syncThinkingIndicatorPosition();
+    messageList.scrollTop = messageList.scrollHeight;
     return;
   }
 
   for (const message of state.messages) {
+    if (message.role === "assistant" && buildOrderedTimeline(message).length === 0) {
+      continue;
+    }
     const item = document.createElement("li");
     item.className = `message ${message.role}`;
     if (!animate) {
@@ -3138,6 +3693,7 @@ function renderMessages(options: { animate?: boolean } = {}): void {
     renderMessageNode(item, message);
     messageList.appendChild(item);
   }
+  syncThinkingIndicatorPosition();
   messageList.scrollTop = messageList.scrollHeight;
 }
 
@@ -3153,6 +3709,7 @@ function renderMessageInPlace(messageID: string): void {
     return;
   }
   renderMessageNode(node, target);
+  syncThinkingIndicatorPosition();
   messageList.scrollTop = messageList.scrollHeight;
 }
 
@@ -3237,8 +3794,9 @@ function fillAssistantErrorMessageIfPending(assistantID: string, rawMessage: str
 }
 
 function formatToolCallNotice(event: AgentStreamEvent): ViewToolCallNotice | null {
-  const toolName = normalizeToolName(event.tool_call?.name);
-  const detail = formatToolCallDetail(event);
+  const raw = formatToolCallRaw(event);
+  const toolName = normalizeToolName(event.tool_call?.name) || parseToolNameFromToolCallRaw(raw);
+  const detail = formatToolCallDetail(raw, toolName);
   if (detail === "") {
     return null;
   }
@@ -3247,16 +3805,15 @@ function formatToolCallNotice(event: AgentStreamEvent): ViewToolCallNotice | nul
     raw: detail,
     step: parsePositiveInteger(event.step),
     toolName: toolName === "" ? undefined : toolName,
-    outputReady: toolName === "shell" ? false : true,
+    outputReady: toolName !== "shell",
   };
 }
 
-function formatToolCallDetail(event: AgentStreamEvent): string {
-  const toolName = normalizeToolName(event.tool_call?.name);
+function formatToolCallDetail(raw: string, toolName: string): string {
   if (toolName === "shell") {
     return t("chat.toolCallOutputPending");
   }
-  return formatToolCallRaw(event);
+  return raw;
 }
 
 function formatToolCallRaw(event: AgentStreamEvent): string {
@@ -3279,8 +3836,9 @@ function formatToolCallRaw(event: AgentStreamEvent): string {
 }
 
 function applyToolResultEvent(event: AgentStreamEvent, assistantID: string): void {
-  const toolName = normalizeToolName(event.tool_result?.name);
-  if (toolName !== "shell") {
+  const raw = typeof event.raw === "string" ? event.raw : "";
+  const toolName = normalizeToolName(event.tool_result?.name) || parseToolNameFromToolCallRaw(raw);
+  if (toolName === "") {
     return;
   }
   const output = formatToolResultOutput(event.tool_result);
@@ -3293,11 +3851,14 @@ function applyToolResultEvent(event: AgentStreamEvent, assistantID: string): voi
   if (notice) {
     notice.raw = output;
     notice.outputReady = true;
+    if (normalizeToolName(notice.toolName) === "") {
+      notice.toolName = toolName;
+    }
     renderMessageInPlace(assistantID);
     return;
   }
   appendToolCallNoticeToAssistant(assistantID, {
-    summary: "bash",
+    summary: formatToolCallSummary({ name: toolName }),
     raw: output,
     step,
     toolName,
@@ -3312,7 +3873,9 @@ function findPendingToolCallNotice(
 ): ViewToolCallNotice | undefined {
   for (let idx = notices.length - 1; idx >= 0; idx -= 1) {
     const item = notices[idx];
-    if (item.toolName !== toolName || item.outputReady) {
+    const itemToolName = normalizeToolName(item.toolName) || parseToolNameFromToolCallRaw(item.raw);
+    const canConsumeResult = !item.outputReady || isToolCallRawNotice(item.raw);
+    if (itemToolName !== toolName || !canConsumeResult) {
       continue;
     }
     if (step !== undefined && item.step !== undefined && item.step !== step) {
@@ -3323,11 +3886,178 @@ function findPendingToolCallNotice(
   return undefined;
 }
 
+function isToolCallRawNotice(raw: string): boolean {
+  const payload = parseToolCallRawEvent(raw);
+  return payload?.type === "tool_call";
+}
+
 function normalizeToolName(value: unknown): string {
   if (typeof value !== "string") {
     return "";
   }
   return value.trim();
+}
+
+function parseToolNameFromToolCallRaw(raw: string): string {
+  const payload = parseToolCallRawEvent(raw);
+  if (!payload) {
+    return "";
+  }
+  if (payload.type === "tool_call") {
+    return normalizeToolName(payload.tool_call?.name);
+  }
+  if (payload.type === "tool_result") {
+    return normalizeToolName(payload.tool_result?.name);
+  }
+  return "";
+}
+
+function parseToolCallRawEvent(raw: string): AgentStreamEvent | null {
+  const normalized = raw.trim();
+  if (normalized === "") {
+    return null;
+  }
+  try {
+    return JSON.parse(normalized) as AgentStreamEvent;
+  } catch {
+    return null;
+  }
+}
+
+function resolveToolCallSummaryLine(toolCall: ViewToolCallNotice): string {
+  const fallback = resolveToolCallFallbackSummary(toolCall);
+  if (toolCall.outputReady === false) {
+    return fallback;
+  }
+  const raw = toolCall.raw.trim();
+  if (raw === "" || raw === t("chat.toolCallOutputPending") || raw === t("chat.toolCallOutputUnavailable")) {
+    return fallback;
+  }
+  const payload = parseToolCallRawEvent(raw);
+  if (payload) {
+    if (payload.type === "tool_result") {
+      const summary = typeof payload.tool_result?.summary === "string" ? payload.tool_result.summary.trim() : "";
+      if (summary !== "") {
+        const actionSummary = summarizeToolResultActions(summary);
+        if (actionSummary !== "") {
+          return actionSummary;
+        }
+        return truncateToolCallSummary(summary);
+      }
+    }
+    return fallback;
+  }
+  const actionSummary = summarizeToolResultActions(raw);
+  if (actionSummary !== "") {
+    return actionSummary;
+  }
+  return truncateToolCallSummary(firstNonEmptyLine(raw) || fallback);
+}
+
+function resolveToolCallFallbackSummary(toolCall: ViewToolCallNotice): string {
+  const summary = toolCall.summary.trim();
+  if (summary !== "") {
+    return summary;
+  }
+  return t("chat.toolCallNotice", { target: resolveToolCallDisplayName(toolCall) });
+}
+
+function resolveToolCallExpandedDetail(toolCall: ViewToolCallNotice): string {
+  const raw = toolCall.raw.trim();
+  if (raw === "") {
+    return t("chat.toolCallOutputUnavailable");
+  }
+  if (raw === t("chat.toolCallOutputPending") || raw === t("chat.toolCallOutputUnavailable")) {
+    return raw;
+  }
+  const payload = parseToolCallRawEvent(raw);
+  if (!payload) {
+    return raw;
+  }
+  if (payload.type === "tool_result") {
+    return formatToolResultOutput(payload.tool_result);
+  }
+  if (payload.type === "tool_call") {
+    return t("chat.toolCallOutputPending");
+  }
+  return raw;
+}
+
+function firstNonEmptyLine(text: string): string {
+  const lines = text.split(/\r?\n/);
+  for (const line of lines) {
+    const normalized = line.trim();
+    if (normalized !== "") {
+      return normalized;
+    }
+  }
+  return "";
+}
+
+function summarizeToolResultActions(text: string): string {
+  const lines = text
+    .split(/(?:\r?\n|\\n)+/g)
+    .map((line) => line.trim())
+    .filter((line) => line !== "");
+  if (lines.length === 0) {
+    return "";
+  }
+  let fileCount = 0;
+  let listCount = 0;
+  for (const line of lines) {
+    if (isListBrowseLine(line)) {
+      listCount += 1;
+      continue;
+    }
+    if (isFileBrowseLine(line)) {
+      fileCount += 1;
+    }
+  }
+  if (fileCount === 0 && listCount === 0) {
+    return "";
+  }
+  const parts: string[] = [];
+  if (fileCount > 0) {
+    parts.push(t("chat.toolCallSummaryFileCount", { count: fileCount }));
+  }
+  if (listCount > 0) {
+    parts.push(t("chat.toolCallSummaryListCount", { count: listCount }));
+  }
+  return `${t("chat.toolCallActionBrowse")} ${parts.join("，")}`;
+}
+
+function isListBrowseLine(line: string): boolean {
+  if (line.includes("列表") || line.includes("目录")) {
+    return true;
+  }
+  return /(^|\s)listed files(\s|$)/i.test(line) || /^list files\b/i.test(line) || /^ls(\s|$)/i.test(line);
+}
+
+function isFileBrowseLine(line: string): boolean {
+  if (line.includes("文件")) {
+    return true;
+  }
+  return /^read\s+\S+/i.test(line) || /^view\s+\S+/i.test(line) || /^cat\s+\S+/i.test(line) || /^opened?\s+\S+/i.test(line);
+}
+
+function truncateToolCallSummary(value: string): string {
+  const normalized = value.trim();
+  if (normalized.length <= 120) {
+    return normalized;
+  }
+  return `${normalized.slice(0, 117)}...`;
+}
+
+function resolveToolCallDisplayName(toolCall: ViewToolCallNotice): string {
+  const fromNotice = normalizeToolName(toolCall.toolName);
+  if (fromNotice !== "") {
+    return fromNotice;
+  }
+  const fromRaw = parseToolNameFromToolCallRaw(toolCall.raw);
+  if (fromRaw !== "") {
+    return fromRaw;
+  }
+  return t("chat.toolCallUnknown");
 }
 
 function formatToolResultOutput(toolResult?: AgentToolResultPayload): string {
@@ -3341,8 +4071,8 @@ function formatToolResultOutput(toolResult?: AgentToolResultPayload): string {
 function formatToolCallSummary(toolCall?: AgentToolCallPayload): string {
   const name = typeof toolCall?.name === "string" ? toolCall.name.trim() : "";
   if (name === "shell") {
-    const command = extractShellCommand(toolCall?.input);
-    return command === "" ? "bash" : `bash ${command}`;
+    const command = summarizeShellCommandForNotice(extractShellCommand(toolCall?.input));
+    return command === "" ? t("chat.toolCallShell") : t("chat.toolCallShellCommand", { command });
   }
   if (name === "view") {
     const filePath = extractToolFilePath(toolCall?.input);
@@ -3415,17 +4145,22 @@ function extractShellCommand(input?: Record<string, unknown>): string {
   return command.trim();
 }
 
+function summarizeShellCommandForNotice(command: string): string {
+  const normalized = command.trim();
+  if (normalized === "") {
+    return "";
+  }
+  if (normalized.split(/\r?\n/).length > 1) {
+    return t("common.ellipsis");
+  }
+  return normalized;
+}
+
 function renderMessageNode(node: HTMLLIElement, message: ViewMessage): void {
   node.innerHTML = "";
 
   const orderedTimeline = buildOrderedTimeline(message);
   if (orderedTimeline.length === 0) {
-    if (message.role === "assistant") {
-      const placeholder = document.createElement("div");
-      placeholder.className = "message-text";
-      placeholder.textContent = t("common.ellipsis");
-      node.appendChild(placeholder);
-    }
     return;
   }
 
@@ -3437,7 +4172,12 @@ function renderMessageNode(node: HTMLLIElement, message: ViewMessage): void {
       }
       const text = document.createElement("div");
       text.className = "message-text";
-      text.textContent = textValue;
+      if (message.role === "assistant") {
+        text.classList.add("message-markdown");
+        text.appendChild(renderMarkdownToFragment(textValue, document));
+      } else {
+        text.textContent = textValue;
+      }
       node.appendChild(text);
       continue;
     }
@@ -3449,19 +4189,39 @@ function renderMessageNode(node: HTMLLIElement, message: ViewMessage): void {
     const toolCallList = document.createElement("div");
     toolCallList.className = "tool-call-list";
 
-    const details = document.createElement("details");
-    details.className = "tool-call-entry";
+    const entryNode = document.createElement("div");
+    entryNode.className = "tool-call-entry";
 
-    const summary = document.createElement("summary");
+    const row = document.createElement("div");
+    row.className = "tool-call-row";
+
+    const summary = document.createElement("span");
     summary.className = "tool-call-summary";
-    summary.textContent = toolCall.summary;
+    summary.textContent = resolveToolCallSummaryLine(toolCall);
+    row.appendChild(summary);
 
-    const raw = document.createElement("pre");
-    raw.className = "tool-call-raw";
-    raw.textContent = toolCall.raw;
+    const detail = document.createElement("pre");
+    detail.className = "tool-call-expand-preview";
+    detail.textContent = resolveToolCallExpandedDetail(toolCall);
+    detail.hidden = true;
 
-    details.append(summary, raw);
-    toolCallList.appendChild(details);
+    const toggle = document.createElement("button");
+    toggle.type = "button";
+    toggle.className = "tool-call-toggle";
+    toggle.textContent = "▸";
+    toggle.setAttribute("aria-label", "toggle tool output");
+    toggle.setAttribute("aria-expanded", "false");
+    toggle.addEventListener("click", () => {
+      const expanded = toggle.getAttribute("aria-expanded") === "true";
+      const nextExpanded = !expanded;
+      toggle.setAttribute("aria-expanded", nextExpanded ? "true" : "false");
+      detail.hidden = !nextExpanded;
+      entryNode.classList.toggle("is-expanded", nextExpanded);
+    });
+    row.appendChild(toggle);
+
+    entryNode.append(row, detail);
+    toolCallList.appendChild(entryNode);
     node.appendChild(toolCallList);
   }
 }
@@ -6563,6 +7323,20 @@ function logComposerStatusToConsole(): void {
   });
 }
 
+function logAgentRawRequest(raw: string): void {
+  console.log(AGENT_RAW_REQUEST_LOG_LABEL, {
+    at: new Date().toISOString(),
+    raw,
+  });
+}
+
+function logAgentRawResponse(raw: string): void {
+  console.log(AGENT_RAW_RESPONSE_LOG_LABEL, {
+    at: new Date().toISOString(),
+    raw,
+  });
+}
+
 function toRecord(value: unknown): Record<string, unknown> | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     return null;
@@ -6584,11 +7358,16 @@ function parsePositiveInteger(value: unknown): number | undefined {
   return undefined;
 }
 
-function buildToolCallNoticeFromRaw(raw: string): ViewToolCallNotice | null {
+type PersistedToolNoticeParseOptions = {
+  hasAssistantText?: boolean;
+};
+
+function buildToolCallNoticeFromRaw(raw: string, options: PersistedToolNoticeParseOptions = {}): ViewToolCallNotice | null {
   const normalized = raw.trim();
   if (normalized === "") {
     return null;
   }
+  const hasAssistantText = options.hasAssistantText === true;
   let summary = t("chat.toolCallNotice", { target: "tool" });
   let detail = normalized;
   let toolName = "";
@@ -6600,16 +7379,17 @@ function buildToolCallNoticeFromRaw(raw: string): ViewToolCallNotice | null {
     if (payload.type === "tool_call") {
       summary = formatToolCallSummary(payload.tool_call);
       toolName = normalizeToolName(payload.tool_call?.name);
-      if (toolName === "shell") {
+      if (hasAssistantText) {
         detail = t("chat.toolCallOutputUnavailable");
+        outputReady = true;
+      } else {
+        detail = t("chat.toolCallOutputPending");
+        outputReady = false;
       }
-      outputReady = toolName === "shell";
     } else if (payload.type === "tool_result") {
       toolName = normalizeToolName(payload.tool_result?.name);
-      if (toolName === "shell") {
-        summary = "bash";
-        detail = formatToolResultOutput(payload.tool_result);
-      }
+      summary = formatToolCallSummary({ name: toolName });
+      detail = formatToolResultOutput(payload.tool_result);
       outputReady = true;
     } else {
       summary = formatToolCallSummary(payload.tool_call);
@@ -6617,16 +7397,20 @@ function buildToolCallNoticeFromRaw(raw: string): ViewToolCallNotice | null {
   } catch {
     // ignore invalid raw payload and keep fallback summary
   }
+  const resolvedToolName = normalizeToolName(toolName) || parseToolNameFromToolCallRaw(normalized);
   return {
     summary,
     raw: detail,
     step,
-    toolName: toolName === "" ? undefined : toolName,
+    toolName: resolvedToolName === "" ? undefined : resolvedToolName,
     outputReady,
   };
 }
 
-function parsePersistedToolCallNotices(metadata: Record<string, unknown> | null): ViewToolCallNotice[] {
+function parsePersistedToolCallNotices(
+  metadata: Record<string, unknown> | null,
+  options: PersistedToolNoticeParseOptions = {},
+): ViewToolCallNotice[] {
   if (!metadata) {
     return [];
   }
@@ -6637,7 +7421,7 @@ function parsePersistedToolCallNotices(metadata: Record<string, unknown> | null)
   const notices: ViewToolCallNotice[] = [];
   for (const item of raw) {
     if (typeof item === "string") {
-      const notice = buildToolCallNoticeFromRaw(item);
+      const notice = buildToolCallNoticeFromRaw(item, options);
       if (notice) {
         notices.push(notice);
       }
@@ -6648,7 +7432,7 @@ function parsePersistedToolCallNotices(metadata: Record<string, unknown> | null)
       continue;
     }
     const rawText = typeof obj.raw === "string" ? obj.raw : "";
-    const notice = buildToolCallNoticeFromRaw(rawText);
+    const notice = buildToolCallNoticeFromRaw(rawText, options);
     if (notice) {
       const persistedOrder = parsePositiveInteger(obj.order);
       if (persistedOrder !== undefined) {
@@ -6666,7 +7450,7 @@ function toViewMessage(message: RuntimeMessage): ViewMessage {
     .join("")
     .trim();
   const metadata = toRecord(message.metadata);
-  const toolCalls = parsePersistedToolCallNotices(metadata);
+  const toolCalls = parsePersistedToolCallNotices(metadata, { hasAssistantText: joined !== "" });
   const persistedTextOrder = parsePositiveInteger(metadata?.text_order);
   const persistedToolOrder = parsePositiveInteger(metadata?.tool_order);
   const textOrder = joined === "" ? undefined : (persistedTextOrder ?? nextMessageOutputOrder());

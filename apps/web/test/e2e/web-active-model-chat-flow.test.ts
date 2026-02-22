@@ -305,6 +305,68 @@ describe("web e2e: auto activate model then send chat", () => {
     expect(text).not.toBe("...");
   });
 
+  it("输入 / 会展开 slash 面板并支持键盘选择命令", async () => {
+    let processCalled = false;
+
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const rawURL = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      const url = new URL(rawURL);
+      const method = (init?.method ?? "GET").toUpperCase();
+
+      if (url.pathname === "/chats" && method === "GET") {
+        return jsonResponse([]);
+      }
+
+      if (url.pathname === "/models/catalog" && method === "GET") {
+        return jsonResponse({
+          providers: [],
+          provider_types: [],
+          defaults: {},
+          active_llm: {
+            provider_id: "",
+            model: "",
+          },
+        });
+      }
+
+      if (url.pathname === "/agent/process" && method === "POST") {
+        processCalled = true;
+        return new Response("data: [DONE]\n\n", {
+          status: 200,
+          headers: {
+            "content-type": "text/event-stream",
+          },
+        });
+      }
+
+      throw new Error(`unexpected request: ${method} ${url.pathname}`);
+    }) as typeof globalThis.fetch;
+
+    await import("../../src/main.ts");
+
+    const messageInput = document.getElementById("message-input") as HTMLTextAreaElement;
+    const slashPanel = document.getElementById("composer-slash-panel") as HTMLElement;
+    const slashList = document.getElementById("composer-slash-list") as HTMLUListElement;
+
+    messageInput.focus();
+    messageInput.value = "/";
+    messageInput.dispatchEvent(new Event("input", { bubbles: true }));
+
+    await waitFor(() => !slashPanel.classList.contains("is-hidden"));
+    const options = Array.from(slashList.querySelectorAll<HTMLButtonElement>("button[data-composer-slash-index]"));
+    expect(options.length).toBeGreaterThan(1);
+    expect(options[0]?.textContent ?? "").toContain("/shell");
+
+    messageInput.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true, cancelable: true }));
+    messageInput.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+
+    expect(messageInput.value).toBe("/prompts:check-fix ");
+    expect(slashPanel.classList.contains("is-hidden")).toBe(true);
+
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    expect(processCalled).toBe(false);
+  });
+
   it("switches active model from composer toolbar provider and model selectors", async () => {
     const activeSetPayloads: Array<{ provider_id?: string; model?: string }> = [];
     let activeLLM = {
@@ -785,7 +847,8 @@ describe("web e2e: auto activate model then send chat", () => {
     });
   });
 
-  it("appends selected file names into composer when clicking the add button", async () => {
+  it("uploads selected files and appends returned paths into composer", async () => {
+    let uploadCount = 0;
     globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const rawURL = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
       const url = new URL(rawURL);
@@ -804,6 +867,18 @@ describe("web e2e: auto activate model then send chat", () => {
             provider_id: "",
             model: "",
           },
+        });
+      }
+
+      if (url.pathname === "/workspace/uploads" && method === "POST") {
+        uploadCount += 1;
+        expect(init?.body instanceof FormData).toBe(true);
+        const uploadedPath = uploadCount === 1 ? "/tmp/upload-notes.txt" : "/tmp/upload-photo.png";
+        return jsonResponse({
+          uploaded: true,
+          path: uploadedPath,
+          name: uploadedPath.split("/").pop(),
+          size: 3,
         });
       }
 
@@ -834,9 +909,98 @@ describe("web e2e: auto activate model then send chat", () => {
     });
     attachInput.dispatchEvent(new Event("change", { bubbles: true }));
 
+    await waitFor(() => messageInput.value.includes("@/tmp/upload-notes.txt") && messageInput.value.includes("@/tmp/upload-photo.png"));
+    expect(uploadCount).toBe(2);
     expect(messageInput.value).toContain("look at these");
-    expect(messageInput.value).toContain("@notes.txt");
-    expect(messageInput.value).toContain("@photo.png");
+    expect(messageInput.value).toContain("@/tmp/upload-notes.txt");
+    expect(messageInput.value).toContain("@/tmp/upload-photo.png");
+  });
+
+  it("uploads dropped files and appends returned paths into composer", async () => {
+    let uploadCount = 0;
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const rawURL = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      const url = new URL(rawURL);
+      const method = (init?.method ?? "GET").toUpperCase();
+
+      if (url.pathname === "/chats" && method === "GET") {
+        return jsonResponse([]);
+      }
+
+      if (url.pathname === "/models/catalog" && method === "GET") {
+        return jsonResponse({
+          providers: [],
+          provider_types: [],
+          defaults: {},
+          active_llm: {
+            provider_id: "",
+            model: "",
+          },
+        });
+      }
+
+      if (url.pathname === "/workspace/uploads" && method === "POST") {
+        uploadCount += 1;
+        expect(init?.body instanceof FormData).toBe(true);
+        const uploadedPath = uploadCount === 1 ? "/tmp/drop-draft.md" : "/tmp/drop-diagram.svg";
+        return jsonResponse({
+          uploaded: true,
+          path: uploadedPath,
+          name: uploadedPath.split("/").pop(),
+          size: 4,
+        });
+      }
+
+      throw new Error(`unexpected request: ${method} ${url.pathname}`);
+    }) as typeof globalThis.fetch;
+
+    await import("../../src/main.ts");
+
+    const composerMain = document.getElementById("composer-main") as HTMLElement;
+    const messageInput = document.getElementById("message-input") as HTMLTextAreaElement;
+    expect(composerMain).not.toBeNull();
+    expect(messageInput).not.toBeNull();
+
+    const dragOverEvent = new Event("dragover", { bubbles: true, cancelable: true }) as DragEvent;
+    Object.defineProperty(dragOverEvent, "dataTransfer", {
+      configurable: true,
+      value: {
+        types: ["Files"],
+        dropEffect: "none",
+      } satisfies Partial<DataTransfer>,
+    });
+    composerMain.dispatchEvent(dragOverEvent);
+    expect(dragOverEvent.defaultPrevented).toBe(true);
+    expect(composerMain.classList.contains("is-file-drag-over")).toBe(true);
+
+    messageInput.value = "please review";
+    const fakeFiles = [
+      new File(["demo"], "draft.md", { type: "text/markdown" }),
+      new File([new Uint8Array([9, 8, 7])], "diagram.svg", { type: "image/svg+xml" }),
+    ] as unknown as FileList;
+    const dropEvent = new Event("drop", { bubbles: true, cancelable: true }) as DragEvent;
+    const droppedURIList = [
+      "file:///Users/demo/workspace/docs/draft.md",
+      "file:///Users/demo/workspace/assets/diagram.svg",
+    ].join("\n");
+    Object.defineProperty(dropEvent, "dataTransfer", {
+      configurable: true,
+      value: {
+        types: ["Files"],
+        files: fakeFiles,
+        dropEffect: "none",
+        getData: (type: string) => (type === "text/uri-list" ? droppedURIList : ""),
+      } satisfies Partial<DataTransfer>,
+    });
+    composerMain.dispatchEvent(dropEvent);
+    expect(dropEvent.defaultPrevented).toBe(true);
+
+    await waitFor(() => messageInput.value.includes("@/tmp/drop-draft.md") && messageInput.value.includes("@/tmp/drop-diagram.svg"));
+    expect(uploadCount).toBe(2);
+    expect(composerMain.classList.contains("is-file-drag-over")).toBe(false);
+    expect(messageInput.value).toContain("please review");
+    expect(messageInput.value).toContain("@/tmp/drop-draft.md");
+    expect(messageInput.value).toContain("@/tmp/drop-diagram.svg");
   });
 
   it("filters custom select options with the dropdown search input", async () => {
