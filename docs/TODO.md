@@ -1,6 +1,6 @@
 # NextAI TODO
 
-更新时间：2026-02-22 10:36:01 +0800
+更新时间：2026-02-22 10:42:54 +0800
 
 ## 执行约定（强制）
 - 每位接手 AI 开始前，必须先阅读本文件与 `/home/ruan/.codex/handoff/latest.md`。
@@ -29,6 +29,10 @@
 - [x] `docs/v1-roadmap.md`、`docs/contracts.md`、本地开发文档、部署文档与发布模板已完成。
 
 ## 6. 实操验证（汇总）
+- [x] 2026-02-22 10:40 +0800 按交接顺序完成遗留未推送项：执行 `git push origin refactor/gateway-stage1-transport` 成功，远端已创建同名分支（提示仓库已迁移到 `ruan222123126/NextAI`，当前 push 兼容转发成功）。
+- [x] 2026-02-22 10:40 +0800 按交接顺序复核 Web 基线：执行 `pnpm -C apps/web build && pnpm -C apps/web test`，确认继续拆分前链路稳定（`Test Files 6 passed`，`Tests 52 passed`）。
+- [x] 2026-02-22 10:42 +0800 Web `main.ts` 安全瘦身第 4 步落地：将 workspace 请求层进一步与 UI 编排层拆分，提炼 `requestWorkspaceFiles`、`requestWorkspaceFile`、`requestWorkspaceFileUpdate`、`requestWorkspaceFileDeletion`、`requestWorkspaceImport` 与 `buildWorkspaceFileRequestPath`；`refresh/open/save/delete/import` 流程改为统一调用请求层函数，保持行为语义不变。
+- [x] 2026-02-22 10:42 +0800 验证通过：重构后再次执行 `pnpm -C apps/web build && pnpm -C apps/web test` 全量通过（`Test Files 6 passed`，`Tests 52 passed`）。
 - [x] 2026-02-22 10:36 +0800 按交接顺序复核 Web 基线：执行 `pnpm -C apps/web build` 与 `pnpm -C apps/web test`，确认继续拆分前后基线稳定可回归。
 - [x] 2026-02-22 10:36 +0800 Web `main.ts` 安全瘦身第 3 步落地：拆分 workspace CRUD 主流程（`refresh/open/save/delete/import`）并提炼 `applyWorkspaceFileList`、`syncActiveWorkspaceSelection`、`setWorkspaceEditorStateFromPayload`、`collectWorkspaceSaveDraft`、`resolveWorkspaceEditorPayload`、`parseWorkspaceImportInput`、`buildWorkspaceImportBody` 等编排 helper；同步将 `normalizeWorkspaceFiles` 拆分为 `collectWorkspaceFileRows`、`parseWorkspaceFileInfoRow`、`resolveWorkspaceFilePathFromRow`、`resolveWorkspaceFileSizeFromRow`、`resolveWorkspaceFileKindFromRow`、`mergeWorkspaceFileInfo`，保持行为语义不变。
 - [x] 2026-02-22 10:36 +0800 验证通过：执行 `pnpm -C apps/web exec tsc -p tsconfig.json`、`pnpm -C apps/web build`、`pnpm -C apps/web test` 全量通过（`Test Files 6 passed`，`Tests 52 passed`）。

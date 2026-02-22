@@ -897,7 +897,7 @@ async function loadSystemPromptTokens(): Promise<number> {
 
   const tokenLoaders = SYSTEM_PROMPT_WORKSPACE_FALLBACK_PATHS.map(async (path) => {
     try {
-      const payload = await getWorkspaceFile(path);
+      const payload = await requestWorkspaceFile(path);
       return estimateTokenCount(extractWorkspaceFileText(payload));
     } catch {
       return 0;
@@ -2563,7 +2563,7 @@ async function loadPromptTemplateContent(templateName: string): Promise<string> 
   let lastError: unknown = null;
   for (const path of candidates) {
     try {
-      const payload = await getWorkspaceFile(path);
+      const payload = await requestWorkspaceFile(path);
       const content = extractWorkspaceFileText(payload);
       if (content.trim() === "") {
         throw new Error(`prompt template is empty: ${path}`);
@@ -5028,7 +5028,7 @@ async function saveQQChannelConfig(): Promise<void> {
 async function refreshWorkspace(options: { silent?: boolean } = {}): Promise<void> {
   syncControlState();
   try {
-    const files = await listWorkspaceFiles();
+    const files = await fetchWorkspaceFiles();
     applyWorkspaceFileList(files);
     if (!options.silent) {
       setStatus(t("status.workspaceFilesLoaded", { count: files.length }), "info");
@@ -5402,7 +5402,7 @@ function renderWorkspaceEditor(): void {
 async function openWorkspaceFile(path: string, options: { silent?: boolean } = {}): Promise<void> {
   syncControlState();
   try {
-    const payload = await getWorkspaceFile(path);
+    const payload = await requestWorkspaceFile(path);
     setWorkspaceEditorStateFromPayload(path, payload);
     renderWorkspacePanel();
     setWorkspaceEditorModalOpen(true);
@@ -5428,7 +5428,7 @@ async function saveWorkspaceFile(): Promise<void> {
     return;
   }
   try {
-    await putWorkspaceFile(draft.path, draft.payload);
+    await requestWorkspaceFileUpdate(draft.path, draft.payload);
     setWorkspaceEditorStateFromPayload(draft.path, draft.payload);
     await refreshWorkspace({ silent: true });
     afterWorkspaceFileSaved(draft.path);
@@ -5476,7 +5476,7 @@ async function deleteWorkspaceFile(path: string): Promise<void> {
   }
 
   try {
-    await deleteWorkspaceFileRequest(path);
+    await requestWorkspaceFileDeletion(path);
     afterWorkspaceFileDeleted(path);
     await refreshWorkspace({ silent: true });
     setStatus(t("status.workspaceFileDeleted", { path }), "info");
@@ -5502,10 +5502,7 @@ async function importWorkspaceJSON(): Promise<void> {
     return;
   }
   try {
-    await requestJSON<unknown>("/workspace/import", {
-      method: "POST",
-      body: buildWorkspaceImportBody(payload),
-    });
+    await requestWorkspaceImport(payload);
     clearWorkspaceSelection();
     await refreshWorkspace({ silent: true });
     setWorkspaceImportModalOpen(false);
@@ -5539,25 +5536,40 @@ function buildWorkspaceImportBody(payload: unknown): unknown {
   };
 }
 
-async function listWorkspaceFiles(): Promise<WorkspaceFileInfo[]> {
-  const raw = await requestJSON<unknown>("/workspace/files");
+async function fetchWorkspaceFiles(): Promise<WorkspaceFileInfo[]> {
+  const raw = await requestWorkspaceFiles();
   return normalizeWorkspaceFiles(raw);
 }
 
-async function getWorkspaceFile(path: string): Promise<unknown> {
-  return requestJSON<unknown>(`/workspace/files/${encodeURIComponent(path)}`);
+async function requestWorkspaceFiles(): Promise<unknown> {
+  return requestJSON<unknown>("/workspace/files");
 }
 
-async function putWorkspaceFile(path: string, payload: unknown): Promise<void> {
-  await requestJSON<unknown>(`/workspace/files/${encodeURIComponent(path)}`, {
+function buildWorkspaceFileRequestPath(path: string): string {
+  return `/workspace/files/${encodeURIComponent(path)}`;
+}
+
+async function requestWorkspaceFile(path: string): Promise<unknown> {
+  return requestJSON<unknown>(buildWorkspaceFileRequestPath(path));
+}
+
+async function requestWorkspaceFileUpdate(path: string, payload: unknown): Promise<void> {
+  await requestJSON<unknown>(buildWorkspaceFileRequestPath(path), {
     method: "PUT",
     body: payload,
   });
 }
 
-async function deleteWorkspaceFileRequest(path: string): Promise<void> {
-  await requestJSON<unknown>(`/workspace/files/${encodeURIComponent(path)}`, {
+async function requestWorkspaceFileDeletion(path: string): Promise<void> {
+  await requestJSON<unknown>(buildWorkspaceFileRequestPath(path), {
     method: "DELETE",
+  });
+}
+
+async function requestWorkspaceImport(payload: unknown): Promise<void> {
+  await requestJSON<unknown>("/workspace/import", {
+    method: "POST",
+    body: buildWorkspaceImportBody(payload),
   });
 }
 
