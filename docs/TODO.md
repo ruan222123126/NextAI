@@ -1,139 +1,98 @@
 # NextAI TODO
 
-更新时间：2026-02-22 10:49:38 +0800
+更新时间：2026-02-22 20:32:32 +0800
 
-## 执行约定（强制）
-- 每位接手 AI 开始前，必须先阅读本文件与 `/home/ruan/.codex/handoff/latest.md`。
-- 执行顺序优先遵循交接文件“接手建议（按顺序）”，并与本文件未完成项对齐推进。
-- 每次执行后必须更新本文件：勾选完成项、记录阻塞原因、刷新“更新时间”。
+## 执行约定
+- 接手前必读本文件与 `/home/ruan/.codex/handoff/latest.md`
+- 按交接文件"接手建议"顺序推进，与本文件对齐
+- 每次执行后更新：勾选完成项、记录阻塞、刷新时间
 
 ## 0. 目标范围（v1）
-- 以 `nextai-local` 功能边界为准，遵循 `openclaw` 的工程方法（契约优先、分层测试、CI 分层、CLI/Gateway 分离），不扩展超出 v1 范围能力。
+- 以 `nextai-local` 功能边界为准，遵循 `openclaw` 工程方法（契约优先、分层测试、CLI/Gateway 分离）
 
-## 1. 基础工程与规范
-- [x] Monorepo 结构、pnpm 包管理、核心文档（README/CONTRIBUTING/SECURITY）、`Makefile` 与 `.env.example` 已统一落地。
+## 1. 基础工程 ✅
+- Monorepo / pnpm / 核心文档 / Makefile / .env.example
 
-## 2. 核心实现（Gateway / CLI / Web）
-- [x] Gateway 已完成 v1 核心 API、统一错误模型、请求追踪、关键安全防护（如上传路径穿越拦截）、模型 provider/catalog/alias/配置管理等能力。
-- [x] CLI 已完成核心命令集、流式输出、错误分级提示、`--json` 机器输出、多语言与模型配置链路。
-- [x] Web 控制台已完成聊天与关键管理面板（Models/Channels/Workspace/Cron），并具备统一错误提示与多语言支持。
+## 2. 核心实现 ✅
+- Gateway：v1 API、统一错误模型、请求追踪、安全防护、模型管理
+- CLI：核心命令、流式输出、错误分级、--json、多语言
+- Web：聊天、管理面板（Models/Channels/Workspace/Cron）、多语言
 
-## 3. Contracts（契约）
-- [x] OpenAPI 契约与关键 schema 已补齐，契约 lint、契约测试与 SDK 生成流程已接入并可运行。
+## 3. Contracts ✅
+- OpenAPI 契约、schema、lint、契约测试、SDK 生成
 
-## 4. 测试与 CI/CD
-- [x] 已建立 unit / integration / e2e / contract 的分层测试能力与覆盖率门禁，关键闭环（chat/cron/workspace/provider）具备自动化验证。
-- [x] CI 已形成 `ci-fast` / `ci-full` / `nightly-live` 分层门禁，发布流水线支持 tag 到 artifact 与 release notes。
+## 4. 测试与 CI/CD ✅
+- 分层测试（unit/integration/e2e/contract）+ 覆盖率门禁
+- CI 分层（ci-fast/ci-full/nightly-live）+ 发布流水线
 
-## 5. 文档与交付
-- [x] `docs/v1-roadmap.md`、`docs/contracts.md`、本地开发文档、部署文档与发布模板已完成。
+## 5. 文档 ✅
+- v1-roadmap / contracts / 本地开发 / 部署 / 发布模板
 
-## 6. 实操验证（汇总）
-- [x] 2026-02-22 10:47 +0800 按交接顺序完成遗留改动提交：将 `apps/web/src/main.ts` 与 `docs/TODO.md` 提交为 `a171192`（`refactor(web): extract workspace request helpers`）。
-- [x] 2026-02-22 10:47 +0800 按交接顺序完成遗留改动推送：执行 `git push origin refactor/gateway-stage1-transport` 成功（远端提示仓库迁移但已兼容转发）。
-- [x] 2026-02-22 10:49 +0800 Web `main.ts` 安全瘦身第 5 步落地：新增 `WorkspaceFileCatalog` 作为 workspace 数据归一化层，提炼 `createWorkspaceFileCatalog`、`collectWorkspaceCodexFolderPaths`、`normalizeWorkspaceFileCatalog`；`refreshWorkspace` 改为 `fetchWorkspaceFileCatalog` 流程，渲染侧直接消费 catalog（`config/prompt/codex tree`），并将 codex 展开态同步从“渲染时路径拆解”改为基于 catalog 的 `syncWorkspaceCodexExpandedFolders`。
-- [x] 2026-02-22 10:49 +0800 验证通过：执行 `pnpm -C apps/web build && pnpm -C apps/web test` 全量通过（`Test Files 6 passed`，`Tests 52 passed`）。
-- [x] 2026-02-22 10:40 +0800 按交接顺序完成遗留未推送项：执行 `git push origin refactor/gateway-stage1-transport` 成功，远端已创建同名分支（提示仓库已迁移到 `ruan222123126/NextAI`，当前 push 兼容转发成功）。
-- [x] 2026-02-22 10:40 +0800 按交接顺序复核 Web 基线：执行 `pnpm -C apps/web build && pnpm -C apps/web test`，确认继续拆分前链路稳定（`Test Files 6 passed`，`Tests 52 passed`）。
-- [x] 2026-02-22 10:42 +0800 Web `main.ts` 安全瘦身第 4 步落地：将 workspace 请求层进一步与 UI 编排层拆分，提炼 `requestWorkspaceFiles`、`requestWorkspaceFile`、`requestWorkspaceFileUpdate`、`requestWorkspaceFileDeletion`、`requestWorkspaceImport` 与 `buildWorkspaceFileRequestPath`；`refresh/open/save/delete/import` 流程改为统一调用请求层函数，保持行为语义不变。
-- [x] 2026-02-22 10:42 +0800 验证通过：重构后再次执行 `pnpm -C apps/web build && pnpm -C apps/web test` 全量通过（`Test Files 6 passed`，`Tests 52 passed`）。
-- [x] 2026-02-22 10:36 +0800 按交接顺序复核 Web 基线：执行 `pnpm -C apps/web build` 与 `pnpm -C apps/web test`，确认继续拆分前后基线稳定可回归。
-- [x] 2026-02-22 10:36 +0800 Web `main.ts` 安全瘦身第 3 步落地：拆分 workspace CRUD 主流程（`refresh/open/save/delete/import`）并提炼 `applyWorkspaceFileList`、`syncActiveWorkspaceSelection`、`setWorkspaceEditorStateFromPayload`、`collectWorkspaceSaveDraft`、`resolveWorkspaceEditorPayload`、`parseWorkspaceImportInput`、`buildWorkspaceImportBody` 等编排 helper；同步将 `normalizeWorkspaceFiles` 拆分为 `collectWorkspaceFileRows`、`parseWorkspaceFileInfoRow`、`resolveWorkspaceFilePathFromRow`、`resolveWorkspaceFileSizeFromRow`、`resolveWorkspaceFileKindFromRow`、`mergeWorkspaceFileInfo`，保持行为语义不变。
-- [x] 2026-02-22 10:36 +0800 验证通过：执行 `pnpm -C apps/web exec tsc -p tsconfig.json`、`pnpm -C apps/web build`、`pnpm -C apps/web test` 全量通过（`Test Files 6 passed`，`Tests 52 passed`）。
-- [x] 2026-02-22 10:29 +0800 按交接顺序完成 Web 基线确认：先执行 `pnpm -C apps/web build` 与 `pnpm -C apps/web test`，确认继续重构前基线通过。
-- [x] 2026-02-22 10:29 +0800 Web `main.ts` 安全瘦身第 2 步落地：将 `bindWorkspaceAndChannelEvents` 拆为 `bindChannelEvents` 与 `bindWorkspaceEvents`，workspace 再细分为导航/模态框/列表/编辑/Esc 五组绑定；同步拆分 workspace 渲染入口与文件行构建（`createWorkspaceFileRow`、`buildWorkspaceFileOpenButton`、`buildWorkspaceFileDeleteButton`），保持交互语义不变。
-- [x] 2026-02-22 10:29 +0800 验证通过：重构后再次执行 `pnpm -C apps/web build` 与 `pnpm -C apps/web test` 全量通过（`Test Files 6 passed`，`Tests 52 passed`）。
-- [x] 2026-02-22 10:23 +0800 Web `main.ts` 安全瘦身第 1 步落地：将 `bindEvents`（原 567 行）按职责拆分为 `bindTabEvents`、`bindSearchEvents`、`bindSettingsEvents`、`bindChatHeaderEvents`、`bindConnectionEvents`、`bindComposerEvents`、`bindModelEvents`、`bindWorkspaceAndChannelEvents`、`bindCronEvents`，入口 `bindEvents` 改为编排调用，事件处理语义保持不变。
-- [x] 2026-02-22 10:23 +0800 验证通过：执行 `pnpm -C apps/web build` 与 `pnpm -C apps/web test -- test/e2e/web-shell-tool-flow.test.ts` 均通过（含 chat/models/workspace/cron 相关交互回归）。
-- [x] 2026-02-22 10:17 +0800 Gateway Codex Mode V2（保守兼容）落地：新增 `NEXTAI_ENABLE_CODEX_MODE_V2` 开关并在 `buildSystemLayersForMode` 分流 `codex_v1/codex_v2`；实现 `buildCodexSystemLayersV2`（base/orchestrator/model/collab/experimental/local policy/tool guide）、统一模板渲染器 `renderTemplate`、V2 去重器 `dedupeLayersByNormalizedContent`（核心层>本地策略层>工具层）与渲染失败/缺变量 warning+跳过语义。
-- [x] 2026-02-22 10:17 +0800 可观测与回归补齐：`GET /agent/system-layers` 新增 `mode_variant(default|codex_v1|codex_v2)` 与 `layers[].layer_hash`，`GET /runtime-config` 新增 `features.codex_mode_v2`；补充 `server_test` 覆盖 flag 开关分流、V2 层序、变量渲染、去重、可选层缺失、必选层缺失 `codex_prompt_unavailable`、接口 token 一致性；验证 `cd apps/gateway && go test ./internal/app` 与 `cd apps/gateway && go test ./...` 全部通过；同步更新 `docs/contracts.md` 与 `.env.example` 回滚语义。
-- [x] 2026-02-22 09:42 +0800 Codex 注入文件内容核查：完成 5 个运行时系统层文件（base/orchestrator/model_instructions/collaboration_default/experimental）的全文读取与规则分类，补充 `{{ personality }}`、`{{KNOWN_MODE_NAMES}}`、`{{REQUEST_USER_INPUT_AVAILABILITY}}` 占位符来源确认。
-- [x] 2026-02-22 09:42 +0800 验证通过：执行 `sed -n`/`rg -n` 读取 `prompts/codex/codex-rs/core/prompt.md`、`templates/agents/orchestrator.md`、`templates/model_instructions/gpt-5.2-codex_instructions_template.md`、`templates/collaboration_mode/default.md`、`templates/collab/experimental_prompt.md` 及 personality 文件，内容与 Gateway 渲染逻辑一致。
-- [x] 2026-02-22 09:37 +0800 提示词工程现状盘点：完成 `prompts/*`、Gateway `prompt_mode` 装配、Web `prompt_mode` 透传与 token introspect 流程核查，确认当前为“default/codex 双轨 + 会话持久化 + 模板开关”架构。
-- [x] 2026-02-22 09:37 +0800 验证通过：执行 `rg --files prompts`、`find prompts/codex -type f | wc -l`、`sed -n` 核对 `apps/gateway/internal/app/server_admin.go` 的 `buildCodexSystemLayers` 与 `apps/web/src/main.ts` 的 `mergePromptModeBizParams/loadSystemPromptTokens`，结果与 `docs/contracts.md` 一致。
-- [x] 2026-02-22 09:36 +0800 Codex 模式模板开关启用并重启网关：更新 `.env` 新增 `NEXTAI_ENABLE_PROMPT_TEMPLATES=true`、`NEXTAI_ENABLE_PROMPT_CONTEXT_INTROSPECT=true`，重启 `go run ./cmd/gateway` 进程使配置生效。
-- [x] 2026-02-22 09:36 +0800 验证通过：`GET /runtime-config` 返回 `prompt_templates=true` 与 `prompt_context_introspect=true`；`GET /agent/system-layers?prompt_mode=codex` 返回 5 层，且包含 `codex_orchestrator_system`、`codex_model_instructions_system`、`codex_collaboration_default_system`（missing=none）。
-- [x] 2026-02-22 09:32 +0800 Codex 模式模板集成增强：Gateway `prompt_mode=codex` 从“单一 `core/prompt.md`”升级为“base 必选 + 模板包可选叠加”；当 `NEXTAI_ENABLE_PROMPT_TEMPLATES=true` 时，按顺序注入 `templates/agents/orchestrator.md`、渲染后 `templates/model_instructions/gpt-5.2-codex_instructions_template.md`（注入 pragmatic personality）、渲染后 `templates/collaboration_mode/default.md`、`templates/collab/experimental_prompt.md`。
-- [x] 2026-02-22 09:32 +0800 观测与前端联动补齐：`GET /agent/system-layers` 新增 `prompt_mode` 查询参数（支持 `default|codex`）；Web 侧 `loadSystemPromptTokens` 调用该接口时显式透传当前会话 `prompt_mode`，避免 codex 会话仍按 default 系统层估算 token。
-- [x] 2026-02-22 09:32 +0800 验证通过：执行 `cd apps/gateway && go test ./internal/app -run "TestBuildSystemLayersForCodexModeUsesSingleLayerWhenPromptTemplatesDisabled|TestBuildSystemLayersForCodexModeIncludesTemplateLayersWhenFeatureEnabled|TestGetAgentSystemLayersFeatureDisabled|TestGetAgentSystemLayersReturnsLayersAndTokenEstimate|TestGetAgentSystemLayersSupportsCodexModeQuery|TestGetAgentSystemLayersRejectsInvalidPromptModeQuery|TestProcessAgentCodexPromptModePersistsAndIsReused|TestProcessAgentRejectsInvalidPromptMode|TestProcessAgentReturnsCodexPromptUnavailableWhenPromptMissing"`、`cd apps/gateway && go test ./...`、`pnpm -C apps/web test -- test/e2e/web-shell-tool-flow.test.ts`、`pnpm -C apps/web build` 均通过。
-- [x] 2026-02-22 09:19 +0800 Codex templates 目录解读完成：梳理 `prompts/codex/codex-rs/core/templates` 下 18 个模板文件，按协作模式、人格、记忆系统、压缩/交接、review 注入、工具发现等维度完成用途归类与内容摘要。
-- [x] 2026-02-22 09:19 +0800 验证通过：执行 `rg --files prompts/codex/codex-rs/core/templates`、按子目录 `sed -n` 全量读取模板正文、并对超长文件 `memories/consolidation.md` 补充尾部核对，确认无遗漏目录与核心约束段落。
-- [x] 2026-02-22 09:17 +0800 聊天 `prompt_mode=default` 500 排障：复现到 `POST /agent/process` 在 default 模式返回 `ai_tool_guide_unavailable`、而 codex 模式正常；定位为 8088 网关仍运行旧进程（08:23 启动，未加载提示词目录切换后的最新逻辑）。
-- [x] 2026-02-22 09:17 +0800 验证通过：重启 8088 网关进程后，`POST /agent/process` 在 `biz_params.prompt_mode=default` 与 `biz_params.prompt_mode=codex` 均返回 `200`，不再出现 `ai_tool_guide_unavailable`。
-- [x] 2026-02-22 08:58 +0800 Web 配置文件页移除“新建配置文件”入口：删除 `apps/web/src/index.html` 中 `workspace-create-file-form` 表单，`apps/web/src/main.ts` 删除新建文件的 DOM 绑定、提交事件与 `createWorkspaceFile/createWorkspaceSkillTemplate` 逻辑，页面仅保留现有文件列表与打开/删除能力。
-- [x] 2026-02-22 08:58 +0800 验证通过：执行 `pnpm -C apps/web build` 与 `pnpm -C apps/web test -- test/e2e/web-shell-tool-flow.test.ts` 均通过；全局检索确认 `workspace-create-file-form`、`workspace-new-path`、`workspace.createFile`、`status.workspaceFileCreated`、`error.workspaceCreateOnlySkill` 已无引用。
-- [x] 2026-02-22 08:51 +0800 提示词目录收口补充：按确认删除空目录 `docs/AI/codex`，并清理空的 `docs/AI` 根目录，工作区提示词目录彻底收口到 `prompts/*`。
-- [x] 2026-02-22 08:51 +0800 验证通过：执行 `find docs/AI -maxdepth 3 -print`（删除前仅剩空目录）与 `rmdir docs/AI/codex docs/AI`（删除成功），随后 `find docs -maxdepth 2 -type d -name 'AI' -o -path 'docs/AI*'` 无输出。
-- [x] 2026-02-22 08:48 +0800 提示词目录去重与归并：删除 `docs/AI/AGENTS.md`、`docs/AI/ai-tools.md` 重复文件，统一保留 `prompts/AGENTS.md` 与 `prompts/ai-tools.md`；Gateway 默认系统提示词路径切换到 `prompts/*`，`docs/AI/*` 仅保留兼容兜底候选。
-- [x] 2026-02-22 08:48 +0800 回归验证通过：执行 `cd apps/gateway && go test ./internal/app`、`cd apps/gateway && go test ./...`、`pnpm -C apps/web test -- test/e2e/web-active-model-chat-flow.test.ts test/e2e/web-shell-tool-flow.test.ts`、`pnpm -C apps/web build` 均通过；文件核对 `find docs/AI -maxdepth 2 -type f` 结果为空，`prompts/AGENTS.md` 与 `prompts/ai-tools.md` 存在。
-- [x] 2026-02-22 08:40 +0800 工作区分批清理纠偏：将误做的“全量 stash 清理”恢复为“按价值提交 + 噪音清理”流程，三批改动（gateway+docs / web / prompts）均恢复并通过回归后进入提交流程，当前工作区仅保留待提交改动。
-- [x] 2026-02-22 08:40 +0800 验证通过：执行 `cd apps/gateway && go test ./internal/app`、`cd apps/gateway && go test ./...`、`pnpm -C apps/web test -- test/e2e/web-shell-tool-flow.test.ts`、`pnpm -C apps/web build` 均通过。
-- [x] 2026-02-22 08:31 +0800 Codex 最小对齐（会话级 prompt_mode）落地：Gateway `POST /agent/process` 新增 `biz_params.prompt_mode(default|codex)` 解析/校验、`chat.meta.prompt_mode` 会话持久化、系统层按模式分派（`default=AGENTS+ai-tools`，`codex=prompts/codex/codex-rs/core/prompt.md` 单层），并补齐 `invalid prompt_mode` 与 `codex_prompt_unavailable` 错误语义；同步更新 `docs/contracts.md` 契约说明。
-- [x] 2026-02-22 08:31 +0800 Web 会话级开关与回归落地：聊天区新增 `Codex 提示词` 开关，打开会话按 `chat.meta.prompt_mode` 回填，新会话默认 `default`，发送链路始终显式透传 `biz_params.prompt_mode` 且保留工具 `biz_params` 合并逻辑；新增 e2e 覆盖“开关透传/会话隔离/新会话默认”。
-- [x] 2026-02-22 08:31 +0800 验证通过：执行 `cd apps/gateway && go test ./internal/app`、`cd apps/gateway && go test ./...`、`pnpm -C apps/web test -- test/e2e/web-shell-tool-flow.test.ts`、`pnpm -C apps/web build` 均通过。
-- [x] 2026-02-21 21:36 +0800 Web 配置文件卡片启用/禁用能力落地：更新 `apps/web/src/main.ts`、`apps/web/src/styles.css`、`apps/web/src/locales/{zh-CN,en-US}.ts`，为“配置文件/提示词/codex提示词”三张一级卡片新增启用与禁用切换、禁用态样式、状态提示及本地持久化（`localStorage`）。
-- [x] 2026-02-21 21:36 +0800 验证通过：执行 `pnpm -C apps/web exec vitest run test/e2e/web-shell-tool-flow.test.ts --testNamePattern=\"工作区卡片应支持启用和禁用|工作区应新增 codex 提示词卡片并支持文件夹层层展开\"` 与 `pnpm -C apps/web build` 均通过。
-- [x] 2026-02-21 21:19 +0800 Web codex 提示词目录树底板移除：更新 `apps/web/src/index.html`，在工作区 codex 二级视图中移除 `workspace-file-card` 包裹层与重复标题，目录树改为直接渲染列表。
-- [x] 2026-02-21 21:19 +0800 验证通过：执行 `pnpm -C apps/web build` 成功，前端构建与类型检查通过。
-- [x] 2026-02-21 21:11 +0800 网关进程热重启修复 Workspace 文件缺失：终止旧 `go run ./cmd/gateway` 进程（8088/18088）并按当前源码重启，避免旧进程未加载 `prompts/*` 扫描逻辑导致“codex 提示词空列表”。
-- [x] 2026-02-21 21:11 +0800 验证通过：`GET /workspace/files` 在 8088/18088 均返回 `prompts/codex/*` 共 38 条（含 `prompts/codex/codex-rs/core/prompt.md` 等）。
-- [x] 2026-02-21 21:06 +0800 Web 配置文件页交互调整：按用户要求将 codex 区域从“目录等级卡片”改为“文件夹树形展开”，更新 `apps/web/src/main.ts`（`workspaceCodexTree` 渲染/展开状态/点击展开）与 `apps/web/src/index.html`（`workspace-codex-tree-body`）。
-- [x] 2026-02-21 21:06 +0800 验证通过：执行 `pnpm -C apps/web build` 与 `pnpm -C apps/web exec vitest run test/e2e/web-shell-tool-flow.test.ts --testNamePattern=\"工作区应新增 codex 提示词卡片并支持文件夹层层展开\"` 均通过。
-- [x] 2026-02-21 20:59 +0800 Web 工作区新增 codex 提示词卡片：更新 `apps/web/src/index.html` 与 `apps/web/src/main.ts`，在“配置文件”页新增 `codex提示词` 一级卡片和 `workspace-level2-codex-view` 二级视图，支持 `open-codex` 跳转并展示 `prompts/codex` 文件列表。
-- [x] 2026-02-21 20:59 +0800 codex 目录分级卡片落地与验证：新增按文件夹层级（L1/L2/L3）统计渲染逻辑与文案（`apps/web/src/locales/zh-CN.ts`、`apps/web/src/locales/en-US.ts`），并通过 `pnpm -C apps/web build`、`pnpm -C apps/web exec vitest run test/e2e/web-shell-tool-flow.test.ts --testNamePattern=\"工作区应新增 codex 提示词卡片并按目录等级展示\"`。
-- [x] 2026-02-21 20:41 +0800 提示词拆分迁移：从 `/mnt/Files/codex/new/all-prompts-raw.md` 按 `## Source` 分隔拆分 38 份，写入 `prompts/codex` 并按来源路径映射目录（`codex-rs/...`、`user-codex/...`）。
-- [x] 2026-02-21 20:41 +0800 验证通过：执行 `find prompts/codex -type f | wc -l` 得到 38，抽样核对 `prompts/codex/user-codex/prompts/check-fix.md`、`prompts/codex/codex-rs/core/templates/collaboration_mode/default.md`、`prompts/codex/codex-rs/core/models.json` 内容完整。
-- [x] 2026-02-21 20:37 +0800 Web 配置文件编辑弹窗双层底板修复：更新 `apps/web/src/index.html`，移除 `workspace-editor-modal-content` 内 `workspace-neumorph/workspace-neumorph-block` 双层容器与重复“配置文件编辑”标题，编辑表单改为单层布局。
-- [x] 2026-02-21 20:37 +0800 样式清理与验证：删除 `apps/web/src/styles.css` 中已废弃的 `workspace-neumorph*` 样式并执行 `pnpm -C apps/web build`，前端构建与类型检查通过。
-- [x] 2026-02-21 20:33 +0800 Web 提示词页底板移除：更新 `apps/web/src/index.html`，在工作区提示词二级视图中移除 `workspace-file-card` 包裹层与重复标题，提示词文件卡片改为直接渲染，去掉额外底板视觉。
-- [x] 2026-02-21 20:33 +0800 验证通过：执行 `pnpm -C apps/web build` 成功，前端构建与类型检查通过。
-- [x] 2026-02-21 20:22 +0800 提示词原文整合：按源码实际来源聚合提示词，输出到 `/mnt/Files/codex/new/all-prompts-raw.md`，覆盖 `codex-rs/core/*.md` 提示词、`protocol/src/prompts/**/*.md`、`core/templates/**/*.md` 以及 `~/.codex/prompts/*.md`。
-- [x] 2026-02-21 20:22 +0800 内嵌提示词补齐：追加 `codex-rs/core/models.json` 中各模型 `base_instructions`、`model_messages.instructions_template` 与 personality 变量原文，避免仅靠外部 md 文件导致遗漏。
-- [x] 2026-02-21 20:19 +0800 真提示词定位完成：确认 Codex 真正内置提示词位于 `codex-rs/core/models.json`（各模型 `base_instructions` / `model_messages.instructions_template`）、`codex-rs/protocol/src/prompts/base_instructions/default.md`、`codex-rs/core/templates/collaboration_mode/{default,plan}.md`，并核对 `core/src/codex.rs` 的提示词装配顺序（base/developer/user instructions）。
-- [x] 2026-02-21 20:19 +0800 本机自定义提示词核对：确认当前用户自定义 prompts 位于 `~/.codex/prompts`，现有 `check-fix.md` 与 `refactor.md` 两份；`core/src/custom_prompts.rs` 显示仅加载该目录下 `.md` 文件并通过 `/prompts:<name>` 展开。
-- [x] 2026-02-21 20:17 +0800 Web 模型下拉去重：更新 `apps/web/src/main.ts`，新增 `buildComposerModelOptions` 与 `resolveComposerModelValue`，按真实模型（canonical）去重并优先保留别名项，确保同一模型只展示一个可选别名。
-- [x] 2026-02-21 20:17 +0800 验证通过：执行 `pnpm -C apps/web build` 成功，前端构建与类型检查通过。
-- [x] 2026-02-21 20:14 +0800 文档检索：已完成对 `/mnt/Files/codex/docs` 的提示词相关文档扫描，定位 `prompts.md`、`tui-chat-composer.md`、`exit-confirmation-prompt-design.md`、`config.md` 等关键文件。
-- [x] 2026-02-21 20:14 +0800 验证通过：执行 `ls/find/rg/sed` 读取与检索命令，确认 docs 目录内未内置完整自定义提示词正文，主要为说明文档与外链指引。
-- [x] 2026-02-21 20:14 +0800 Web 模型显示简化：更新 `apps/web/src/main.ts` 的 `formatComposerModelLabel` 与 `formatModelEntry`，模型下拉与条目仅显示可用模型名（优先 `model.id`），不再展示 `-> alias_of` 映射细节。
-- [x] 2026-02-21 20:14 +0800 验证通过：执行 `pnpm -C apps/web build` 成功，前端构建与类型检查通过。
-- [x] 2026-02-21 20:09 +0800 Web 设置通用化开关落地：在 `apps/web/src/index.html` 的 Display 设置区新增 `feature-prompt-context-introspect` 开关；`apps/web/src/main.ts` 新增 `applyPromptContextIntrospectOverride`，支持在设置页直接切换 `nextai.feature.prompt_context_introspect`（本地持久化 + 即时生效），并触发上下文 token 估算缓存失效重载。
-- [x] 2026-02-21 20:09 +0800 文案与回归补齐：更新 `apps/web/src/locales/{zh-CN,en-US}.ts` 新增开关标签/描述/状态提示；新增 e2e 用例 `apps/web/test/e2e/web-shell-tool-flow.test.ts` 覆盖“设置页切换 prompt context introspect”链路。
-- [x] 2026-02-21 20:09 +0800 验证通过：执行 `pnpm -C apps/web test -- test/e2e/web-shell-tool-flow.test.ts` 与 `pnpm -C apps/web build` 均通过。
-- [x] 2026-02-21 20:05 +0800 Web 模型区文案与交互纠偏：将 `apps/web/src/index.html` 可见标签恢复为“自定义模型配置（可选）”，并恢复按钮文案为“添加”；保持“模型管理”头部已移除。
-- [x] 2026-02-21 20:05 +0800 Web 模型区可编辑性修复：更新 `apps/web/src/main.ts` 的 `providerSupportsCustomModels/syncProviderCustomModelsField/populateProviderCustomModelsRows`，放开模型 ID 行编辑与新增按钮禁用限制，仍按原逻辑写入 `payload.model_aliases`。
-- [x] 2026-02-21 20:05 +0800 验证通过：执行 `pnpm -C apps/web build` 成功，前端构建与类型检查通过。
-- [x] 2026-02-21 19:59 +0800 Web 提供商编辑面板模型区简化：更新 `apps/web/src/index.html`，移除“模型管理”头部（管理/添加按钮），将原“自定义模型配置（可选）”改为 `model_aliases（可选）` 单列表输入，并隐藏原别名键值编辑区域。
-- [x] 2026-02-21 19:59 +0800 验证通过：执行 `pnpm -C apps/web build` 成功，前端构建与类型检查通过；`model_aliases` 仍沿用原有保存逻辑（写入 `payload.model_aliases`）。
-- [x] 2026-02-21 19:50 +0800 Web 模型管理文案修正：将 `apps/web/src/locales/zh-CN.ts` 的 `models.apiKeyMasked` 从“已脱敏”改为“已隐藏”，与界面展示语义一致。
-- [x] 2026-02-21 19:50 +0800 验证通过：执行 `pnpm -C apps/web build` 成功，前端编译与静态资源生成正常。
-- [x] 2026-02-21 19:48 +0800 Web 会话列表刷新闪动优化：移除 `apps/web/src/styles.css` 中 `.chat-list-item` 的 `list-in` 入场动画，并在 `apps/web/src/main.ts` 的 `renderChatList` 删除逐项 `animationDelay` 设置，避免刷新后整列会话再次触发入场动效造成“闪一下”观感。
-- [x] 2026-02-21 19:48 +0800 验证通过：执行 `pnpm -C apps/web build` 成功，TypeScript 编译与静态资源产物生成正常。
-- [x] 2026-02-21 16:25 +0800 阶段 4/5 SystemPrompt 收敛落地：新增 `apps/gateway/internal/service/systemprompt/{service,path_policy}.go` 与 `apps/gateway/internal/app/server_systemprompt_service.go`，将系统层构建、token 估算、路径规范化与 workspace root 解析下沉到 `systemprompt` service；`server_admin.go` 的 `buildSystemLayers`、`prependSystemLayers`、`summarizeLayerPreview`、`estimatePromptTokenCount` 改为委托 service。
-- [x] 2026-02-21 16:25 +0800 阶段 4/5 治理护栏与回归验证：新增 `apps/gateway/internal/app/architecture_guard_test.go`，限制已服务化 handler 直接访问 `store/channels/tools`；新增 `apps/gateway/internal/service/systemprompt/service_test.go` 覆盖 layer 构建与路径规范；执行 `cd apps/gateway && go test ./internal/app ./internal/service/systemprompt && go test ./...` 全部通过。
-- [x] 2026-02-21 16:21 +0800 阶段 3 Ports/Adapters 落地：新增 `apps/gateway/internal/service/ports/{agent,channel,state_store}.go` 与 `apps/gateway/internal/service/adapters/{agent_runtime,channel_resolver,repo_state_store}.go`，抽象 `StateStore/AgentRunner/ToolRuntime/ErrorMapper/ChannelResolver` 端口；`agent/cron/model/workspace` service 依赖统一切换到 ports；`apps/gateway/internal/app/server.go` 新增 `stateStore` 组合根注入，`server_*_service.go` wiring 改为通过 adapters 组装。
-- [x] 2026-02-21 16:21 +0800 阶段 3 单测与回归验证：执行 `cd apps/gateway && go test ./internal/service/agent ./internal/service/cron ./internal/service/model ./internal/service/workspace ./internal/app && go test ./...` 全部通过，行为语义保持兼容。
-- [x] 2026-02-21 16:05 +0800 阶段 2C Workspace/Model Service 落地：新增 `apps/gateway/internal/service/model/service.go`、`apps/gateway/internal/service/workspace/service.go` 及对应单测，将 provider/catalog/active-model 与 workspace files/import/export 编排下沉到 service；新增 `apps/gateway/internal/app/server_model_service.go`、`apps/gateway/internal/app/server_workspace_service.go` 完成 wiring，`apps/gateway/internal/app/server_admin.go` 收敛为 HTTP 协议适配与错误映射。
-- [x] 2026-02-21 16:05 +0800 阶段 2C 单测与回归验证：执行 `cd apps/gateway && go test ./internal/service/model ./internal/service/workspace ./internal/app && go test ./...` 全部通过，workspace/models 契约回归语义保持不变。
-- [x] 2026-02-21 15:49 +0800 阶段 2B Cron Service 落地：新增 `apps/gateway/internal/service/cron/service.go` 与 `apps/gateway/internal/service/cron/service_test.go`，将 Cron 的 CRUD、调度 tick、执行与 workflow 计划/状态变更下沉到 service；`apps/gateway/internal/app/server_cron.go` 收敛为 HTTP 协议适配与错误映射，`apps/gateway/internal/app/server.go` 的 `cronSchedulerTick` 改为调用 cron service。
-- [x] 2026-02-21 15:49 +0800 阶段 2B 单测与回归验证：执行 `cd apps/gateway && go test ./internal/service/cron && go test ./internal/app && go test ./...` 全部通过。
-- [x] 2026-02-21 15:24 +0800 阶段 2A Agent Service 落地：新增 `apps/gateway/internal/service/agent/service.go`，将 Agent 的 tool-call/LLM turn 循环编排、结构化事件产出与 runner/tool 错误映射下沉到 service；`apps/gateway/internal/app/server_agent.go` 的 `processAgentWithBody` 改为协议适配 + service 调用 + 持久化/分发收口。
-- [x] 2026-02-21 15:24 +0800 阶段 2A 单测与回归验证：新增 `apps/gateway/internal/service/agent/service_test.go` 覆盖 tool 分支、stream runner 分支与 runner 异常映射；执行 `cd apps/gateway && go test ./internal/service/agent && go test ./internal/app && go test ./...` 全部通过。
-- [x] 2026-02-21 15:16 +0800 阶段 1 Transport 拆分落地：新增 `apps/gateway/internal/app/http/router.go`、`apps/gateway/internal/app/http/agent_handlers.go`、`apps/gateway/internal/app/http/cron_handlers.go`、`apps/gateway/internal/app/http/admin_handlers.go`，统一承载路由注册与中间件装配；`apps/gateway/internal/app/server.go` 的 `Handler()` 改为纯 wiring 注入，不再内联路由声明。
-- [x] 2026-02-21 15:16 +0800 阶段 1 回归验证：执行 `cd apps/gateway && go test ./internal/app` 与 `cd apps/gateway && go test ./...` 均通过；`internal/app/http` 为 transport 层拆分，不改 API 契约与错误模型语义。
-- [x] 2026-02-21 14:55 +0800 阶段 0 护栏收口（成功响应结构快照 + 列表字段稳定性）：在 `apps/gateway/internal/app/contract_regression_test.go` 新增 `/chats`、`/cron/jobs`、`/workspace/files`、`/models/catalog` 列表响应结构稳定性回归，固定关键字段集合与核心嵌套结构；同时新增成功响应结构快照回归（创建 Cron、更新 Workspace env、删除 Provider）。
-- [x] 2026-02-21 14:55 +0800 阶段 0 回归再验证：执行 `cd apps/gateway && go test ./internal/app` 与 `cd apps/gateway && go test ./...` 均通过，新增成功响应快照与列表字段稳定性测试与现有用例兼容。
-- [x] 2026-02-21 14:51 +0800 阶段 0 护栏扩展（cron/workspace/models 契约回归集）：在 `apps/gateway/internal/app/contract_regression_test.go` 新增三组统一接口错误契约表驱动测试，覆盖 `cron`（`invalid_json/invalid_cron_task_type/job_id_mismatch/not_found/default_cron_protected`）、`workspace`（`invalid_path/not_found/invalid_json/invalid_model_slot/provider_not_found/method_not_allowed/invalid_import_mode`）、`models`（`invalid_json/invalid_provider_config/invalid_model_slot/provider_not_found/provider_disabled/model_not_found`）状态码与错误模型快照。
-- [x] 2026-02-21 14:51 +0800 阶段 0 验证通过：执行 `cd apps/gateway && go test ./internal/app` 与 `cd apps/gateway && go test ./...` 均通过，新增回归集与既有测试兼容。
-- [x] 2026-02-21 14:47 +0800 阶段 0 测试护栏首批落地：新增 `apps/gateway/internal/app/contract_regression_test.go`，补充 `mapRunnerError`、`mapChannelError`、`mapToolError` 三组表驱动快照测试，固定 `status/code/message` 映射语义，防止后续重构行为漂移。
-- [x] 2026-02-21 14:47 +0800 黑盒回归补齐：新增 `/agent/process` 流式事件顺序回归（`step_started -> tool_call -> tool_result -> assistant_delta -> completed -> [DONE]`）与 `provider_invalid_reply` 映射回归（模拟 provider 空内容返回，断言 `502 + provider_invalid_reply`）；验证通过 `cd apps/gateway && go test ./internal/app` 与 `cd apps/gateway && go test ./...`。
-- [x] 2026-02-21 14:41 +0800 交接计划文档完善：`docs/gateway-architecture-refactor-plan.md` 从方向性草案升级为可执行版本，新增“阶段 0 详细落地清单”“每阶段输入/输出定义”“PR 执行模板”“推进看板”，可直接作为后续分阶段实施与交接依据。
-- [x] 2026-02-21 14:41 +0800 文档一致性校验：已核对计划文档与仓库约束（v1 范围、契约不变、小步 PR、测试护栏优先）一致，且执行顺序保持“阶段 0 -> 阶段 5”不变。
-- [x] 2026-02-21 14:36 +0800 架构级重构计划文档落地：新增 `docs/gateway-architecture-refactor-plan.md`，针对本轮 `server.go` 文件级拆分后遗留耦合，给出分层目标架构（transport/service/ports-adapters）与分阶段迁移方案。
-- [x] 2026-02-21 14:36 +0800 计划内容已包含：阶段拆分（0-5）、PR 切分策略、测试矩阵、DoD 验收标准、风险与回滚策略，可直接作为后续实施蓝图。
-- [x] 2026-02-21 14:31 +0800 Gateway `server.go` 最小风险拆分落地：按职责将 `apps/gateway/internal/app/server.go` 的大块逻辑迁移到 `server_agent.go`（Agent/Tool/QQ 解析）、`server_cron.go`（Cron 调度与执行）、`server_admin.go`（Models/Skills/Workspace/错误映射与系统层），保留同包同函数签名，业务行为不改。
-- [x] 2026-02-21 14:31 +0800 验证通过：执行 `cd apps/gateway && go test ./internal/app` 与 `cd apps/gateway && go test ./...` 均通过。
-- [x] 2026-02-21 14:17 +0800 Gateway 运行时配置接口落地：`apps/gateway/internal/app/server.go` 新增公开 `GET /runtime-config`（位于 APIKey 中间件外），返回 `features.prompt_templates` 与 `features.prompt_context_introspect`，分别映射 `s.cfg.EnablePromptTemplates` / `s.cfg.EnablePromptContextIntrospect`；新增 `TestRuntimeConfigEndpointReflectsFeatureFlags` 与 `TestRuntimeConfigEndpointBypassesAPIKeyAuth` 回归覆盖。
+## 6. 近期完成项（摘要）
+
+### 2026-02-22
+- Gateway 启动入口增强：`apps/gateway/cmd/gateway/main.go` 新增 HTTP 运行时超时参数（`READ_HEADER/READ/WRITE/IDLE/SHUTDOWN`）与 `SIGINT/SIGTERM` 优雅停机流程；超时后执行强制关闭并输出降级日志，确保“重启不中断在途请求（超时可控降级）”。
+- Gateway 回归补测：新增 `apps/gateway/cmd/gateway/main_test.go`，覆盖超时配置默认值/环境变量解析、优雅停机等待在途请求、超时后强制关闭三类场景。
+- 默认日志脱敏：`apps/gateway/internal/channel/channel.go` 不再打印控制台消息明文，改为仅记录字符数；新增 `apps/gateway/internal/channel/channel_test.go` 防回归，验证日志不包含原始文本。
+- 文档修复与补齐：`docs/contracts.md` 全面修复乱码并重写为 UTF-8 正文，新增“用户错误排查手册”（连不上网关、401、模型不可用、提示词不可用、重启中断）与“新人 30 分钟首轮对话清单”。
+- 统一回归入口落地：根 `package.json` 新增 `test:go/test:ts/test:contract/test:smoke/test:all`，`test:all` 串联 Go + TS + contract + smoke；`docs/development.md` 与 `README.md` 同步使用方式。
+- 验证通过：执行 `pnpm run test:all` 全链路通过（Go/TS/contract 全绿，smoke 5 通过 + 1 nightly live 用例按设计 skip）。
+- Gateway 新增 `prompt_mode=claude`：`apps/gateway/internal/app/server.go`、`apps/gateway/internal/app/server_admin.go`、`apps/gateway/internal/app/server_agent.go` 增加 Claude 系统层编排、`claude_v1` 变体与 `claude_prompt_unavailable` 错误语义，并保持 `default/codex` 兼容。
+- Claude 提示词落地：新增 `prompts/claude/main.md`、`prompts/claude/doing-tasks.md`、`prompts/claude/executing-actions-with-care.md`、`prompts/claude/tool-usage-policy.md`、`prompts/claude/tone-and-style.md`，作为 Claude 模式的可注入层。
+- Web 聊天提示词模式改为三态：`apps/web/src/index.html` 将头部开关改为下拉选择（`default/codex/claude`），`apps/web/src/main.ts` 同步请求参数与会话态，`apps/web/src/locales/zh-CN.ts`、`apps/web/src/locales/en-US.ts` 新增 Claude 模式文案，`apps/web/src/styles.css` 补齐下拉样式。
+- 文档与工具指南同步：`docs/contracts.md` 的 prompt_mode 枚举与 mode_variant 扩展到 `claude`/`claude_v1`，`prompts/ai-tools.md` 增补 Claude 模式兼容说明。
+- 回归补测：`apps/gateway/internal/app/server_test.go` 新增 Claude 模式 introspect、会话持久化复用与缺失提示词错误测试；`apps/web/test/e2e/web-shell-tool-flow.test.ts` 的提示词模式切换用例扩展覆盖 `claude`。
+- 验证通过：`cd apps/gateway && go test ./internal/app`、`pnpm -C apps/web exec vitest run test/e2e/web-shell-tool-flow.test.ts`（28/28）、`pnpm -C apps/web build`。
+- Web 聊天输入框新增 slash 命令面板：`apps/web/src/index.html` 在 `composer-main` 内增加 `composer-slash-panel`，输入以 `/` 开头时展开命令列表，支持无结果空态展示。
+- Web slash 面板交互落地：`apps/web/src/main.ts` 新增命令筛选与状态控制，支持 ↑/↓/Tab 切换、Enter 回填命令、Esc/点击外部关闭；回填后不触发发送。
+- Web slash 面板样式与文案补齐：`apps/web/src/styles.css` 新增面板视觉样式；`apps/web/src/locales/zh-CN.ts` 与 `apps/web/src/locales/en-US.ts` 增加 slash 面板与命令文案键。
+- Web e2e 补测：`apps/web/test/e2e/web-active-model-chat-flow.test.ts` 新增“输入 / 会展开 slash 面板并支持键盘选择命令”用例。
+- 验证通过：`pnpm -C apps/web exec vitest run test/e2e/web-active-model-chat-flow.test.ts`（17/17）与 `pnpm -C apps/web build` 通过。
+- Gateway 新增真实附件上传接口：`POST /workspace/uploads`（`multipart/form-data`），文件保存到 `DataDir/uploads/`，返回可直接给 `view/open` 使用的绝对路径；补充文件名清洗与 20MiB 大小限制，错误继续走统一错误模型。
+- Gateway 回归补测：`apps/gateway/internal/app/server_test.go` 新增上传成功与缺失 `file` 字段两条测试，验证上传落盘、返回绝对路径与 `invalid_multipart` 错误码。
+- Web 加号上传改为真上传：`apps/web/src/main.ts` 的 `composer-attach`/拖拽流程改为先调用 `/workspace/uploads`，再写入 `@返回路径`；`apps/web/test/e2e/web-active-model-chat-flow.test.ts` 对应改为断言上传请求与回填路径。
+- Web 文案同步：`apps/web/src/locales/zh-CN.ts`、`apps/web/src/locales/en-US.ts` 的 `status.composerAttachmentsAdded` 更新为“已上传并添加/Uploaded and added”。
+- 契约清单补充：`docs/contracts.md` API 列表新增 `/workspace/uploads`。
+- 验证通过：`cd apps/gateway && go test ./internal/app`、`pnpm -C apps/web exec vitest run test/e2e/web-active-model-chat-flow.test.ts`、`pnpm -C apps/web build`。
+- Web Models 提供商编辑区移除 API 测试按钮：`apps/web/src/index.html` 删除 `models-provider-test-btn`，并同步删除 `apps/web/src/locales/zh-CN.ts` 与 `apps/web/src/locales/en-US.ts` 的 `models.testProvider`、`status.providerTestNotImplemented` 文案键。
+- Web 验证通过：`pnpm -C apps/web build` 通过。
+- Web 聊天发送初始态去掉助手 `...` 占位：`apps/web/src/main.ts` 在 `renderMessageNode` 移除空助手消息省略号渲染，并在 `renderMessages` 跳过“无文本/无工具事件”的空助手消息，首个输出到达前不再显示三点加载占位。
+- Web e2e 补测：`apps/web/test/e2e/web-shell-tool-flow.test.ts` 在“流式回复期间显示思考动画，完成后隐藏”用例新增断言，发送初始态不再出现 `...` 占位。
+- Web 定向验证通过：`pnpm -C apps/web exec vitest run test/e2e/web-shell-tool-flow.test.ts -t "流式回复期间显示思考动画，完成后隐藏"`、`pnpm -C apps/web exec vitest run test/e2e/web-active-model-chat-flow.test.ts -t "shows request error in assistant bubble instead of ellipsis when request fails"` 与 `pnpm -C apps/web build` 通过。
+- Web 输入框文件拖拽支持：`apps/web/src/main.ts` 在 composer 输入区新增 `dragenter/dragover/dragleave/drop` 监听，拖拽文件松手后优先解析 `text/uri-list`/`text/plain` 的本地路径（含 `file://`），可插入 `@完整文件路径`；拿不到路径时回退 `@文件名`。
+- Web 输入区拖拽态样式：`apps/web/src/index.html` 为输入区容器补 `id="composer-main"`；`apps/web/src/styles.css` 新增 `is-file-drag-over` 高亮样式，拖拽文件经过输入区时有可见反馈。
+- Web e2e 补测：`apps/web/test/e2e/web-active-model-chat-flow.test.ts` 新增“拖拽文件到输入区后追加 @完整文件路径”用例。
+- Web 验证通过：`pnpm -C apps/web exec vitest run test/e2e/web-active-model-chat-flow.test.ts`（16/16）与 `pnpm -C apps/web build` 通过。
+- Web 聊天思考态动画：`apps/web/src/index.html` 新增 `thinking-indicator` 节点；`apps/web/src/main.ts` 将显隐绑定到 `sendMessage`/`streamReply` 生命周期（开始发送即显示，流式结束或报错立即隐藏）。
+- Web 思考态位置调整：`apps/web/src/main.ts` 新增 `syncThinkingIndicatorPosition()`，思考提示插入 `#message-list` 末尾，显示在对话最后一条指令下方，不再固定在输入框上方。
+- Web 思考态隐藏时机调整：`apps/web/src/main.ts` 在首个 `assistant_delta` 到达时立即隐藏思考提示（不等到 `[DONE]`）。
+- Web 思考态样式收敛：`apps/web/src/styles.css` 去掉底座气泡、边框、阴影与圆点，仅保留“正在思考”文字和白色扫光动画。
+- Web 视觉效果补齐：`apps/web/src/styles.css` 新增“白色光芒从左到右循环扫过”的 `thinking-sweep` 动画，并支持 `prefers-reduced-motion` 降级。
+- Web 文案补齐：`apps/web/src/locales/zh-CN.ts` 与 `apps/web/src/locales/en-US.ts` 新增 `chat.thinking`。
+- Web e2e 补测：`apps/web/test/e2e/web-shell-tool-flow.test.ts` 新增“流式回复期间显示思考动画，完成后隐藏”，并断言思考提示位于 `#message-list` 中。
+- Web 验证通过：`pnpm -C apps/web lint`、`pnpm -C apps/web test`、`pnpm -C apps/web build`。
+- Web Shell 工具调用摘要收敛：`apps/web/src/main.ts` 在生成 `chat.toolCallShellCommand` 时，若命令内容为多行（包含换行），统一展示为 `执行命令：...`，避免在聊天区展开超长 heredoc/脚本体
+- Web 回归补测：`apps/web/test/e2e/web-shell-tool-flow.test.ts` 新增“多行 shell 命令摘要只显示省略号”用例；`pnpm -C apps/web exec vitest run test/e2e/web-shell-tool-flow.test.ts`（27/27）与 `pnpm -C apps/web build` 通过
+- Web 历史工具卡片兜底修复：`apps/web/src/main.ts` 在回放 `tool_call_notices` 时，若仅有 `tool_call` 且助手正文已存在，则详情改显示“暂无执行输出”，避免刷新后误导为“等待执行输出...”
+- Web 回归补测：`apps/web/test/e2e/web-shell-tool-flow.test.ts` 新增“历史回放仅有 tool_call 且助手正文存在时显示暂无执行输出”用例；`pnpm -C apps/web exec vitest run test/e2e/web-shell-tool-flow.test.ts`（26/26）与 `pnpm -C apps/web build` 通过
+- Web 工具调用交互补充：保留外露摘要，右侧 hover/focus 显示小三角，点击三角在下方展开 bash 结果块
+- Web 工具调用展示改造：移除 `details` 卡片形态，工具调用改为聊天区外露文字提示（保留时间线顺序与摘要文案）
+- Web 回归通过：`pnpm -C apps/web exec vitest run test/e2e/web-shell-tool-flow.test.ts`（25/25）与 `pnpm -C apps/web build`
+- Web Markdown 增强：表格边框、空格对齐表格解析、内联代码占位符修复
+- Web 工具调用：view 卡片去重、单行可展开样式、摘要动作句式
+- Gateway 历史工具卡片持久化修复：`tool_call_notices` 优先落 `tool_result`（同 step+tool 覆盖 `tool_call`），历史回放可直接展示 `view` 文件内容摘要
+- Gateway 回归：`TestProcessAgentPersistsToolCallNoticesInHistory` 改为断言持久化 `tool_result`；`go test ./internal/app` 与 `go test ./...` 通过
+- Gateway：provider 工具入参兼容扩展到 default 模式、Codex A 档路由（open/find/click/screenshot）
+- 提示词：AGENTS.md/ai-tools.md 精简、codex 模板集成（base + 可选模板叠加）
+- 架构：server.go 拆分（agent/cron/admin）、service 层抽取、ports/adapters
+
+### 2026-02-21
+- Web：codex 提示词目录树、配置文件卡片启用/禁用、模型下拉去重
+- Gateway：runtime-config 接口、systemprompt service、架构重构计划
+- 提示词：codex 目录迁移（38 份）、模板解读
+
+## 7. 待办 / 风险
+- e2e 用例 `按输出顺序渲染：文本和工具调用交错时保持时间线顺序` 存在超时不稳定
 - [x] 2026-02-21 14:17 +0800 Web 运行时 flag 接入：`apps/web/src/main.ts` 在 `bootstrap()` 早期拉取 `/runtime-config` 并缓存为 `runtimeFlags`，`expandPromptTemplateIfNeeded` 与 `loadSystemPromptTokens` 改为读取运行时开关；覆盖优先级实现为 `query > localStorage > runtime-config > false`。
 - [x] 2026-02-21 14:17 +0800 验证通过：执行 `cd apps/gateway && go test ./internal/app -run "TestRuntimeConfigEndpointReflectsFeatureFlags|TestRuntimeConfigEndpointBypassesAPIKeyAuth|TestAPIKeyAuthMiddleware|TestHealthz"` 与 `pnpm -C apps/web build` 均通过。
 - [x] 2026-02-21 13:23 +0800 Web 站点图标替换：在 `apps/web/src/index.html` 明确配置 NextAI 自定义 favicon（`rel="icon"` + `rel="apple-touch-icon"`），覆盖浏览器默认/缓存导致的“外部产品风格图标”显示。
