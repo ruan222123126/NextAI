@@ -136,6 +136,7 @@
 - Gateway adds a structured `environment_context` as an independent `system` layer when feature flag is enabled.
 - New read-only endpoint:
   - `GET /agent/system-layers`
+  - 可选 query：`prompt_mode=default|codex`（默认 `default`）
   - Purpose: return effective injected layers and token estimate used for this runtime.
 
 Sample response:
@@ -143,12 +144,14 @@ Sample response:
 ```json
 {
   "version": "v1",
+  "mode_variant": "default",
   "layers": [
     {
       "name": "base_system",
       "role": "system",
-      "source": "docs/AI/AGENTS.md",
-      "content_preview": "## docs/AI/AGENTS.md ...",
+      "source": "prompts/AGENTS.md",
+      "content_preview": "## prompts/AGENTS.md ...",
+      "layer_hash": "9f2d4d...",
       "estimated_tokens": 12
     }
   ],
@@ -158,10 +161,14 @@ Sample response:
 
 - Error model remains unchanged:
   - `{ "error": { "code": "...", "message": "...", "details": ... } }`
+- 若 `prompt_mode` 非法，返回：
+  - `400 invalid_request`
+  - `message=invalid prompt_mode`
 
 ### Feature flags
 - `NEXTAI_ENABLE_PROMPT_TEMPLATES` (default: `false`).
 - `NEXTAI_ENABLE_PROMPT_CONTEXT_INTROSPECT` (default: `false`).
+- `NEXTAI_ENABLE_CODEX_MODE_V2` (default: `false`).
 
 ## Runtime Config Endpoint (2026-02)
 - Gateway 提供公开只读接口（不含敏感信息）：`GET /runtime-config`。
@@ -171,7 +178,8 @@ Sample response:
 {
   "features": {
     "prompt_templates": false,
-    "prompt_context_introspect": false
+    "prompt_context_introspect": false,
+    "codex_mode_v2": false
   }
 }
 ```
@@ -179,6 +187,7 @@ Sample response:
 - 字段来源：
   - `features.prompt_templates` <- `NEXTAI_ENABLE_PROMPT_TEMPLATES`
   - `features.prompt_context_introspect` <- `NEXTAI_ENABLE_PROMPT_CONTEXT_INTROSPECT`
+  - `features.codex_mode_v2` <- `NEXTAI_ENABLE_CODEX_MODE_V2`
 - Web 侧特性开关优先级：`query > localStorage > runtime-config > false`。
 
 ## Prompt Mode（会话级，2026-02）
@@ -200,11 +209,36 @@ Sample response:
 - `prompt_mode=default`：
   - 维持原行为（`AGENTS + ai-tools` 分层注入）。
 - `prompt_mode=codex`：
-  - 仅注入 `prompts/codex/codex-rs/core/prompt.md`。
-  - 不再叠加默认 `AGENTS/ai-tools` 系统层。
+  - 必选注入 `prompts/codex/codex-rs/core/prompt.md`（codex base）。
+  - 当 `NEXTAI_ENABLE_CODEX_MODE_V2=false`（`mode_variant=codex_v1`）：
+    - 维持原行为；仅当 `NEXTAI_ENABLE_PROMPT_TEMPLATES=true` 时追加 codex 模板层。
+  - 当 `NEXTAI_ENABLE_CODEX_MODE_V2=true`（`mode_variant=codex_v2`）：
+    - 按确定性顺序尝试注入：
+      1. `codex_base_system`（必选）
+      2. `codex_orchestrator_system`（可选）
+      3. `codex_model_instructions_system`（可选，模板渲染）
+      4. `codex_collaboration_default_system`（可选，模板渲染）
+      5. `codex_experimental_collab_system`（可选）
+      6. `codex_local_policy_system`（可选，`prompts/AGENTS.md`）
+      7. `codex_tool_guide_system`（可选，`prompts/ai-tools.md` + legacy fallback）
+    - 模板变量标准化来源：
+      - `personality` <- `prompts/codex/codex-rs/core/templates/personalities/gpt-5.2-codex_pragmatic.md`
+      - `KNOWN_MODE_NAMES` <- 当前支持模式名拼接（非硬编码）
+      - `REQUEST_USER_INPUT_AVAILABILITY` <- 基于 mode 能力生成
+    - V2 在编排末尾执行内容归一化去重（优先级：codex 核心层 > 本地策略层 > 工具层）。
+  - 两个变体都不叠加 default 模式的系统层。
+
+### 可观测字段
+- `GET /agent/system-layers` 保持原结构兼容，并新增可选字段：
+  - 顶层 `mode_variant`: `default` | `codex_v1` | `codex_v2`
+  - `layers[].layer_hash`: 每层归一化内容 hash（用于漂移排查）
 
 ### 错误语义
 - `prompt_mode=codex` 且 codex base 文件缺失或为空时返回：
   - `500 codex_prompt_unavailable`
   - `message=codex prompt is unavailable`
 - `prompt_mode=default` 继续沿用既有系统层错误语义（如 `ai_tool_guide_unavailable`）。
+- V2 可选层（local policy/tool guide/模板层）缺失或渲染失败仅 warning + 跳过，不阻塞主请求。
+
+### 回滚语义
+- 关闭 `NEXTAI_ENABLE_CODEX_MODE_V2` 可立即回退到 `codex_v1` 行为，无需变更前端协议。

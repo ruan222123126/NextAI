@@ -1,10 +1,12 @@
 package app
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"os"
@@ -1339,23 +1341,238 @@ func (s *Server) buildSystemLayersForMode(mode string) ([]systemPromptLayer, err
 		return nil, fmt.Errorf("invalid prompt mode: %s", mode)
 	}
 	if normalizedMode == promptModeCodex {
-		source, content, err := loadRequiredSystemLayer([]string{codexBasePromptRelativePath})
-		if err != nil {
-			return nil, err
+		if s.cfg.EnableCodexModeV2 {
+			return s.buildCodexSystemLayersV2()
 		}
-		return []systemPromptLayer{
-			{
-				Name:    "codex_base_system",
-				Role:    "system",
-				Source:  source,
-				Content: systempromptservice.FormatLayerSourceContent(source, content),
-			},
-		}, nil
+		return s.buildCodexSystemLayers()
 	}
 	return s.getSystemPromptService().BuildLayers(
 		[]string{aiToolsGuideRelativePath},
-		[]string{aiToolsGuideLegacyRelativePath, aiToolsGuideLegacyV0RelativePath},
+		[]string{
+			aiToolsGuideLegacyRelativePath,
+			aiToolsGuideLegacyV0RelativePath,
+			aiToolsGuideLegacyV1RelativePath,
+			aiToolsGuideLegacyV2RelativePath,
+		},
 	)
+}
+
+func (s *Server) buildCodexSystemLayersV2() ([]systemPromptLayer, error) {
+	source, content, err := loadRequiredSystemLayer([]string{codexBasePromptRelativePath})
+	if err != nil {
+		return nil, err
+	}
+
+	layers := []systemPromptLayer{
+		{
+			Name:    "codex_base_system",
+			Role:    "system",
+			Source:  source,
+			Content: systempromptservice.FormatLayerSourceContent(source, content),
+		},
+	}
+
+	templateVars, err := buildCodexTemplateVars()
+	if err != nil {
+		return nil, err
+	}
+	if layers, err = appendCodexOptionalLayer(layers, "codex_orchestrator_system", codexOrchestratorRelativePath, nil); err != nil {
+		return nil, err
+	}
+	if layers, err = appendCodexOptionalTemplateLayer(
+		layers,
+		"codex_model_instructions_system",
+		codexModelTemplateRelativePath,
+		templateVars,
+		[]string{"personality"},
+	); err != nil {
+		return nil, err
+	}
+	if layers, err = appendCodexOptionalTemplateLayer(
+		layers,
+		"codex_collaboration_default_system",
+		codexCollabDefaultRelativePath,
+		templateVars,
+		[]string{"KNOWN_MODE_NAMES", "REQUEST_USER_INPUT_AVAILABILITY"},
+	); err != nil {
+		return nil, err
+	}
+	if layers, err = appendCodexOptionalLayer(layers, "codex_experimental_collab_system", codexExperimentalRelativePath, nil); err != nil {
+		return nil, err
+	}
+	if layers, err = appendCodexOptionalLayer(layers, "codex_local_policy_system", codexLocalPolicyRelativePath, nil); err != nil {
+		return nil, err
+	}
+	if layers, err = appendCodexOptionalLayerFromCandidates(
+		layers,
+		"codex_tool_guide_system",
+		[]string{
+			codexToolGuideRelativePath,
+			aiToolsGuideLegacyV1RelativePath,
+			aiToolsGuideLegacyV2RelativePath,
+		},
+		nil,
+	); err != nil {
+		return nil, err
+	}
+
+	return dedupeLayersByNormalizedContent(layers), nil
+}
+
+func buildCodexTemplateVars() (map[string]string, error) {
+	vars := map[string]string{
+		"KNOWN_MODE_NAMES":                knownCollaborationModeNames(),
+		"REQUEST_USER_INPUT_AVAILABILITY": requestUserInputAvailability(collaborationModeDefaultName),
+	}
+	_, personality, personalityOK, err := loadOptionalSystemLayer(codexPersonalityRelativePath)
+	if err != nil {
+		return nil, err
+	}
+	if personalityOK {
+		vars["personality"] = personality
+	}
+	return vars, nil
+}
+
+func (s *Server) buildCodexSystemLayers() ([]systemPromptLayer, error) {
+	source, content, err := loadRequiredSystemLayer([]string{codexBasePromptRelativePath})
+	if err != nil {
+		return nil, err
+	}
+
+	layers := []systemPromptLayer{
+		{
+			Name:    "codex_base_system",
+			Role:    "system",
+			Source:  source,
+			Content: systempromptservice.FormatLayerSourceContent(source, content),
+		},
+	}
+	if !s.cfg.EnablePromptTemplates {
+		return layers, nil
+	}
+
+	_, personality, personalityOK, err := loadOptionalSystemLayer(codexPersonalityRelativePath)
+	if err != nil {
+		return nil, err
+	}
+	if layers, err = appendCodexOptionalLayer(layers, "codex_orchestrator_system", codexOrchestratorRelativePath, nil); err != nil {
+		return nil, err
+	}
+	if layers, err = appendCodexOptionalLayer(layers, "codex_model_instructions_system", codexModelTemplateRelativePath, func(raw string) string {
+		if !personalityOK {
+			return raw
+		}
+		return replaceTemplateVariable(raw, "personality", personality)
+	}); err != nil {
+		return nil, err
+	}
+	if layers, err = appendCodexOptionalLayer(layers, "codex_collaboration_default_system", codexCollabDefaultRelativePath, renderCodexCollaborationDefaultTemplate); err != nil {
+		return nil, err
+	}
+	if layers, err = appendCodexOptionalLayer(layers, "codex_experimental_collab_system", codexExperimentalRelativePath, nil); err != nil {
+		return nil, err
+	}
+	return layers, nil
+}
+
+func appendCodexOptionalLayer(
+	layers []systemPromptLayer,
+	layerName string,
+	path string,
+	render func(string) string,
+) ([]systemPromptLayer, error) {
+	source, content, ok, err := loadOptionalSystemLayer(path)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return layers, nil
+	}
+	if render != nil {
+		content = strings.TrimSpace(render(content))
+		if content == "" {
+			return layers, nil
+		}
+	}
+	return append(layers, systemPromptLayer{
+		Name:    layerName,
+		Role:    "system",
+		Source:  source,
+		Content: systempromptservice.FormatLayerSourceContent(source, content),
+	}), nil
+}
+
+func appendCodexOptionalLayerFromCandidates(
+	layers []systemPromptLayer,
+	layerName string,
+	candidatePaths []string,
+	render func(string) string,
+) ([]systemPromptLayer, error) {
+	source, content, ok, err := loadOptionalSystemLayerFromCandidates(candidatePaths)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return layers, nil
+	}
+	if render != nil {
+		content = strings.TrimSpace(render(content))
+		if content == "" {
+			return layers, nil
+		}
+	}
+	return append(layers, systemPromptLayer{
+		Name:    layerName,
+		Role:    "system",
+		Source:  source,
+		Content: systempromptservice.FormatLayerSourceContent(source, content),
+	}), nil
+}
+
+func appendCodexOptionalTemplateLayer(
+	layers []systemPromptLayer,
+	layerName string,
+	path string,
+	vars map[string]string,
+	requiredKeys []string,
+) ([]systemPromptLayer, error) {
+	source, content, ok, err := loadOptionalSystemLayer(path)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return layers, nil
+	}
+
+	missingKeys := make([]string, 0, len(requiredKeys))
+	for _, key := range requiredKeys {
+		if strings.TrimSpace(vars[key]) == "" {
+			missingKeys = append(missingKeys, key)
+		}
+	}
+	if len(missingKeys) > 0 {
+		log.Printf("warning: skip codex layer %s due to missing template vars: %s", layerName, strings.Join(missingKeys, ", "))
+		return layers, nil
+	}
+
+	rendered := strings.TrimSpace(renderTemplate(content, vars))
+	if rendered == "" {
+		return layers, nil
+	}
+	for _, key := range requiredKeys {
+		if hasTemplatePlaceholder(rendered, key) {
+			log.Printf("warning: skip codex layer %s due to unresolved template var: %s", layerName, key)
+			return layers, nil
+		}
+	}
+
+	return append(layers, systemPromptLayer{
+		Name:    layerName,
+		Role:    "system",
+		Source:  source,
+		Content: systempromptservice.FormatLayerSourceContent(source, rendered),
+	}), nil
 }
 
 func loadRequiredSystemLayer(candidatePaths []string) (string, string, error) {
@@ -1379,6 +1596,195 @@ func loadRequiredSystemLayer(candidatePaths []string) (string, string, error) {
 		return "", "", lastNotFound
 	}
 	return "", "", fmt.Errorf("%w: no candidate paths configured", os.ErrNotExist)
+}
+
+func loadOptionalSystemLayer(path string) (string, string, bool, error) {
+	source, rawContent, err := readWorkspaceTextFileRawForPath(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return "", "", false, nil
+		}
+		return "", "", false, err
+	}
+	trimmed := strings.TrimSpace(rawContent)
+	if trimmed == "" {
+		return "", "", false, nil
+	}
+	return source, trimmed, true, nil
+}
+
+func loadOptionalSystemLayerFromCandidates(candidatePaths []string) (string, string, bool, error) {
+	for _, candidatePath := range candidatePaths {
+		source, content, ok, err := loadOptionalSystemLayer(candidatePath)
+		if err != nil {
+			return "", "", false, err
+		}
+		if ok {
+			return source, content, true, nil
+		}
+	}
+	return "", "", false, nil
+}
+
+func replaceTemplateVariable(content, key, value string) string {
+	replacer := strings.NewReplacer(
+		"{{"+key+"}}", value,
+		"{{ "+key+" }}", value,
+	)
+	return replacer.Replace(content)
+}
+
+func renderTemplate(content string, vars map[string]string) string {
+	if len(vars) == 0 {
+		return content
+	}
+	keys := make([]string, 0, len(vars))
+	for key := range vars {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	replacements := make([]string, 0, len(keys)*4)
+	for _, key := range keys {
+		value := vars[key]
+		replacements = append(
+			replacements,
+			"{{"+key+"}}", value,
+			"{{ "+key+" }}", value,
+		)
+	}
+	return strings.NewReplacer(replacements...).Replace(content)
+}
+
+func hasTemplatePlaceholder(content, key string) bool {
+	return strings.Contains(content, "{{"+key+"}}") || strings.Contains(content, "{{ "+key+" }}")
+}
+
+func renderCodexCollaborationDefaultTemplate(content string) string {
+	return renderTemplate(content, map[string]string{
+		"KNOWN_MODE_NAMES":                knownCollaborationModeNames(),
+		"REQUEST_USER_INPUT_AVAILABILITY": requestUserInputAvailability(collaborationModeDefaultName),
+	})
+}
+
+func knownCollaborationModeNames() string {
+	names := supportedCollaborationModeNames()
+	switch len(names) {
+	case 0:
+		return ""
+	case 1:
+		return names[0]
+	case 2:
+		return names[0] + " and " + names[1]
+	default:
+		return strings.Join(names[:len(names)-1], ", ") + ", and " + names[len(names)-1]
+	}
+}
+
+func supportedCollaborationModeNames() []string {
+	return []string{
+		collaborationModeDefaultName,
+		collaborationModePlanName,
+	}
+}
+
+func requestUserInputAvailability(modeName string) string {
+	switch strings.TrimSpace(modeName) {
+	case collaborationModePlanName:
+		return "The `request_user_input` tool is available in Plan mode."
+	case collaborationModeDefaultName:
+		fallthrough
+	default:
+		return "The `request_user_input` tool is unavailable in Default mode. If you call it while in Default mode, it will return an error."
+	}
+}
+
+func dedupeLayersByNormalizedContent(layers []systemPromptLayer) []systemPromptLayer {
+	if len(layers) <= 1 {
+		return layers
+	}
+	deduped := make([]systemPromptLayer, 0, len(layers))
+	indexByHash := map[string]int{}
+	priorityByHash := map[string]int{}
+	for _, layer := range layers {
+		normalized := normalizeLayerContentForDedupe(layer.Content)
+		if normalized == "" {
+			deduped = append(deduped, layer)
+			continue
+		}
+		hash := hashNormalizedLayerContent(normalized)
+		priority := codexLayerPriority(layer.Name)
+		if index, exists := indexByHash[hash]; exists {
+			if priority > priorityByHash[hash] {
+				deduped[index] = layer
+				priorityByHash[hash] = priority
+			}
+			continue
+		}
+		indexByHash[hash] = len(deduped)
+		priorityByHash[hash] = priority
+		deduped = append(deduped, layer)
+	}
+	return deduped
+}
+
+func codexLayerPriority(layerName string) int {
+	switch layerName {
+	case "codex_base_system",
+		"codex_orchestrator_system",
+		"codex_model_instructions_system",
+		"codex_collaboration_default_system",
+		"codex_experimental_collab_system":
+		return 300
+	case "codex_local_policy_system":
+		return 200
+	case "codex_tool_guide_system":
+		return 100
+	default:
+		return 0
+	}
+}
+
+func normalizeLayerContent(content string) string {
+	normalized := strings.ReplaceAll(content, "\r\n", "\n")
+	normalized = strings.ReplaceAll(normalized, "\r", "\n")
+	return strings.TrimSpace(normalized)
+}
+
+func normalizeLayerContentForDedupe(content string) string {
+	normalized := normalizeLayerContent(content)
+	if normalized == "" {
+		return ""
+	}
+	if strings.HasPrefix(normalized, "## ") {
+		if split := strings.Index(normalized, "\n"); split >= 0 {
+			normalized = strings.TrimSpace(normalized[split+1:])
+		}
+	}
+	return normalizeLayerContent(normalized)
+}
+
+func hashNormalizedLayerContent(normalized string) string {
+	sum := sha256.Sum256([]byte(normalized))
+	return fmt.Sprintf("%x", sum[:])
+}
+
+func normalizedLayerContentHash(content string) string {
+	normalized := normalizeLayerContent(content)
+	if normalized == "" {
+		return ""
+	}
+	return hashNormalizedLayerContent(normalized)
+}
+
+func (s *Server) resolvePromptModeVariant(mode string) string {
+	normalizedMode, ok := normalizePromptMode(mode)
+	if !ok || normalizedMode == promptModeDefault {
+		return promptModeVariantDefault
+	}
+	if s != nil && s.cfg.EnableCodexModeV2 {
+		return promptModeVariantCodexV2
+	}
+	return promptModeVariantCodexV1
 }
 
 func summarizeLayerPreview(text string, limit int) string {
@@ -1571,6 +1977,8 @@ func aiToolsGuidePathCandidates() ([]string, error) {
 		aiToolsGuideRelativePath,
 		aiToolsGuideLegacyRelativePath,
 		aiToolsGuideLegacyV0RelativePath,
+		aiToolsGuideLegacyV1RelativePath,
+		aiToolsGuideLegacyV2RelativePath,
 	)
 
 	seen := map[string]struct{}{}

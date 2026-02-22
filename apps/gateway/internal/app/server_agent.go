@@ -31,30 +31,47 @@ type agentSystemLayerView struct {
 	Role            string `json:"role"`
 	Source          string `json:"source,omitempty"`
 	ContentPreview  string `json:"content_preview,omitempty"`
+	LayerHash       string `json:"layer_hash,omitempty"`
 	EstimatedTokens int    `json:"estimated_tokens"`
 }
 
 type agentSystemLayersResponse struct {
 	Version              string                 `json:"version"`
+	ModeVariant          string                 `json:"mode_variant,omitempty"`
 	Layers               []agentSystemLayerView `json:"layers"`
 	EstimatedTokensTotal int                    `json:"estimated_tokens_total"`
 }
 
-func (s *Server) getAgentSystemLayers(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) getAgentSystemLayers(w http.ResponseWriter, r *http.Request) {
 	if !s.cfg.EnablePromptContextIntrospect {
 		writeErr(w, http.StatusNotFound, "feature_disabled", "prompt context introspection is disabled", nil)
 		return
 	}
 
-	layers, err := s.buildSystemLayers()
+	promptMode := promptModeDefault
+	if rawMode := strings.TrimSpace(r.URL.Query().Get(chatMetaPromptModeKey)); rawMode != "" {
+		normalizedMode, ok := normalizePromptMode(rawMode)
+		if !ok {
+			writeErr(w, http.StatusBadRequest, "invalid_request", "invalid prompt_mode", nil)
+			return
+		}
+		promptMode = normalizedMode
+	}
+
+	layers, err := s.buildSystemLayersForMode(promptMode)
 	if err != nil {
+		if promptMode == promptModeCodex {
+			writeErr(w, http.StatusInternalServerError, "codex_prompt_unavailable", "codex prompt is unavailable", nil)
+			return
+		}
 		writeErr(w, http.StatusInternalServerError, "ai_tool_guide_unavailable", "ai tools guide is unavailable", nil)
 		return
 	}
 
 	resp := agentSystemLayersResponse{
-		Version: "v1",
-		Layers:  make([]agentSystemLayerView, 0, len(layers)),
+		Version:     "v1",
+		ModeVariant: s.resolvePromptModeVariant(promptMode),
+		Layers:      make([]agentSystemLayerView, 0, len(layers)),
 	}
 	for _, layer := range layers {
 		tokens := estimatePromptTokenCount(layer.Content)
@@ -64,6 +81,7 @@ func (s *Server) getAgentSystemLayers(w http.ResponseWriter, _ *http.Request) {
 			Role:            layer.Role,
 			Source:          layer.Source,
 			ContentPreview:  summarizeLayerPreview(layer.Content, 160),
+			LayerHash:       normalizedLayerContentHash(layer.Content),
 			EstimatedTokens: tokens,
 		})
 	}

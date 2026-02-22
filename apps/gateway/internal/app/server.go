@@ -58,12 +58,26 @@ const (
 
 	cronLeaseDirName = "cron-leases"
 
-	aiToolsGuideRelativePath         = "docs/AI/AGENTS.md"
-	aiToolsGuideLegacyRelativePath   = "docs/AI/ai-tools.md"
-	aiToolsGuideLegacyV0RelativePath = "docs/ai-tools.md"
+	aiToolsGuideRelativePath         = "prompts/AGENTS.md"
+	aiToolsGuideLegacyRelativePath   = "prompts/ai-tools.md"
+	aiToolsGuideLegacyV0RelativePath = "docs/AI/AGENTS.md"
+	aiToolsGuideLegacyV1RelativePath = "docs/AI/ai-tools.md"
+	aiToolsGuideLegacyV2RelativePath = "docs/ai-tools.md"
 	codexBasePromptRelativePath      = "prompts/codex/codex-rs/core/prompt.md"
+	codexOrchestratorRelativePath    = "prompts/codex/codex-rs/core/templates/agents/orchestrator.md"
+	codexModelTemplateRelativePath   = "prompts/codex/codex-rs/core/templates/model_instructions/gpt-5.2-codex_instructions_template.md"
+	codexPersonalityRelativePath     = "prompts/codex/codex-rs/core/templates/personalities/gpt-5.2-codex_pragmatic.md"
+	codexCollabDefaultRelativePath   = "prompts/codex/codex-rs/core/templates/collaboration_mode/default.md"
+	codexExperimentalRelativePath    = "prompts/codex/codex-rs/core/templates/collab/experimental_prompt.md"
+	codexLocalPolicyRelativePath     = aiToolsGuideRelativePath
+	codexToolGuideRelativePath       = aiToolsGuideLegacyRelativePath
 	promptModeDefault                = "default"
 	promptModeCodex                  = "codex"
+	promptModeVariantDefault         = "default"
+	promptModeVariantCodexV1         = "codex_v1"
+	promptModeVariantCodexV2         = "codex_v2"
+	collaborationModeDefaultName     = "Default"
+	collaborationModePlanName        = "Plan"
 	chatMetaPromptModeKey            = "prompt_mode"
 	aiToolsGuidePathEnv              = "NEXTAI_AI_TOOLS_GUIDE_PATH"
 	disabledToolsEnv                 = "NEXTAI_DISABLED_TOOLS"
@@ -352,6 +366,7 @@ func (s *Server) handleHealthz(w http.ResponseWriter, _ *http.Request) {
 type runtimeConfigFeaturesResponse struct {
 	PromptTemplates         bool `json:"prompt_templates"`
 	PromptContextIntrospect bool `json:"prompt_context_introspect"`
+	CodexModeV2             bool `json:"codex_mode_v2"`
 }
 
 type runtimeConfigResponse struct {
@@ -363,6 +378,7 @@ func (s *Server) handleRuntimeConfig(w http.ResponseWriter, _ *http.Request) {
 		Features: runtimeConfigFeaturesResponse{
 			PromptTemplates:         s.cfg.EnablePromptTemplates,
 			PromptContextIntrospect: s.cfg.EnablePromptContextIntrospect,
+			CodexModeV2:             s.cfg.EnableCodexModeV2,
 		},
 	}
 	writeJSON(w, http.StatusOK, resp)

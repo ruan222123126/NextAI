@@ -296,6 +296,7 @@ func TestRuntimeConfigEndpointReflectsFeatureFlags(t *testing.T) {
 		DataDir:                       dir,
 		EnablePromptTemplates:         true,
 		EnablePromptContextIntrospect: false,
+		EnableCodexModeV2:             true,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -312,6 +313,7 @@ func TestRuntimeConfigEndpointReflectsFeatureFlags(t *testing.T) {
 		Features struct {
 			PromptTemplates         bool `json:"prompt_templates"`
 			PromptContextIntrospect bool `json:"prompt_context_introspect"`
+			CodexModeV2             bool `json:"codex_mode_v2"`
 		} `json:"features"`
 	}
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
@@ -322,6 +324,9 @@ func TestRuntimeConfigEndpointReflectsFeatureFlags(t *testing.T) {
 	}
 	if resp.Features.PromptContextIntrospect {
 		t.Fatalf("expected prompt_context_introspect=false, body=%s", w.Body.String())
+	}
+	if !resp.Features.CodexModeV2 {
+		t.Fatalf("expected codex_mode_v2=true, body=%s", w.Body.String())
 	}
 }
 
@@ -335,6 +340,7 @@ func TestRuntimeConfigEndpointBypassesAPIKeyAuth(t *testing.T) {
 		APIKey:                        "secret-token",
 		EnablePromptTemplates:         false,
 		EnablePromptContextIntrospect: true,
+		EnableCodexModeV2:             false,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -351,6 +357,7 @@ func TestRuntimeConfigEndpointBypassesAPIKeyAuth(t *testing.T) {
 		Features struct {
 			PromptTemplates         bool `json:"prompt_templates"`
 			PromptContextIntrospect bool `json:"prompt_context_introspect"`
+			CodexModeV2             bool `json:"codex_mode_v2"`
 		} `json:"features"`
 	}
 	if err := json.Unmarshal(runtimeConfigW.Body.Bytes(), &resp); err != nil {
@@ -361,6 +368,9 @@ func TestRuntimeConfigEndpointBypassesAPIKeyAuth(t *testing.T) {
 	}
 	if !resp.Features.PromptContextIntrospect {
 		t.Fatalf("expected prompt_context_introspect=true, body=%s", runtimeConfigW.Body.String())
+	}
+	if resp.Features.CodexModeV2 {
+		t.Fatalf("expected codex_mode_v2=false, body=%s", runtimeConfigW.Body.String())
 	}
 
 	chatsW := httptest.NewRecorder()
@@ -1434,7 +1444,7 @@ func TestBuildSystemLayersOrder(t *testing.T) {
 	}
 }
 
-func TestBuildSystemLayersForCodexModeUsesSingleLayer(t *testing.T) {
+func TestBuildSystemLayersForCodexModeUsesSingleLayerWhenPromptTemplatesDisabled(t *testing.T) {
 	srv := newTestServer(t)
 
 	layers, err := srv.buildSystemLayersForMode(promptModeCodex)
@@ -1453,6 +1463,257 @@ func TestBuildSystemLayersForCodexModeUsesSingleLayer(t *testing.T) {
 	}
 	if !strings.Contains(layer.Content, "## "+codexBasePromptRelativePath) {
 		t.Fatalf("unexpected codex layer content header: %q", layer.Content)
+	}
+}
+
+func TestBuildSystemLayersForCodexModeIncludesTemplateLayersWhenFeatureEnabled(t *testing.T) {
+	t.Setenv("NEXTAI_DISABLE_QQ_INBOUND_SUPERVISOR", "true")
+	srv, err := NewServer(config.Config{
+		Host:                  "127.0.0.1",
+		Port:                  "0",
+		DataDir:               t.TempDir(),
+		EnablePromptTemplates: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { srv.Close() })
+
+	layers, err := srv.buildSystemLayersForMode(promptModeCodex)
+	if err != nil {
+		t.Fatalf("buildSystemLayersForMode(codex) failed: %v", err)
+	}
+	if len(layers) < 5 {
+		t.Fatalf("expected at least 5 codex layers with templates enabled, got=%d", len(layers))
+	}
+	if layers[0].Name != "codex_base_system" {
+		t.Fatalf("expected first codex layer to be codex_base_system, got=%q", layers[0].Name)
+	}
+
+	byName := map[string]systemPromptLayer{}
+	for _, layer := range layers {
+		byName[layer.Name] = layer
+	}
+
+	orchestrator, ok := byName["codex_orchestrator_system"]
+	if !ok {
+		t.Fatalf("missing codex_orchestrator_system layer: %#v", layers)
+	}
+	if orchestrator.Source != codexOrchestratorRelativePath {
+		t.Fatalf("expected orchestrator source=%q, got=%q", codexOrchestratorRelativePath, orchestrator.Source)
+	}
+
+	modelLayer, ok := byName["codex_model_instructions_system"]
+	if !ok {
+		t.Fatalf("missing codex_model_instructions_system layer: %#v", layers)
+	}
+	if modelLayer.Source != codexModelTemplateRelativePath {
+		t.Fatalf("expected model template source=%q, got=%q", codexModelTemplateRelativePath, modelLayer.Source)
+	}
+	if strings.Contains(modelLayer.Content, "{{ personality }}") {
+		t.Fatalf("expected personality placeholder to be rendered, got=%q", modelLayer.Content)
+	}
+
+	collabLayer, ok := byName["codex_collaboration_default_system"]
+	if !ok {
+		t.Fatalf("missing codex_collaboration_default_system layer: %#v", layers)
+	}
+	if collabLayer.Source != codexCollabDefaultRelativePath {
+		t.Fatalf("expected collab default source=%q, got=%q", codexCollabDefaultRelativePath, collabLayer.Source)
+	}
+	if strings.Contains(collabLayer.Content, "{{KNOWN_MODE_NAMES}}") || strings.Contains(collabLayer.Content, "{{REQUEST_USER_INPUT_AVAILABILITY}}") {
+		t.Fatalf("expected collaboration placeholders to be rendered, got=%q", collabLayer.Content)
+	}
+	if _, exists := byName["codex_local_policy_system"]; exists {
+		t.Fatalf("expected codex_local_policy_system to stay disabled in v1 path")
+	}
+	if _, exists := byName["codex_tool_guide_system"]; exists {
+		t.Fatalf("expected codex_tool_guide_system to stay disabled in v1 path")
+	}
+}
+
+func TestBuildSystemLayersForCodexModeV2IncludesLocalPolicyAndToolGuide(t *testing.T) {
+	t.Setenv("NEXTAI_DISABLE_QQ_INBOUND_SUPERVISOR", "true")
+	srv, err := NewServer(config.Config{
+		Host:              "127.0.0.1",
+		Port:              "0",
+		DataDir:           t.TempDir(),
+		EnableCodexModeV2: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { srv.Close() })
+
+	layers, err := srv.buildSystemLayersForMode(promptModeCodex)
+	if err != nil {
+		t.Fatalf("buildSystemLayersForMode(codex) failed: %v", err)
+	}
+	if len(layers) < 7 {
+		t.Fatalf("expected codex v2 layers with local policy and tool guide, got=%d", len(layers))
+	}
+
+	indexByName := map[string]int{}
+	byName := map[string]systemPromptLayer{}
+	for index, layer := range layers {
+		indexByName[layer.Name] = index
+		byName[layer.Name] = layer
+	}
+
+	requiredNames := []string{
+		"codex_base_system",
+		"codex_orchestrator_system",
+		"codex_model_instructions_system",
+		"codex_collaboration_default_system",
+		"codex_experimental_collab_system",
+		"codex_local_policy_system",
+		"codex_tool_guide_system",
+	}
+	for _, name := range requiredNames {
+		if _, ok := indexByName[name]; !ok {
+			t.Fatalf("missing required codex v2 layer %q: %#v", name, layers)
+		}
+	}
+	if !(indexByName["codex_base_system"] < indexByName["codex_orchestrator_system"] &&
+		indexByName["codex_orchestrator_system"] < indexByName["codex_model_instructions_system"] &&
+		indexByName["codex_model_instructions_system"] < indexByName["codex_collaboration_default_system"] &&
+		indexByName["codex_collaboration_default_system"] < indexByName["codex_experimental_collab_system"] &&
+		indexByName["codex_experimental_collab_system"] < indexByName["codex_local_policy_system"] &&
+		indexByName["codex_local_policy_system"] < indexByName["codex_tool_guide_system"]) {
+		t.Fatalf("unexpected codex v2 order: %#v", layers)
+	}
+
+	modelLayer := byName["codex_model_instructions_system"]
+	if strings.Contains(modelLayer.Content, "{{ personality }}") {
+		t.Fatalf("expected personality placeholder rendered, got=%q", modelLayer.Content)
+	}
+
+	collabLayer := byName["codex_collaboration_default_system"]
+	if strings.Contains(collabLayer.Content, "{{KNOWN_MODE_NAMES}}") || strings.Contains(collabLayer.Content, "{{REQUEST_USER_INPUT_AVAILABILITY}}") {
+		t.Fatalf("expected collaboration placeholders rendered, got=%q", collabLayer.Content)
+	}
+	if !strings.Contains(collabLayer.Content, "Known mode names are Default and Plan.") {
+		t.Fatalf("expected known mode names to be rendered from supported list, got=%q", collabLayer.Content)
+	}
+	if !strings.Contains(collabLayer.Content, "request_user_input` tool is unavailable in Default mode") {
+		t.Fatalf("expected request_user_input availability to be rendered, got=%q", collabLayer.Content)
+	}
+
+	localLayer := byName["codex_local_policy_system"]
+	if localLayer.Source != codexLocalPolicyRelativePath {
+		t.Fatalf("expected local policy source=%q, got=%q", codexLocalPolicyRelativePath, localLayer.Source)
+	}
+	toolLayer := byName["codex_tool_guide_system"]
+	if toolLayer.Source != codexToolGuideRelativePath {
+		t.Fatalf("expected tool guide source=%q, got=%q", codexToolGuideRelativePath, toolLayer.Source)
+	}
+}
+
+func TestBuildSystemLayersForCodexModeV2SkipsMissingOptionalToolGuideLayer(t *testing.T) {
+	repoRoot, err := findRepoRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	hideOptionalFile := func(relativePath string) {
+		absPath := filepath.Join(repoRoot, filepath.FromSlash(relativePath))
+		if _, statErr := os.Stat(absPath); statErr != nil {
+			if errors.Is(statErr, os.ErrNotExist) {
+				return
+			}
+			t.Fatalf("stat %s failed: %v", relativePath, statErr)
+		}
+		backupPath := fmt.Sprintf("%s.bak-%d", absPath, time.Now().UnixNano())
+		if err := os.Rename(absPath, backupPath); err != nil {
+			t.Fatalf("rename %s failed: %v", relativePath, err)
+		}
+		t.Cleanup(func() {
+			_ = os.Rename(backupPath, absPath)
+		})
+	}
+	hideOptionalFile(codexToolGuideRelativePath)
+	hideOptionalFile(aiToolsGuideLegacyV1RelativePath)
+	hideOptionalFile(aiToolsGuideLegacyV2RelativePath)
+
+	t.Setenv("NEXTAI_DISABLE_QQ_INBOUND_SUPERVISOR", "true")
+	srv, err := NewServer(config.Config{
+		Host:              "127.0.0.1",
+		Port:              "0",
+		DataDir:           t.TempDir(),
+		EnableCodexModeV2: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { srv.Close() })
+
+	layers, err := srv.buildSystemLayersForMode(promptModeCodex)
+	if err != nil {
+		t.Fatalf("buildSystemLayersForMode(codex v2) failed: %v", err)
+	}
+	for _, layer := range layers {
+		if layer.Name == "codex_tool_guide_system" {
+			t.Fatalf("expected missing optional tool guide layer to be skipped, got=%#v", layers)
+		}
+	}
+}
+
+func TestBuildSystemLayersForCodexModeV2DedupesDuplicatePolicyAndToolLayers(t *testing.T) {
+	repoRoot, err := findRepoRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	codexBasePath := filepath.Join(repoRoot, filepath.FromSlash(codexBasePromptRelativePath))
+	duplicatedContent, err := os.ReadFile(codexBasePath)
+	if err != nil {
+		t.Fatalf("read codex base prompt failed: %v", err)
+	}
+
+	replaceFileWithContent := func(relativePath string, content []byte) {
+		absPath := filepath.Join(repoRoot, filepath.FromSlash(relativePath))
+		originalContent, readErr := os.ReadFile(absPath)
+		if readErr != nil {
+			t.Fatalf("read %s failed: %v", relativePath, readErr)
+		}
+		t.Cleanup(func() {
+			_ = os.WriteFile(absPath, originalContent, 0o644)
+		})
+		if err := os.WriteFile(absPath, content, 0o644); err != nil {
+			t.Fatalf("write %s failed: %v", relativePath, err)
+		}
+	}
+	replaceFileWithContent(codexLocalPolicyRelativePath, duplicatedContent)
+	replaceFileWithContent(codexToolGuideRelativePath, duplicatedContent)
+
+	t.Setenv("NEXTAI_DISABLE_QQ_INBOUND_SUPERVISOR", "true")
+	srv, err := NewServer(config.Config{
+		Host:              "127.0.0.1",
+		Port:              "0",
+		DataDir:           t.TempDir(),
+		EnableCodexModeV2: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { srv.Close() })
+
+	layers, err := srv.buildSystemLayersForMode(promptModeCodex)
+	if err != nil {
+		t.Fatalf("buildSystemLayersForMode(codex v2) failed: %v", err)
+	}
+
+	byName := map[string]struct{}{}
+	for _, layer := range layers {
+		byName[layer.Name] = struct{}{}
+	}
+	if _, ok := byName["codex_base_system"]; !ok {
+		t.Fatalf("expected codex_base_system to remain after dedupe")
+	}
+	if _, ok := byName["codex_local_policy_system"]; ok {
+		t.Fatalf("expected codex_local_policy_system to be deduped out, got=%#v", layers)
+	}
+	if _, ok := byName["codex_tool_guide_system"]; ok {
+		t.Fatalf("expected codex_tool_guide_system to be deduped out, got=%#v", layers)
 	}
 }
 
@@ -1573,6 +1834,9 @@ func TestGetAgentSystemLayersReturnsLayersAndTokenEstimate(t *testing.T) {
 	if body.Version != "v1" {
 		t.Fatalf("unexpected version: %q", body.Version)
 	}
+	if body.ModeVariant != promptModeVariantDefault {
+		t.Fatalf("expected mode_variant=%q, got=%q", promptModeVariantDefault, body.ModeVariant)
+	}
 	if len(body.Layers) < 3 {
 		t.Fatalf("expected at least 3 layers, got=%d", len(body.Layers))
 	}
@@ -1589,8 +1853,143 @@ func TestGetAgentSystemLayersReturnsLayersAndTokenEstimate(t *testing.T) {
 	if !foundEnvironment {
 		t.Fatalf("environment_context_system layer missing: %#v", body.Layers)
 	}
+	sumTokens := 0
+	for _, layer := range body.Layers {
+		if strings.TrimSpace(layer.LayerHash) == "" {
+			t.Fatalf("expected non-empty layer_hash for layer %q", layer.Name)
+		}
+		sumTokens += layer.EstimatedTokens
+	}
 	if body.EstimatedTokensTotal <= 0 {
 		t.Fatalf("estimated_tokens_total should be positive, got=%d", body.EstimatedTokensTotal)
+	}
+	if sumTokens != body.EstimatedTokensTotal {
+		t.Fatalf("expected estimated_tokens_total=%d, got=%d", sumTokens, body.EstimatedTokensTotal)
+	}
+}
+
+func TestGetAgentSystemLayersSupportsCodexModeQuery(t *testing.T) {
+	t.Setenv("NEXTAI_DISABLE_QQ_INBOUND_SUPERVISOR", "true")
+	srv, err := NewServer(config.Config{
+		Host:                          "127.0.0.1",
+		Port:                          "0",
+		DataDir:                       t.TempDir(),
+		EnablePromptTemplates:         true,
+		EnablePromptContextIntrospect: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { srv.Close() })
+
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/agent/system-layers?prompt_mode=codex", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got=%d body=%s", w.Code, w.Body.String())
+	}
+
+	var body agentSystemLayersResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode response failed: %v body=%s", err, w.Body.String())
+	}
+	if len(body.Layers) < 5 {
+		t.Fatalf("expected codex template layers in introspection, got=%d", len(body.Layers))
+	}
+	if body.ModeVariant != promptModeVariantCodexV1 {
+		t.Fatalf("expected mode_variant=%q, got=%q", promptModeVariantCodexV1, body.ModeVariant)
+	}
+	if body.Layers[0].Name != "codex_base_system" {
+		t.Fatalf("expected first layer codex_base_system, got=%q", body.Layers[0].Name)
+	}
+	foundCollab := false
+	for _, layer := range body.Layers {
+		if layer.Name == "codex_collaboration_default_system" {
+			foundCollab = true
+			break
+		}
+	}
+	if !foundCollab {
+		t.Fatalf("expected codex_collaboration_default_system in response, got=%#v", body.Layers)
+	}
+	sumTokens := 0
+	for _, layer := range body.Layers {
+		if strings.TrimSpace(layer.LayerHash) == "" {
+			t.Fatalf("expected non-empty layer_hash for layer %q", layer.Name)
+		}
+		sumTokens += layer.EstimatedTokens
+	}
+	if sumTokens != body.EstimatedTokensTotal {
+		t.Fatalf("expected estimated_tokens_total=%d, got=%d", sumTokens, body.EstimatedTokensTotal)
+	}
+}
+
+func TestGetAgentSystemLayersSupportsCodexModeQueryV2(t *testing.T) {
+	t.Setenv("NEXTAI_DISABLE_QQ_INBOUND_SUPERVISOR", "true")
+	srv, err := NewServer(config.Config{
+		Host:                          "127.0.0.1",
+		Port:                          "0",
+		DataDir:                       t.TempDir(),
+		EnablePromptContextIntrospect: true,
+		EnableCodexModeV2:             true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { srv.Close() })
+
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/agent/system-layers?prompt_mode=codex", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got=%d body=%s", w.Code, w.Body.String())
+	}
+
+	var body agentSystemLayersResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode response failed: %v body=%s", err, w.Body.String())
+	}
+	if body.ModeVariant != promptModeVariantCodexV2 {
+		t.Fatalf("expected mode_variant=%q, got=%q", promptModeVariantCodexV2, body.ModeVariant)
+	}
+	indexByName := map[string]int{}
+	sumTokens := 0
+	for index, layer := range body.Layers {
+		indexByName[layer.Name] = index
+		if strings.TrimSpace(layer.LayerHash) == "" {
+			t.Fatalf("expected non-empty layer_hash for layer %q", layer.Name)
+		}
+		sumTokens += layer.EstimatedTokens
+	}
+	if sumTokens != body.EstimatedTokensTotal {
+		t.Fatalf("expected estimated_tokens_total=%d, got=%d", sumTokens, body.EstimatedTokensTotal)
+	}
+	if _, ok := indexByName["codex_local_policy_system"]; !ok {
+		t.Fatalf("expected codex_local_policy_system in codex v2 response, got=%#v", body.Layers)
+	}
+	if _, ok := indexByName["codex_tool_guide_system"]; !ok {
+		t.Fatalf("expected codex_tool_guide_system in codex v2 response, got=%#v", body.Layers)
+	}
+}
+
+func TestGetAgentSystemLayersRejectsInvalidPromptModeQuery(t *testing.T) {
+	t.Setenv("NEXTAI_DISABLE_QQ_INBOUND_SUPERVISOR", "true")
+	srv, err := NewServer(config.Config{
+		Host:                          "127.0.0.1",
+		Port:                          "0",
+		DataDir:                       t.TempDir(),
+		EnablePromptContextIntrospect: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { srv.Close() })
+
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/agent/system-layers?prompt_mode=abc", nil))
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got=%d body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"code":"invalid_request"`) || !strings.Contains(w.Body.String(), "invalid prompt_mode") {
+		t.Fatalf("unexpected body: %s", w.Body.String())
 	}
 }
 
@@ -2011,6 +2410,43 @@ func TestProcessAgentReturnsCodexPromptUnavailableWhenPromptMissing(t *testing.T
 
 	srv := newTestServer(t)
 	procReq := `{"input":[{"role":"user","type":"message","content":[{"type":"text","text":"hello"}]}],"session_id":"s-codex-missing","user_id":"u-codex-missing","channel":"console","stream":false,"biz_params":{"prompt_mode":"codex"}}`
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/agent/process", strings.NewReader(procReq)))
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got=%d body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"code":"codex_prompt_unavailable"`) {
+		t.Fatalf("unexpected body: %s", w.Body.String())
+	}
+}
+
+func TestProcessAgentReturnsCodexPromptUnavailableWhenPromptMissingInV2(t *testing.T) {
+	repoRoot, err := findRepoRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	codexPath := filepath.Join(repoRoot, filepath.FromSlash(codexBasePromptRelativePath))
+	backupPath := fmt.Sprintf("%s.bak-%d", codexPath, time.Now().UnixNano())
+	if err := os.Rename(codexPath, backupPath); err != nil {
+		t.Fatalf("rename codex prompt failed: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = os.Rename(backupPath, codexPath)
+	})
+
+	t.Setenv("NEXTAI_DISABLE_QQ_INBOUND_SUPERVISOR", "true")
+	srv, err := NewServer(config.Config{
+		Host:              "127.0.0.1",
+		Port:              "0",
+		DataDir:           t.TempDir(),
+		EnableCodexModeV2: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { srv.Close() })
+
+	procReq := `{"input":[{"role":"user","type":"message","content":[{"type":"text","text":"hello"}]}],"session_id":"s-codex-missing-v2","user_id":"u-codex-missing-v2","channel":"console","stream":false,"biz_params":{"prompt_mode":"codex"}}`
 	w := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/agent/process", strings.NewReader(procReq)))
 	if w.Code != http.StatusInternalServerError {

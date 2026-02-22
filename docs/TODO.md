@@ -1,6 +1,6 @@
 # NextAI TODO
 
-更新时间：2026-02-22 08:40:18 +0800
+更新时间：2026-02-22 10:17:28 +0800
 
 ## 执行约定（强制）
 - 每位接手 AI 开始前，必须先阅读本文件与 `/home/ruan/.codex/handoff/latest.md`。
@@ -29,6 +29,27 @@
 - [x] `docs/v1-roadmap.md`、`docs/contracts.md`、本地开发文档、部署文档与发布模板已完成。
 
 ## 6. 实操验证（汇总）
+- [x] 2026-02-22 10:17 +0800 Gateway Codex Mode V2（保守兼容）落地：新增 `NEXTAI_ENABLE_CODEX_MODE_V2` 开关并在 `buildSystemLayersForMode` 分流 `codex_v1/codex_v2`；实现 `buildCodexSystemLayersV2`（base/orchestrator/model/collab/experimental/local policy/tool guide）、统一模板渲染器 `renderTemplate`、V2 去重器 `dedupeLayersByNormalizedContent`（核心层>本地策略层>工具层）与渲染失败/缺变量 warning+跳过语义。
+- [x] 2026-02-22 10:17 +0800 可观测与回归补齐：`GET /agent/system-layers` 新增 `mode_variant(default|codex_v1|codex_v2)` 与 `layers[].layer_hash`，`GET /runtime-config` 新增 `features.codex_mode_v2`；补充 `server_test` 覆盖 flag 开关分流、V2 层序、变量渲染、去重、可选层缺失、必选层缺失 `codex_prompt_unavailable`、接口 token 一致性；验证 `cd apps/gateway && go test ./internal/app` 与 `cd apps/gateway && go test ./...` 全部通过；同步更新 `docs/contracts.md` 与 `.env.example` 回滚语义。
+- [x] 2026-02-22 09:42 +0800 Codex 注入文件内容核查：完成 5 个运行时系统层文件（base/orchestrator/model_instructions/collaboration_default/experimental）的全文读取与规则分类，补充 `{{ personality }}`、`{{KNOWN_MODE_NAMES}}`、`{{REQUEST_USER_INPUT_AVAILABILITY}}` 占位符来源确认。
+- [x] 2026-02-22 09:42 +0800 验证通过：执行 `sed -n`/`rg -n` 读取 `prompts/codex/codex-rs/core/prompt.md`、`templates/agents/orchestrator.md`、`templates/model_instructions/gpt-5.2-codex_instructions_template.md`、`templates/collaboration_mode/default.md`、`templates/collab/experimental_prompt.md` 及 personality 文件，内容与 Gateway 渲染逻辑一致。
+- [x] 2026-02-22 09:37 +0800 提示词工程现状盘点：完成 `prompts/*`、Gateway `prompt_mode` 装配、Web `prompt_mode` 透传与 token introspect 流程核查，确认当前为“default/codex 双轨 + 会话持久化 + 模板开关”架构。
+- [x] 2026-02-22 09:37 +0800 验证通过：执行 `rg --files prompts`、`find prompts/codex -type f | wc -l`、`sed -n` 核对 `apps/gateway/internal/app/server_admin.go` 的 `buildCodexSystemLayers` 与 `apps/web/src/main.ts` 的 `mergePromptModeBizParams/loadSystemPromptTokens`，结果与 `docs/contracts.md` 一致。
+- [x] 2026-02-22 09:36 +0800 Codex 模式模板开关启用并重启网关：更新 `.env` 新增 `NEXTAI_ENABLE_PROMPT_TEMPLATES=true`、`NEXTAI_ENABLE_PROMPT_CONTEXT_INTROSPECT=true`，重启 `go run ./cmd/gateway` 进程使配置生效。
+- [x] 2026-02-22 09:36 +0800 验证通过：`GET /runtime-config` 返回 `prompt_templates=true` 与 `prompt_context_introspect=true`；`GET /agent/system-layers?prompt_mode=codex` 返回 5 层，且包含 `codex_orchestrator_system`、`codex_model_instructions_system`、`codex_collaboration_default_system`（missing=none）。
+- [x] 2026-02-22 09:32 +0800 Codex 模式模板集成增强：Gateway `prompt_mode=codex` 从“单一 `core/prompt.md`”升级为“base 必选 + 模板包可选叠加”；当 `NEXTAI_ENABLE_PROMPT_TEMPLATES=true` 时，按顺序注入 `templates/agents/orchestrator.md`、渲染后 `templates/model_instructions/gpt-5.2-codex_instructions_template.md`（注入 pragmatic personality）、渲染后 `templates/collaboration_mode/default.md`、`templates/collab/experimental_prompt.md`。
+- [x] 2026-02-22 09:32 +0800 观测与前端联动补齐：`GET /agent/system-layers` 新增 `prompt_mode` 查询参数（支持 `default|codex`）；Web 侧 `loadSystemPromptTokens` 调用该接口时显式透传当前会话 `prompt_mode`，避免 codex 会话仍按 default 系统层估算 token。
+- [x] 2026-02-22 09:32 +0800 验证通过：执行 `cd apps/gateway && go test ./internal/app -run "TestBuildSystemLayersForCodexModeUsesSingleLayerWhenPromptTemplatesDisabled|TestBuildSystemLayersForCodexModeIncludesTemplateLayersWhenFeatureEnabled|TestGetAgentSystemLayersFeatureDisabled|TestGetAgentSystemLayersReturnsLayersAndTokenEstimate|TestGetAgentSystemLayersSupportsCodexModeQuery|TestGetAgentSystemLayersRejectsInvalidPromptModeQuery|TestProcessAgentCodexPromptModePersistsAndIsReused|TestProcessAgentRejectsInvalidPromptMode|TestProcessAgentReturnsCodexPromptUnavailableWhenPromptMissing"`、`cd apps/gateway && go test ./...`、`pnpm -C apps/web test -- test/e2e/web-shell-tool-flow.test.ts`、`pnpm -C apps/web build` 均通过。
+- [x] 2026-02-22 09:19 +0800 Codex templates 目录解读完成：梳理 `prompts/codex/codex-rs/core/templates` 下 18 个模板文件，按协作模式、人格、记忆系统、压缩/交接、review 注入、工具发现等维度完成用途归类与内容摘要。
+- [x] 2026-02-22 09:19 +0800 验证通过：执行 `rg --files prompts/codex/codex-rs/core/templates`、按子目录 `sed -n` 全量读取模板正文、并对超长文件 `memories/consolidation.md` 补充尾部核对，确认无遗漏目录与核心约束段落。
+- [x] 2026-02-22 09:17 +0800 聊天 `prompt_mode=default` 500 排障：复现到 `POST /agent/process` 在 default 模式返回 `ai_tool_guide_unavailable`、而 codex 模式正常；定位为 8088 网关仍运行旧进程（08:23 启动，未加载提示词目录切换后的最新逻辑）。
+- [x] 2026-02-22 09:17 +0800 验证通过：重启 8088 网关进程后，`POST /agent/process` 在 `biz_params.prompt_mode=default` 与 `biz_params.prompt_mode=codex` 均返回 `200`，不再出现 `ai_tool_guide_unavailable`。
+- [x] 2026-02-22 08:58 +0800 Web 配置文件页移除“新建配置文件”入口：删除 `apps/web/src/index.html` 中 `workspace-create-file-form` 表单，`apps/web/src/main.ts` 删除新建文件的 DOM 绑定、提交事件与 `createWorkspaceFile/createWorkspaceSkillTemplate` 逻辑，页面仅保留现有文件列表与打开/删除能力。
+- [x] 2026-02-22 08:58 +0800 验证通过：执行 `pnpm -C apps/web build` 与 `pnpm -C apps/web test -- test/e2e/web-shell-tool-flow.test.ts` 均通过；全局检索确认 `workspace-create-file-form`、`workspace-new-path`、`workspace.createFile`、`status.workspaceFileCreated`、`error.workspaceCreateOnlySkill` 已无引用。
+- [x] 2026-02-22 08:51 +0800 提示词目录收口补充：按确认删除空目录 `docs/AI/codex`，并清理空的 `docs/AI` 根目录，工作区提示词目录彻底收口到 `prompts/*`。
+- [x] 2026-02-22 08:51 +0800 验证通过：执行 `find docs/AI -maxdepth 3 -print`（删除前仅剩空目录）与 `rmdir docs/AI/codex docs/AI`（删除成功），随后 `find docs -maxdepth 2 -type d -name 'AI' -o -path 'docs/AI*'` 无输出。
+- [x] 2026-02-22 08:48 +0800 提示词目录去重与归并：删除 `docs/AI/AGENTS.md`、`docs/AI/ai-tools.md` 重复文件，统一保留 `prompts/AGENTS.md` 与 `prompts/ai-tools.md`；Gateway 默认系统提示词路径切换到 `prompts/*`，`docs/AI/*` 仅保留兼容兜底候选。
+- [x] 2026-02-22 08:48 +0800 回归验证通过：执行 `cd apps/gateway && go test ./internal/app`、`cd apps/gateway && go test ./...`、`pnpm -C apps/web test -- test/e2e/web-active-model-chat-flow.test.ts test/e2e/web-shell-tool-flow.test.ts`、`pnpm -C apps/web build` 均通过；文件核对 `find docs/AI -maxdepth 2 -type f` 结果为空，`prompts/AGENTS.md` 与 `prompts/ai-tools.md` 存在。
 - [x] 2026-02-22 08:40 +0800 工作区分批清理纠偏：将误做的“全量 stash 清理”恢复为“按价值提交 + 噪音清理”流程，三批改动（gateway+docs / web / prompts）均恢复并通过回归后进入提交流程，当前工作区仅保留待提交改动。
 - [x] 2026-02-22 08:40 +0800 验证通过：执行 `cd apps/gateway && go test ./internal/app`、`cd apps/gateway && go test ./...`、`pnpm -C apps/web test -- test/e2e/web-shell-tool-flow.test.ts`、`pnpm -C apps/web build` 均通过。
 - [x] 2026-02-22 08:31 +0800 Codex 最小对齐（会话级 prompt_mode）落地：Gateway `POST /agent/process` 新增 `biz_params.prompt_mode(default|codex)` 解析/校验、`chat.meta.prompt_mode` 会话持久化、系统层按模式分派（`default=AGENTS+ai-tools`，`codex=prompts/codex/codex-rs/core/prompt.md` 单层），并补齐 `invalid prompt_mode` 与 `codex_prompt_unavailable` 错误语义；同步更新 `docs/contracts.md` 契约说明。

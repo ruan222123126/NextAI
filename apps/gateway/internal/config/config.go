@@ -13,6 +13,7 @@ type Config struct {
 	WebDir                        string
 	EnablePromptTemplates         bool
 	EnablePromptContextIntrospect bool
+	EnableCodexModeV2             bool
 }
 
 func Load() Config {
@@ -32,6 +33,7 @@ func Load() Config {
 	webDir := os.Getenv("NEXTAI_WEB_DIR")
 	enablePromptTemplates := parseEnvBool("NEXTAI_ENABLE_PROMPT_TEMPLATES")
 	enablePromptContextIntrospect := parseEnvBool("NEXTAI_ENABLE_PROMPT_CONTEXT_INTROSPECT")
+	enableCodexModeV2 := parseEnvBool("NEXTAI_ENABLE_CODEX_MODE_V2")
 	return Config{
 		Host:                          host,
 		Port:                          port,
@@ -40,6 +42,7 @@ func Load() Config {
 		WebDir:                        webDir,
 		EnablePromptTemplates:         enablePromptTemplates,
 		EnablePromptContextIntrospect: enablePromptContextIntrospect,
+		EnableCodexModeV2:             enableCodexModeV2,
 	}
 }
 
