@@ -973,7 +973,7 @@ async function refreshActiveChatLive(): Promise<void> {
   }
 }
 
-function bindEvents(): void {
+function bindTabEvents(): void {
   tabButtons.forEach((button) => {
     button.addEventListener("click", () => {
       const tab = button.dataset.tab;
@@ -991,7 +991,9 @@ function bindEvents(): void {
     event.stopPropagation();
     void switchTab("chat");
   });
+}
 
+function bindSearchEvents(): void {
   chatSearchToggleButton.addEventListener("click", (event) => {
     event.stopPropagation();
     const nextOpen = !isSearchModalOpen();
@@ -1014,6 +1016,20 @@ function bindEvents(): void {
     setSearchModalOpen(false);
   });
 
+  searchChatInput.addEventListener("input", () => {
+    state.chatSearchQuery = searchChatInput.value.trim();
+    renderSearchChatResults();
+  });
+
+  document.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape" || !isSearchModalOpen()) {
+      return;
+    }
+    setSearchModalOpen(false);
+  });
+}
+
+function bindSettingsEvents(): void {
   settingsToggleButton.addEventListener("click", (event) => {
     event.stopPropagation();
     setSettingsPopoverOpen(!isSettingsPopoverOpen());
@@ -1065,13 +1081,9 @@ function bindEvents(): void {
     }
     setSettingsPopoverOpen(false);
   });
-  document.addEventListener("keydown", (event) => {
-    if (event.key !== "Escape" || !isSearchModalOpen()) {
-      return;
-    }
-    setSearchModalOpen(false);
-  });
+}
 
+function bindChatHeaderEvents(): void {
   reloadChatsButton.addEventListener("click", async () => {
     syncControlState();
     setStatus(t("status.refreshingChats"), "info");
@@ -1088,12 +1100,9 @@ function bindEvents(): void {
   chatPromptModeToggle.addEventListener("change", () => {
     setActivePromptMode(chatPromptModeToggle.checked ? "codex" : "default", { announce: true });
   });
+}
 
-  searchChatInput.addEventListener("input", () => {
-    state.chatSearchQuery = searchChatInput.value.trim();
-    renderSearchChatResults();
-  });
-
+function bindConnectionEvents(): void {
   apiBaseInput.addEventListener("change", async () => {
     await handleControlChange(false);
   });
@@ -1116,7 +1125,9 @@ function bindEvents(): void {
   promptContextIntrospectInput.addEventListener("change", () => {
     applyPromptContextIntrospectOverride(promptContextIntrospectInput.checked, true);
   });
+}
 
+function bindComposerEvents(): void {
   composerForm.addEventListener("submit", async (event) => {
     event.preventDefault();
     await sendMessage();
@@ -1151,7 +1162,9 @@ function bindEvents(): void {
   composerModelSelect.addEventListener("change", () => {
     void handleComposerModelSelectChange();
   });
+}
 
+function bindModelEvents(): void {
   refreshModelsButton.addEventListener("click", async () => {
     await refreshModels();
   });
@@ -1264,58 +1277,9 @@ function bindEvents(): void {
       return;
     }
   });
+}
 
-  refreshWorkspaceButton.addEventListener("click", async () => {
-    await refreshWorkspace();
-  });
-  workspaceSettingsSection.addEventListener("click", (event) => {
-    const target = event.target;
-    if (!(target instanceof Element)) {
-      return;
-    }
-    const toggleButton = target.closest<HTMLButtonElement>("button[data-workspace-toggle-card]");
-    if (toggleButton) {
-      const card = toggleButton.dataset.workspaceToggleCard;
-      if (!isWorkspaceCardKey(card)) {
-        return;
-      }
-      setWorkspaceCardEnabled(card, !isWorkspaceCardEnabled(card));
-      return;
-    }
-    const button = target.closest<HTMLButtonElement>("button[data-workspace-action]");
-    if (!button) {
-      return;
-    }
-    const action = button.dataset.workspaceAction;
-    if (action === "open-config") {
-      if (!ensureWorkspaceCardEnabled("config")) {
-        return;
-      }
-      setWorkspaceSettingsLevel("config");
-      renderWorkspacePanel();
-      return;
-    }
-    if (action === "open-prompt") {
-      if (!ensureWorkspaceCardEnabled("prompt")) {
-        return;
-      }
-      setWorkspaceSettingsLevel("prompt");
-      renderWorkspacePanel();
-      return;
-    }
-    if (action === "open-codex") {
-      if (!ensureWorkspaceCardEnabled("codex")) {
-        return;
-      }
-      setWorkspaceSettingsLevel("codex");
-      renderWorkspacePanel();
-      return;
-    }
-    if (action === "back") {
-      setWorkspaceSettingsLevel("list");
-      renderWorkspacePanel();
-    }
-  });
+function bindChannelEvents(): void {
   channelsEntryList.addEventListener("click", (event) => {
     const target = event.target;
     if (!(target instanceof Element)) {
@@ -1337,6 +1301,67 @@ function bindEvents(): void {
     event.preventDefault();
     await saveQQChannelConfig();
   });
+}
+
+function bindWorkspaceEvents(): void {
+  refreshWorkspaceButton.addEventListener("click", async () => {
+    await refreshWorkspace();
+  });
+  workspaceSettingsSection.addEventListener("click", (event) => {
+    const target = event.target;
+    if (!(target instanceof Element)) {
+      return;
+    }
+    handleWorkspaceNavigationClick(target);
+  });
+  bindWorkspaceModalEvents();
+  bindWorkspaceFileListEvents();
+  bindWorkspaceEditorEvents();
+  bindWorkspaceEscapeEvents();
+}
+
+function handleWorkspaceNavigationClick(target: Element): void {
+  const toggleButton = target.closest<HTMLButtonElement>("button[data-workspace-toggle-card]");
+  if (toggleButton) {
+    const card = toggleButton.dataset.workspaceToggleCard;
+    if (!isWorkspaceCardKey(card)) {
+      return;
+    }
+    setWorkspaceCardEnabled(card, !isWorkspaceCardEnabled(card));
+    return;
+  }
+  const button = target.closest<HTMLButtonElement>("button[data-workspace-action]");
+  if (!button) {
+    return;
+  }
+  const action = button.dataset.workspaceAction;
+  if (action === "open-config") {
+    openWorkspaceSettingsCard("config");
+    return;
+  }
+  if (action === "open-prompt") {
+    openWorkspaceSettingsCard("prompt");
+    return;
+  }
+  if (action === "open-codex") {
+    openWorkspaceSettingsCard("codex");
+    return;
+  }
+  if (action === "back") {
+    setWorkspaceSettingsLevel("list");
+    renderWorkspacePanel();
+  }
+}
+
+function openWorkspaceSettingsCard(card: WorkspaceCardKey): void {
+  if (!ensureWorkspaceCardEnabled(card)) {
+    return;
+  }
+  setWorkspaceSettingsLevel(card);
+  renderWorkspacePanel();
+}
+
+function bindWorkspaceModalEvents(): void {
   workspaceImportOpenButton.addEventListener("click", () => {
     setWorkspaceImportModalOpen(true);
   });
@@ -1362,34 +1387,14 @@ function bindEvents(): void {
   workspaceImportModalCloseButton.addEventListener("click", () => {
     setWorkspaceImportModalOpen(false);
   });
-  const handleWorkspaceFilesClick = async (event: Event): Promise<void> => {
-    const target = event.target;
-    if (!(target instanceof Element)) {
-      return;
-    }
-    const openButton = target.closest<HTMLButtonElement>("button[data-workspace-open]");
-    if (openButton) {
-      const path = openButton.dataset.workspaceOpen ?? "";
-      if (path !== "") {
-        await openWorkspaceFile(path);
-      }
-      return;
-    }
-    const deleteButton = target.closest<HTMLButtonElement>("button[data-workspace-delete]");
-    if (!deleteButton) {
-      return;
-    }
-    const path = deleteButton.dataset.workspaceDelete ?? "";
-    if (path === "") {
-      return;
-    }
-    await deleteWorkspaceFile(path);
-  };
+}
+
+function bindWorkspaceFileListEvents(): void {
   workspaceFilesBody.addEventListener("click", (event) => {
-    void handleWorkspaceFilesClick(event);
+    void handleWorkspaceFileListClick(event);
   });
   workspacePromptsBody.addEventListener("click", (event) => {
-    void handleWorkspaceFilesClick(event);
+    void handleWorkspaceFileListClick(event);
   });
   workspaceCodexTreeBody.addEventListener("click", (event) => {
     const target = event.target;
@@ -1403,8 +1408,35 @@ function bindEvents(): void {
         return;
       }
     }
-    void handleWorkspaceFilesClick(event);
+    void handleWorkspaceFileListClick(event);
   });
+}
+
+async function handleWorkspaceFileListClick(event: Event): Promise<void> {
+  const target = event.target;
+  if (!(target instanceof Element)) {
+    return;
+  }
+  const openButton = target.closest<HTMLButtonElement>("button[data-workspace-open]");
+  if (openButton) {
+    const path = openButton.dataset.workspaceOpen ?? "";
+    if (path !== "") {
+      await openWorkspaceFile(path);
+    }
+    return;
+  }
+  const deleteButton = target.closest<HTMLButtonElement>("button[data-workspace-delete]");
+  if (!deleteButton) {
+    return;
+  }
+  const path = deleteButton.dataset.workspaceDelete ?? "";
+  if (path === "") {
+    return;
+  }
+  await deleteWorkspaceFile(path);
+}
+
+function bindWorkspaceEditorEvents(): void {
   workspaceEditorForm.addEventListener("submit", async (event) => {
     event.preventDefault();
     await saveWorkspaceFile();
@@ -1421,6 +1453,9 @@ function bindEvents(): void {
     event.preventDefault();
     await importWorkspaceJSON();
   });
+}
+
+function bindWorkspaceEscapeEvents(): void {
   document.addEventListener("keydown", (event) => {
     if (event.key !== "Escape" || !isWorkspaceEditorModalOpen()) {
       return;
@@ -1433,6 +1468,9 @@ function bindEvents(): void {
     }
     setWorkspaceImportModalOpen(false);
   });
+}
+
+function bindCronEvents(): void {
   cronCreateOpenButton.addEventListener("click", () => {
     setCronModalMode("create");
     syncCronDispatchHint();
@@ -1538,6 +1576,19 @@ function bindEvents(): void {
     }
     await deleteCronJob(deleteJobID);
   });
+}
+
+function bindEvents(): void {
+  bindTabEvents();
+  bindSearchEvents();
+  bindSettingsEvents();
+  bindChatHeaderEvents();
+  bindConnectionEvents();
+  bindComposerEvents();
+  bindModelEvents();
+  bindChannelEvents();
+  bindWorkspaceEvents();
+  bindCronEvents();
 }
 
 function initCustomSelects(): void {
@@ -4978,18 +5029,29 @@ async function refreshWorkspace(options: { silent?: boolean } = {}): Promise<voi
   syncControlState();
   try {
     const files = await listWorkspaceFiles();
-    state.workspaceFiles = files;
-    pruneWorkspaceCodexExpandedFolders(files);
-    if (state.activeWorkspacePath !== "" && !files.some((file) => file.path === state.activeWorkspacePath)) {
-      clearWorkspaceSelection();
-    }
-    renderWorkspacePanel();
-    state.tabLoaded.workspace = true;
+    applyWorkspaceFileList(files);
     if (!options.silent) {
       setStatus(t("status.workspaceFilesLoaded", { count: files.length }), "info");
     }
   } catch (error) {
     setStatus(asWorkspaceErrorMessage(error), "error");
+  }
+}
+
+function applyWorkspaceFileList(files: WorkspaceFileInfo[]): void {
+  state.workspaceFiles = files;
+  pruneWorkspaceCodexExpandedFolders(files);
+  syncActiveWorkspaceSelection(files);
+  renderWorkspacePanel();
+  state.tabLoaded.workspace = true;
+}
+
+function syncActiveWorkspaceSelection(files: WorkspaceFileInfo[]): void {
+  if (state.activeWorkspacePath === "") {
+    return;
+  }
+  if (!files.some((file) => file.path === state.activeWorkspacePath)) {
+    clearWorkspaceSelection();
   }
 }
 
@@ -5002,9 +5064,13 @@ function renderWorkspacePanel(): void {
 function renderWorkspaceFiles(): void {
   const { configFiles, promptFiles, codexFiles } = splitWorkspaceFiles(state.workspaceFiles);
   renderWorkspaceNavigation(configFiles.length, promptFiles.length, codexFiles.length);
+  renderWorkspaceConfigAndPromptFiles(configFiles, promptFiles);
+  renderWorkspaceCodexTree(workspaceCodexTreeBody, codexFiles, t("workspace.emptyCodex"));
+}
+
+function renderWorkspaceConfigAndPromptFiles(configFiles: WorkspaceFileInfo[], promptFiles: WorkspaceFileInfo[]): void {
   renderWorkspaceFileRows(workspaceFilesBody, configFiles, t("workspace.emptyConfig"));
   renderWorkspaceFileRows(workspacePromptsBody, promptFiles, t("workspace.emptyPrompt"));
-  renderWorkspaceCodexTree(workspaceCodexTreeBody, codexFiles, t("workspace.emptyCodex"));
 }
 
 function splitWorkspaceFiles(
@@ -5229,45 +5295,54 @@ function renderWorkspaceFileRows(
   }
 
   files.forEach((file) => {
-    const entry = document.createElement("li");
-    entry.className = "models-provider-card-entry workspace-file-card-entry";
-
-    const openButton = document.createElement("button");
-    openButton.type = "button";
-    openButton.className = "models-provider-card workspace-file-open-card";
-    openButton.dataset.workspaceOpen = file.path;
-    if (file.path === state.activeWorkspacePath) {
-      openButton.classList.add("is-selected");
-    }
-    openButton.setAttribute("aria-pressed", String(file.path === state.activeWorkspacePath));
-
-    const pathTitle = document.createElement("span");
-    pathTitle.className = "models-provider-card-title mono workspace-file-card-path";
-    pathTitle.textContent = file.path;
-
-    const summaryMeta = document.createElement("span");
-    summaryMeta.className = "models-provider-card-meta";
-    summaryMeta.textContent = resolveWorkspaceFileSummary(file);
-
-    const sizeMeta = document.createElement("span");
-    sizeMeta.className = "models-provider-card-meta";
-    sizeMeta.textContent = `${t("workspace.size")}: ${file.size === null ? t("common.none") : String(file.size)}`;
-
-    openButton.append(pathTitle, summaryMeta, sizeMeta);
-
-    const deleteButton = document.createElement("button");
-    deleteButton.type = "button";
-    const deleteLabel = t("workspace.deleteFile");
-    deleteButton.className = "models-provider-card-delete chat-delete-btn workspace-file-card-delete";
-    deleteButton.dataset.workspaceDelete = file.path;
-    deleteButton.setAttribute("aria-label", deleteLabel);
-    deleteButton.title = deleteLabel;
-    deleteButton.innerHTML = TRASH_ICON_SVG;
-    deleteButton.disabled = file.kind !== "skill";
-
-    entry.append(openButton, deleteButton);
-    targetBody.appendChild(entry);
+    targetBody.appendChild(createWorkspaceFileRow(file));
   });
+}
+
+function createWorkspaceFileRow(file: WorkspaceFileInfo): HTMLLIElement {
+  const entry = document.createElement("li");
+  entry.className = "models-provider-card-entry workspace-file-card-entry";
+  entry.append(buildWorkspaceFileOpenButton(file), buildWorkspaceFileDeleteButton(file));
+  return entry;
+}
+
+function buildWorkspaceFileOpenButton(file: WorkspaceFileInfo): HTMLButtonElement {
+  const openButton = document.createElement("button");
+  openButton.type = "button";
+  openButton.className = "models-provider-card workspace-file-open-card";
+  openButton.dataset.workspaceOpen = file.path;
+  if (file.path === state.activeWorkspacePath) {
+    openButton.classList.add("is-selected");
+  }
+  openButton.setAttribute("aria-pressed", String(file.path === state.activeWorkspacePath));
+
+  const pathTitle = document.createElement("span");
+  pathTitle.className = "models-provider-card-title mono workspace-file-card-path";
+  pathTitle.textContent = file.path;
+
+  const summaryMeta = document.createElement("span");
+  summaryMeta.className = "models-provider-card-meta";
+  summaryMeta.textContent = resolveWorkspaceFileSummary(file);
+
+  const sizeMeta = document.createElement("span");
+  sizeMeta.className = "models-provider-card-meta";
+  sizeMeta.textContent = `${t("workspace.size")}: ${file.size === null ? t("common.none") : String(file.size)}`;
+
+  openButton.append(pathTitle, summaryMeta, sizeMeta);
+  return openButton;
+}
+
+function buildWorkspaceFileDeleteButton(file: WorkspaceFileInfo): HTMLButtonElement {
+  const deleteButton = document.createElement("button");
+  deleteButton.type = "button";
+  const deleteLabel = t("workspace.deleteFile");
+  deleteButton.className = "models-provider-card-delete chat-delete-btn workspace-file-card-delete";
+  deleteButton.dataset.workspaceDelete = file.path;
+  deleteButton.setAttribute("aria-label", deleteLabel);
+  deleteButton.title = deleteLabel;
+  deleteButton.innerHTML = TRASH_ICON_SVG;
+  deleteButton.disabled = file.kind !== "skill";
+  return deleteButton;
 }
 
 function resolveWorkspaceFileSummary(file: WorkspaceFileInfo): string {
@@ -5328,10 +5403,7 @@ async function openWorkspaceFile(path: string, options: { silent?: boolean } = {
   syncControlState();
   try {
     const payload = await getWorkspaceFile(path);
-    state.activeWorkspacePath = path;
-    const prepared = prepareWorkspaceEditorPayload(payload);
-    state.activeWorkspaceContent = prepared.content;
-    state.activeWorkspaceMode = prepared.mode;
+    setWorkspaceEditorStateFromPayload(path, payload);
     renderWorkspacePanel();
     setWorkspaceEditorModalOpen(true);
     if (!options.silent) {
@@ -5342,53 +5414,70 @@ async function openWorkspaceFile(path: string, options: { silent?: boolean } = {
   }
 }
 
+function setWorkspaceEditorStateFromPayload(path: string, payload: unknown): void {
+  const prepared = prepareWorkspaceEditorPayload(payload);
+  state.activeWorkspacePath = path;
+  state.activeWorkspaceContent = prepared.content;
+  state.activeWorkspaceMode = prepared.mode;
+}
+
 async function saveWorkspaceFile(): Promise<void> {
   syncControlState();
-  const path = normalizeWorkspaceInputPath(workspaceFilePathInput.value);
-  if (path === "") {
-    setStatus(t("error.workspacePathRequired"), "error");
+  const draft = collectWorkspaceSaveDraft();
+  if (!draft) {
     return;
   }
-
-  let payload: unknown;
-  if (state.activeWorkspaceMode === "text") {
-    payload = { content: workspaceFileContentInput.value };
-  } else {
-    try {
-      payload = JSON.parse(workspaceFileContentInput.value);
-    } catch {
-      setStatus(t("error.workspaceInvalidJSON"), "error");
-      return;
-    }
-  }
   try {
-    await putWorkspaceFile(path, payload);
-    state.activeWorkspacePath = path;
-    const prepared = prepareWorkspaceEditorPayload(payload);
-    state.activeWorkspaceContent = prepared.content;
-    state.activeWorkspaceMode = prepared.mode;
+    await putWorkspaceFile(draft.path, draft.payload);
+    setWorkspaceEditorStateFromPayload(draft.path, draft.payload);
     await refreshWorkspace({ silent: true });
-    if (isSystemPromptWorkspacePath(path)) {
-      invalidateSystemPromptTokensCacheAndReload();
-    }
-    setStatus(t("status.workspaceFileSaved", { path }), "info");
+    afterWorkspaceFileSaved(draft.path);
+    setStatus(t("status.workspaceFileSaved", { path: draft.path }), "info");
   } catch (error) {
     setStatus(asWorkspaceErrorMessage(error), "error");
   }
 }
 
+function collectWorkspaceSaveDraft(): { path: string; payload: unknown } | null {
+  const path = normalizeWorkspaceInputPath(workspaceFilePathInput.value);
+  if (path === "") {
+    setStatus(t("error.workspacePathRequired"), "error");
+    return null;
+  }
+  const payload = resolveWorkspaceEditorPayload(state.activeWorkspaceMode, workspaceFileContentInput.value);
+  if (payload === null) {
+    setStatus(t("error.workspaceInvalidJSON"), "error");
+    return null;
+  }
+  return { path, payload };
+}
+
+function resolveWorkspaceEditorPayload(mode: WorkspaceEditorMode, content: string): unknown | null {
+  if (mode === "text") {
+    return { content };
+  }
+  try {
+    return JSON.parse(content);
+  } catch {
+    return null;
+  }
+}
+
+function afterWorkspaceFileSaved(path: string): void {
+  if (isSystemPromptWorkspacePath(path)) {
+    invalidateSystemPromptTokensCacheAndReload();
+  }
+}
+
 async function deleteWorkspaceFile(path: string): Promise<void> {
   syncControlState();
-  const confirmed = window.confirm(t("workspace.deleteFileConfirm", { path }));
-  if (!confirmed) {
+  if (!confirmWorkspaceFileDeletion(path)) {
     return;
   }
 
   try {
     await deleteWorkspaceFileRequest(path);
-    if (state.activeWorkspacePath === path) {
-      clearWorkspaceSelection();
-    }
+    afterWorkspaceFileDeleted(path);
     await refreshWorkspace({ silent: true });
     setStatus(t("status.workspaceFileDeleted", { path }), "info");
   } catch (error) {
@@ -5396,32 +5485,26 @@ async function deleteWorkspaceFile(path: string): Promise<void> {
   }
 }
 
+function confirmWorkspaceFileDeletion(path: string): boolean {
+  return window.confirm(t("workspace.deleteFileConfirm", { path }));
+}
+
+function afterWorkspaceFileDeleted(path: string): void {
+  if (state.activeWorkspacePath === path) {
+    clearWorkspaceSelection();
+  }
+}
+
 async function importWorkspaceJSON(): Promise<void> {
   syncControlState();
-  const raw = workspaceJSONInput.value.trim();
-  if (raw === "") {
-    setStatus(t("error.workspaceJSONRequired"), "error");
+  const payload = parseWorkspaceImportInput(workspaceJSONInput.value);
+  if (payload === null) {
     return;
   }
-
-  let payload: unknown;
-  try {
-    payload = JSON.parse(raw);
-  } catch {
-    setStatus(t("error.workspaceInvalidJSON"), "error");
-    return;
-  }
-
   try {
     await requestJSON<unknown>("/workspace/import", {
       method: "POST",
-      body:
-        payload && typeof payload === "object" && "mode" in (payload as Record<string, unknown>)
-          ? payload
-          : {
-              mode: "replace",
-              payload,
-            },
+      body: buildWorkspaceImportBody(payload),
     });
     clearWorkspaceSelection();
     await refreshWorkspace({ silent: true });
@@ -5430,6 +5513,30 @@ async function importWorkspaceJSON(): Promise<void> {
   } catch (error) {
     setStatus(asWorkspaceErrorMessage(error), "error");
   }
+}
+
+function parseWorkspaceImportInput(raw: string): unknown | null {
+  const trimmed = raw.trim();
+  if (trimmed === "") {
+    setStatus(t("error.workspaceJSONRequired"), "error");
+    return null;
+  }
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    setStatus(t("error.workspaceInvalidJSON"), "error");
+    return null;
+  }
+}
+
+function buildWorkspaceImportBody(payload: unknown): unknown {
+  if (payload && typeof payload === "object" && "mode" in (payload as Record<string, unknown>)) {
+    return payload;
+  }
+  return {
+    mode: "replace",
+    payload,
+  };
 }
 
 async function listWorkspaceFiles(): Promise<WorkspaceFileInfo[]> {
@@ -5455,68 +5562,112 @@ async function deleteWorkspaceFileRequest(path: string): Promise<void> {
 }
 
 function normalizeWorkspaceFiles(raw: unknown): WorkspaceFileInfo[] {
-  const rows: unknown[] = [];
-  if (Array.isArray(raw)) {
-    rows.push(...raw);
-  } else if (raw && typeof raw === "object") {
-    const obj = raw as Record<string, unknown>;
-    if (Array.isArray(obj.files)) {
-      rows.push(...obj.files);
-    } else if (obj.files && typeof obj.files === "object") {
-      rows.push(...Object.entries(obj.files as Record<string, unknown>).map(([path, value]) => ({ path, value })));
-    }
-    if (Array.isArray(obj.items)) {
-      rows.push(...obj.items);
-    }
-    if (rows.length === 0) {
-      rows.push(...Object.entries(obj).map(([path, value]) => ({ path, value })));
-    }
-  }
-
+  const rows = collectWorkspaceFileRows(raw);
   const byPath = new Map<string, WorkspaceFileInfo>();
   for (const row of rows) {
-    let path = "";
-    let kind: "config" | "skill" = "config";
-    let size: number | null = null;
-
-    if (typeof row === "string") {
-      path = row.trim();
-    } else if (row && typeof row === "object") {
-      const item = row as Record<string, unknown>;
-      if (typeof item.path === "string") {
-        path = item.path.trim();
-      } else if (typeof item.name === "string") {
-        path = item.name.trim();
-      } else if (typeof item.file === "string") {
-        path = item.file.trim();
-      }
-
-      if (typeof item.size === "number" && Number.isFinite(item.size)) {
-        size = item.size;
-      } else if (typeof item.bytes === "number" && Number.isFinite(item.bytes)) {
-        size = item.bytes;
-      }
-
-      if (item.kind === "skill") {
-        kind = "skill";
-      } else if (item.kind === "config") {
-        kind = "config";
-      }
-    }
-
-    if (path === "") {
+    const next = parseWorkspaceFileInfoRow(row);
+    if (!next) {
       continue;
     }
-    if (kind === "config" && path.startsWith("skills/") && path.endsWith(".json")) {
-      kind = "skill";
-    }
-    const prev = byPath.get(path);
-    if (!prev || (prev.size === null && size !== null)) {
-      byPath.set(path, { path, kind, size });
-    }
+    mergeWorkspaceFileInfo(byPath, next);
   }
 
   return Array.from(byPath.values()).sort((a, b) => a.path.localeCompare(b.path));
+}
+
+function collectWorkspaceFileRows(raw: unknown): unknown[] {
+  const rows: unknown[] = [];
+  if (Array.isArray(raw)) {
+    rows.push(...raw);
+    return rows;
+  }
+  if (!raw || typeof raw !== "object") {
+    return rows;
+  }
+
+  const obj = raw as Record<string, unknown>;
+  if (Array.isArray(obj.files)) {
+    rows.push(...obj.files);
+  } else if (obj.files && typeof obj.files === "object") {
+    rows.push(...Object.entries(obj.files as Record<string, unknown>).map(([path, value]) => ({ path, value })));
+  }
+  if (Array.isArray(obj.items)) {
+    rows.push(...obj.items);
+  }
+  if (rows.length === 0) {
+    rows.push(...Object.entries(obj).map(([path, value]) => ({ path, value })));
+  }
+  return rows;
+}
+
+function parseWorkspaceFileInfoRow(row: unknown): WorkspaceFileInfo | null {
+  if (typeof row === "string") {
+    const path = row.trim();
+    if (path === "") {
+      return null;
+    }
+    return {
+      path,
+      kind: resolveWorkspaceFileKindFromPath(path, "config"),
+      size: null,
+    };
+  }
+  if (!row || typeof row !== "object") {
+    return null;
+  }
+
+  const item = row as Record<string, unknown>;
+  const path = resolveWorkspaceFilePathFromRow(item);
+  if (path === "") {
+    return null;
+  }
+  return {
+    path,
+    kind: resolveWorkspaceFileKindFromRow(item, path),
+    size: resolveWorkspaceFileSizeFromRow(item),
+  };
+}
+
+function resolveWorkspaceFilePathFromRow(item: Record<string, unknown>): string {
+  if (typeof item.path === "string") {
+    return item.path.trim();
+  }
+  if (typeof item.name === "string") {
+    return item.name.trim();
+  }
+  if (typeof item.file === "string") {
+    return item.file.trim();
+  }
+  return "";
+}
+
+function resolveWorkspaceFileSizeFromRow(item: Record<string, unknown>): number | null {
+  if (typeof item.size === "number" && Number.isFinite(item.size)) {
+    return item.size;
+  }
+  if (typeof item.bytes === "number" && Number.isFinite(item.bytes)) {
+    return item.bytes;
+  }
+  return null;
+}
+
+function resolveWorkspaceFileKindFromRow(item: Record<string, unknown>, path: string): "config" | "skill" {
+  const rawKind: "config" | "skill" = item.kind === "skill" ? "skill" : "config";
+  return resolveWorkspaceFileKindFromPath(path, rawKind);
+}
+
+function resolveWorkspaceFileKindFromPath(path: string, fallback: "config" | "skill"): "config" | "skill" {
+  if (fallback === "config" && path.startsWith("skills/") && path.endsWith(".json")) {
+    return "skill";
+  }
+  return fallback;
+}
+
+function mergeWorkspaceFileInfo(byPath: Map<string, WorkspaceFileInfo>, next: WorkspaceFileInfo): void {
+  const prev = byPath.get(next.path);
+  if (!prev || (prev.size === null && next.size !== null)) {
+    byPath.set(next.path, next);
+  }
 }
 
 function clearWorkspaceSelection(): void {

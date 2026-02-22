@@ -1,6 +1,6 @@
 # NextAI TODO
 
-更新时间：2026-02-22 10:17:28 +0800
+更新时间：2026-02-22 10:36:01 +0800
 
 ## 执行约定（强制）
 - 每位接手 AI 开始前，必须先阅读本文件与 `/home/ruan/.codex/handoff/latest.md`。
@@ -29,6 +29,14 @@
 - [x] `docs/v1-roadmap.md`、`docs/contracts.md`、本地开发文档、部署文档与发布模板已完成。
 
 ## 6. 实操验证（汇总）
+- [x] 2026-02-22 10:36 +0800 按交接顺序复核 Web 基线：执行 `pnpm -C apps/web build` 与 `pnpm -C apps/web test`，确认继续拆分前后基线稳定可回归。
+- [x] 2026-02-22 10:36 +0800 Web `main.ts` 安全瘦身第 3 步落地：拆分 workspace CRUD 主流程（`refresh/open/save/delete/import`）并提炼 `applyWorkspaceFileList`、`syncActiveWorkspaceSelection`、`setWorkspaceEditorStateFromPayload`、`collectWorkspaceSaveDraft`、`resolveWorkspaceEditorPayload`、`parseWorkspaceImportInput`、`buildWorkspaceImportBody` 等编排 helper；同步将 `normalizeWorkspaceFiles` 拆分为 `collectWorkspaceFileRows`、`parseWorkspaceFileInfoRow`、`resolveWorkspaceFilePathFromRow`、`resolveWorkspaceFileSizeFromRow`、`resolveWorkspaceFileKindFromRow`、`mergeWorkspaceFileInfo`，保持行为语义不变。
+- [x] 2026-02-22 10:36 +0800 验证通过：执行 `pnpm -C apps/web exec tsc -p tsconfig.json`、`pnpm -C apps/web build`、`pnpm -C apps/web test` 全量通过（`Test Files 6 passed`，`Tests 52 passed`）。
+- [x] 2026-02-22 10:29 +0800 按交接顺序完成 Web 基线确认：先执行 `pnpm -C apps/web build` 与 `pnpm -C apps/web test`，确认继续重构前基线通过。
+- [x] 2026-02-22 10:29 +0800 Web `main.ts` 安全瘦身第 2 步落地：将 `bindWorkspaceAndChannelEvents` 拆为 `bindChannelEvents` 与 `bindWorkspaceEvents`，workspace 再细分为导航/模态框/列表/编辑/Esc 五组绑定；同步拆分 workspace 渲染入口与文件行构建（`createWorkspaceFileRow`、`buildWorkspaceFileOpenButton`、`buildWorkspaceFileDeleteButton`），保持交互语义不变。
+- [x] 2026-02-22 10:29 +0800 验证通过：重构后再次执行 `pnpm -C apps/web build` 与 `pnpm -C apps/web test` 全量通过（`Test Files 6 passed`，`Tests 52 passed`）。
+- [x] 2026-02-22 10:23 +0800 Web `main.ts` 安全瘦身第 1 步落地：将 `bindEvents`（原 567 行）按职责拆分为 `bindTabEvents`、`bindSearchEvents`、`bindSettingsEvents`、`bindChatHeaderEvents`、`bindConnectionEvents`、`bindComposerEvents`、`bindModelEvents`、`bindWorkspaceAndChannelEvents`、`bindCronEvents`，入口 `bindEvents` 改为编排调用，事件处理语义保持不变。
+- [x] 2026-02-22 10:23 +0800 验证通过：执行 `pnpm -C apps/web build` 与 `pnpm -C apps/web test -- test/e2e/web-shell-tool-flow.test.ts` 均通过（含 chat/models/workspace/cron 相关交互回归）。
 - [x] 2026-02-22 10:17 +0800 Gateway Codex Mode V2（保守兼容）落地：新增 `NEXTAI_ENABLE_CODEX_MODE_V2` 开关并在 `buildSystemLayersForMode` 分流 `codex_v1/codex_v2`；实现 `buildCodexSystemLayersV2`（base/orchestrator/model/collab/experimental/local policy/tool guide）、统一模板渲染器 `renderTemplate`、V2 去重器 `dedupeLayersByNormalizedContent`（核心层>本地策略层>工具层）与渲染失败/缺变量 warning+跳过语义。
 - [x] 2026-02-22 10:17 +0800 可观测与回归补齐：`GET /agent/system-layers` 新增 `mode_variant(default|codex_v1|codex_v2)` 与 `layers[].layer_hash`，`GET /runtime-config` 新增 `features.codex_mode_v2`；补充 `server_test` 覆盖 flag 开关分流、V2 层序、变量渲染、去重、可选层缺失、必选层缺失 `codex_prompt_unavailable`、接口 token 一致性；验证 `cd apps/gateway && go test ./internal/app` 与 `cd apps/gateway && go test ./...` 全部通过；同步更新 `docs/contracts.md` 与 `.env.example` 回滚语义。
 - [x] 2026-02-22 09:42 +0800 Codex 注入文件内容核查：完成 5 个运行时系统层文件（base/orchestrator/model_instructions/collaboration_default/experimental）的全文读取与规则分类，补充 `{{ personality }}`、`{{KNOWN_MODE_NAMES}}`、`{{REQUEST_USER_INPUT_AVAILABILITY}}` 占位符来源确认。
