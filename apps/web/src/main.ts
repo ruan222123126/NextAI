@@ -387,7 +387,7 @@ const DEFAULT_OPENAI_MODEL_IDS = ["gpt-4o-mini", "gpt-4.1-mini"];
 const DEFAULT_MODEL_CONTEXT_LIMIT_TOKENS = 128000;
 const PROMPT_TEMPLATE_PREFIX = "/prompts:";
 const SYSTEM_PROMPT_LAYER_ENDPOINT = "/agent/system-layers";
-const SYSTEM_PROMPT_WORKSPACE_FALLBACK_PATHS = ["docs/AI/AGENTS.md", "docs/AI/ai-tools.md"] as const;
+const SYSTEM_PROMPT_WORKSPACE_FALLBACK_PATHS = ["prompts/AGENTS.md", "prompts/ai-tools.md"] as const;
 const SYSTEM_PROMPT_WORKSPACE_PATH_SET = new Set(SYSTEM_PROMPT_WORKSPACE_FALLBACK_PATHS.map((path) => path.toLowerCase()));
 const WORKSPACE_CODEX_PREFIX = "prompts/codex/";
 const WORKSPACE_CARD_KEYS: WorkspaceCardKey[] = ["config", "prompt", "codex"];
@@ -512,8 +512,6 @@ const workspaceLevel2CodexView = mustElement<HTMLElement>("workspace-level2-code
 const workspaceFilesBody = mustElement<HTMLUListElement>("workspace-files-body");
 const workspacePromptsBody = mustElement<HTMLUListElement>("workspace-prompts-body");
 const workspaceCodexTreeBody = mustElement<HTMLUListElement>("workspace-codex-tree-body");
-const workspaceCreateFileForm = mustElement<HTMLFormElement>("workspace-create-file-form");
-const workspaceNewPathInput = mustElement<HTMLInputElement>("workspace-new-path");
 const workspaceEditorModal = mustElement<HTMLElement>("workspace-editor-modal");
 const workspaceEditorModalCloseButton = mustElement<HTMLButtonElement>("workspace-editor-modal-close-btn");
 const workspaceImportModal = mustElement<HTMLElement>("workspace-import-modal");
@@ -886,7 +884,8 @@ function extractWorkspaceFileText(payload: unknown): string {
 async function loadSystemPromptTokens(): Promise<number> {
   if (runtimeFlags.prompt_context_introspect) {
     try {
-      const payload = await requestJSON<AgentSystemLayersResponse>(SYSTEM_PROMPT_LAYER_ENDPOINT);
+      const systemLayerEndpoint = `${SYSTEM_PROMPT_LAYER_ENDPOINT}?prompt_mode=${encodeURIComponent(state.activePromptMode)}`;
+      const payload = await requestJSON<AgentSystemLayersResponse>(systemLayerEndpoint);
       const total = payload?.estimated_tokens_total;
       if (typeof total === "number" && Number.isFinite(total) && total >= 0) {
         return Math.floor(total);
@@ -1340,10 +1339,6 @@ function bindEvents(): void {
   });
   workspaceImportOpenButton.addEventListener("click", () => {
     setWorkspaceImportModalOpen(true);
-  });
-  workspaceCreateFileForm.addEventListener("submit", async (event) => {
-    event.preventDefault();
-    await createWorkspaceFile();
   });
   workspaceEditorModal.addEventListener("click", (event) => {
     const target = event.target;
@@ -5329,32 +5324,6 @@ function renderWorkspaceEditor(): void {
   workspaceDeleteFileButton.disabled = !canDelete;
 }
 
-async function createWorkspaceFile(): Promise<void> {
-  syncControlState();
-  const path = normalizeWorkspaceInputPath(workspaceNewPathInput.value);
-  if (path === "") {
-    setStatus(t("error.workspacePathRequired"), "error");
-    return;
-  }
-  if (!isWorkspaceSkillPath(path)) {
-    setStatus(t("error.workspaceCreateOnlySkill"), "error");
-    return;
-  }
-
-  try {
-    await putWorkspaceFile(path, createWorkspaceSkillTemplate(path));
-    workspaceNewPathInput.value = "";
-    state.activeWorkspacePath = path;
-    state.activeWorkspaceContent = JSON.stringify(createWorkspaceSkillTemplate(path), null, 2);
-    state.activeWorkspaceMode = "json";
-    await refreshWorkspace({ silent: true });
-    setWorkspaceEditorModalOpen(true);
-    setStatus(t("status.workspaceFileCreated", { path }), "info");
-  } catch (error) {
-    setStatus(asWorkspaceErrorMessage(error), "error");
-  }
-}
-
 async function openWorkspaceFile(path: string, options: { silent?: boolean } = {}): Promise<void> {
   syncControlState();
   try {
@@ -5592,22 +5561,6 @@ function isWorkspaceSkillPath(path: string): boolean {
   }
   const name = path.slice("skills/".length, path.length - ".json".length).trim();
   return name !== "" && !name.includes("/");
-}
-
-function createWorkspaceSkillTemplate(path: string): Record<string, unknown> {
-  const normalized = normalizeWorkspaceInputPath(path);
-  const name = normalized.slice("skills/".length, normalized.length - ".json".length).trim();
-  if (name === "") {
-    throw new Error(t("error.workspacePathRequired"));
-  }
-  return {
-    name,
-    content: "# new skill",
-    source: "customized",
-    references: {},
-    scripts: {},
-    enabled: true,
-  };
 }
 
 function initCronWorkflowEditor(): void {

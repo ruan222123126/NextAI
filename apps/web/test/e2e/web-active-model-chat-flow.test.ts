@@ -416,8 +416,8 @@ describe("web e2e: auto activate model then send chat", () => {
   });
 
   it("shows used and total context tokens with active model context limit", async () => {
-    const agentsPath = "docs/AI/AGENTS.md";
-    const aiToolsPath = "docs/AI/ai-tools.md";
+    const agentsPath = "prompts/AGENTS.md";
+    const aiToolsPath = "prompts/ai-tools.md";
     const agentsPathEncoded = encodeURIComponent(agentsPath);
     const aiToolsPathEncoded = encodeURIComponent(aiToolsPath);
     const agentsContent = "aaaa ".repeat(100).trim();
@@ -665,8 +665,8 @@ describe("web e2e: auto activate model then send chat", () => {
   });
 
   it("updates used context tokens after saving system prompt files", async () => {
-    const agentsPath = "docs/AI/AGENTS.md";
-    const aiToolsPath = "docs/AI/ai-tools.md";
+    const agentsPath = "prompts/AGENTS.md";
+    const aiToolsPath = "prompts/ai-tools.md";
     const agentsPathEncoded = encodeURIComponent(agentsPath);
     const aiToolsPathEncoded = encodeURIComponent(aiToolsPath);
     let agentsContent = "aaaa ".repeat(100).trim();

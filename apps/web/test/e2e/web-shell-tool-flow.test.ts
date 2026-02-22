@@ -2207,7 +2207,7 @@ describe("web e2e: /shell command sends biz_params.tool", () => {
   });
 
   it("工作区文本文件应按原文编辑并以 content 字段保存", async () => {
-    const filePath = "docs/AI/AGENTS.md";
+    const filePath = "prompts/AGENTS.md";
     const rawContent = [
       "# AI Tool Guide",
       "你可以通过 POST /agent/process 触发工具调用。",
@@ -2485,7 +2485,7 @@ describe("web e2e: /shell command sends biz_params.tool", () => {
   });
 
   it("keeps settings popover open when closing workspace editor modal", async () => {
-    const filePath = "docs/AI/AGENTS.md";
+    const filePath = "prompts/AGENTS.md";
     const rawContent = "# AI Tool Guide";
     let workspaceFileLoaded = false;
 
