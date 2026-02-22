@@ -146,6 +146,16 @@ interface WorkspaceCodexTreeNode {
   files: WorkspaceFileInfo[];
 }
 
+interface WorkspaceFileCatalog {
+  files: WorkspaceFileInfo[];
+  configFiles: WorkspaceFileInfo[];
+  promptFiles: WorkspaceFileInfo[];
+  codexFiles: WorkspaceFileInfo[];
+  codexTree: WorkspaceCodexTreeNode[];
+  codexFolderPaths: Set<string>;
+  codexTopLevelFolderPaths: Set<string>;
+}
+
 interface WorkspaceTextPayload {
   content: string;
 }
@@ -600,7 +610,7 @@ const state = {
     mode: "create" as "create" | "edit",
     editingProviderID: "",
   },
-  workspaceFiles: [] as WorkspaceFileInfo[],
+  workspaceFileCatalog: createWorkspaceFileCatalog([]),
   workspaceCodexExpandedFolders: new Set<string>(),
   qqChannelConfig: defaultQQChannelConfig(),
   qqChannelAvailable: true,
@@ -5028,20 +5038,20 @@ async function saveQQChannelConfig(): Promise<void> {
 async function refreshWorkspace(options: { silent?: boolean } = {}): Promise<void> {
   syncControlState();
   try {
-    const files = await fetchWorkspaceFiles();
-    applyWorkspaceFileList(files);
+    const catalog = await fetchWorkspaceFileCatalog();
+    applyWorkspaceFileCatalog(catalog);
     if (!options.silent) {
-      setStatus(t("status.workspaceFilesLoaded", { count: files.length }), "info");
+      setStatus(t("status.workspaceFilesLoaded", { count: catalog.files.length }), "info");
     }
   } catch (error) {
     setStatus(asWorkspaceErrorMessage(error), "error");
   }
 }
 
-function applyWorkspaceFileList(files: WorkspaceFileInfo[]): void {
-  state.workspaceFiles = files;
-  pruneWorkspaceCodexExpandedFolders(files);
-  syncActiveWorkspaceSelection(files);
+function applyWorkspaceFileCatalog(catalog: WorkspaceFileCatalog): void {
+  state.workspaceFileCatalog = catalog;
+  syncWorkspaceCodexExpandedFolders(catalog);
+  syncActiveWorkspaceSelection(catalog.files);
   renderWorkspacePanel();
   state.tabLoaded.workspace = true;
 }
@@ -5062,10 +5072,10 @@ function renderWorkspacePanel(): void {
 }
 
 function renderWorkspaceFiles(): void {
-  const { configFiles, promptFiles, codexFiles } = splitWorkspaceFiles(state.workspaceFiles);
+  const { configFiles, promptFiles, codexFiles, codexTree } = state.workspaceFileCatalog;
   renderWorkspaceNavigation(configFiles.length, promptFiles.length, codexFiles.length);
   renderWorkspaceConfigAndPromptFiles(configFiles, promptFiles);
-  renderWorkspaceCodexTree(workspaceCodexTreeBody, codexFiles, t("workspace.emptyCodex"));
+  renderWorkspaceCodexTree(workspaceCodexTreeBody, codexTree, t("workspace.emptyCodex"));
 }
 
 function renderWorkspaceConfigAndPromptFiles(configFiles: WorkspaceFileInfo[], promptFiles: WorkspaceFileInfo[]): void {
@@ -5093,9 +5103,44 @@ function splitWorkspaceFiles(
   return { configFiles, promptFiles, codexFiles };
 }
 
-function renderWorkspaceCodexTree(targetBody: HTMLUListElement, files: WorkspaceFileInfo[], emptyText: string): void {
+function createWorkspaceFileCatalog(files: WorkspaceFileInfo[]): WorkspaceFileCatalog {
+  const groups = splitWorkspaceFiles(files);
+  const codexTree = buildWorkspaceCodexTree(groups.codexFiles);
+  const codexFolders = collectWorkspaceCodexFolderPaths(codexTree);
+  return {
+    files,
+    configFiles: groups.configFiles,
+    promptFiles: groups.promptFiles,
+    codexFiles: groups.codexFiles,
+    codexTree,
+    codexFolderPaths: codexFolders.folderPaths,
+    codexTopLevelFolderPaths: codexFolders.topLevelFolderPaths,
+  };
+}
+
+function collectWorkspaceCodexFolderPaths(tree: WorkspaceCodexTreeNode[]): {
+  folderPaths: Set<string>;
+  topLevelFolderPaths: Set<string>;
+} {
+  const folderPaths = new Set<string>();
+  const topLevelFolderPaths = new Set<string>();
+  const visit = (node: WorkspaceCodexTreeNode, depth: number): void => {
+    folderPaths.add(node.path);
+    if (depth === 0) {
+      topLevelFolderPaths.add(node.path);
+    }
+    for (const child of node.folders) {
+      visit(child, depth + 1);
+    }
+  };
+  for (const node of tree) {
+    visit(node, 0);
+  }
+  return { folderPaths, topLevelFolderPaths };
+}
+
+function renderWorkspaceCodexTree(targetBody: HTMLUListElement, tree: WorkspaceCodexTreeNode[], emptyText: string): void {
   targetBody.innerHTML = "";
-  const tree = buildWorkspaceCodexTree(files);
   if (tree.length === 0) {
     appendEmptyItem(targetBody, emptyText);
     return;
@@ -5252,32 +5297,14 @@ function toggleWorkspaceCodexFolder(path: string): void {
   renderWorkspaceFiles();
 }
 
-function pruneWorkspaceCodexExpandedFolders(files: WorkspaceFileInfo[]): void {
-  const validPaths = new Set<string>();
-  const topLevelPaths = new Set<string>();
-  for (const file of files) {
-    if (!isWorkspaceCodexFile(file)) {
-      continue;
-    }
-    const normalizedPath = normalizeWorkspaceInputPath(file.path);
-    const relativePath = normalizedPath.slice(WORKSPACE_CODEX_PREFIX.length);
-    const parts = relativePath.split("/").filter((part) => part !== "");
-    let folderPath = "";
-    for (let index = 0; index < parts.length - 1; index += 1) {
-      folderPath = folderPath === "" ? parts[index] : `${folderPath}/${parts[index]}`;
-      if (index === 0) {
-        topLevelPaths.add(folderPath);
-      }
-      validPaths.add(folderPath);
-    }
-  }
+function syncWorkspaceCodexExpandedFolders(catalog: WorkspaceFileCatalog): void {
   for (const path of Array.from(state.workspaceCodexExpandedFolders)) {
-    if (!validPaths.has(path)) {
+    if (!catalog.codexFolderPaths.has(path)) {
       state.workspaceCodexExpandedFolders.delete(path);
     }
   }
   if (state.workspaceCodexExpandedFolders.size === 0) {
-    for (const topPath of topLevelPaths) {
+    for (const topPath of catalog.codexTopLevelFolderPaths) {
       state.workspaceCodexExpandedFolders.add(topPath);
     }
   }
@@ -5536,9 +5563,9 @@ function buildWorkspaceImportBody(payload: unknown): unknown {
   };
 }
 
-async function fetchWorkspaceFiles(): Promise<WorkspaceFileInfo[]> {
+async function fetchWorkspaceFileCatalog(): Promise<WorkspaceFileCatalog> {
   const raw = await requestWorkspaceFiles();
-  return normalizeWorkspaceFiles(raw);
+  return normalizeWorkspaceFileCatalog(raw);
 }
 
 async function requestWorkspaceFiles(): Promise<unknown> {
@@ -5571,6 +5598,11 @@ async function requestWorkspaceImport(payload: unknown): Promise<void> {
     method: "POST",
     body: buildWorkspaceImportBody(payload),
   });
+}
+
+function normalizeWorkspaceFileCatalog(raw: unknown): WorkspaceFileCatalog {
+  const files = normalizeWorkspaceFiles(raw);
+  return createWorkspaceFileCatalog(files);
 }
 
 function normalizeWorkspaceFiles(raw: unknown): WorkspaceFileInfo[] {

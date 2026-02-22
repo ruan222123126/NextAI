@@ -1,6 +1,6 @@
 # NextAI TODO
 
-更新时间：2026-02-22 10:42:54 +0800
+更新时间：2026-02-22 10:49:38 +0800
 
 ## 执行约定（强制）
 - 每位接手 AI 开始前，必须先阅读本文件与 `/home/ruan/.codex/handoff/latest.md`。
@@ -29,6 +29,10 @@
 - [x] `docs/v1-roadmap.md`、`docs/contracts.md`、本地开发文档、部署文档与发布模板已完成。
 
 ## 6. 实操验证（汇总）
+- [x] 2026-02-22 10:47 +0800 按交接顺序完成遗留改动提交：将 `apps/web/src/main.ts` 与 `docs/TODO.md` 提交为 `a171192`（`refactor(web): extract workspace request helpers`）。
+- [x] 2026-02-22 10:47 +0800 按交接顺序完成遗留改动推送：执行 `git push origin refactor/gateway-stage1-transport` 成功（远端提示仓库迁移但已兼容转发）。
+- [x] 2026-02-22 10:49 +0800 Web `main.ts` 安全瘦身第 5 步落地：新增 `WorkspaceFileCatalog` 作为 workspace 数据归一化层，提炼 `createWorkspaceFileCatalog`、`collectWorkspaceCodexFolderPaths`、`normalizeWorkspaceFileCatalog`；`refreshWorkspace` 改为 `fetchWorkspaceFileCatalog` 流程，渲染侧直接消费 catalog（`config/prompt/codex tree`），并将 codex 展开态同步从“渲染时路径拆解”改为基于 catalog 的 `syncWorkspaceCodexExpandedFolders`。
+- [x] 2026-02-22 10:49 +0800 验证通过：执行 `pnpm -C apps/web build && pnpm -C apps/web test` 全量通过（`Test Files 6 passed`，`Tests 52 passed`）。
 - [x] 2026-02-22 10:40 +0800 按交接顺序完成遗留未推送项：执行 `git push origin refactor/gateway-stage1-transport` 成功，远端已创建同名分支（提示仓库已迁移到 `ruan222123126/NextAI`，当前 push 兼容转发成功）。
 - [x] 2026-02-22 10:40 +0800 按交接顺序复核 Web 基线：执行 `pnpm -C apps/web build && pnpm -C apps/web test`，确认继续拆分前链路稳定（`Test Files 6 passed`，`Tests 52 passed`）。
 - [x] 2026-02-22 10:42 +0800 Web `main.ts` 安全瘦身第 4 步落地：将 workspace 请求层进一步与 UI 编排层拆分，提炼 `requestWorkspaceFiles`、`requestWorkspaceFile`、`requestWorkspaceFileUpdate`、`requestWorkspaceFileDeletion`、`requestWorkspaceImport` 与 `buildWorkspaceFileRequestPath`；`refresh/open/save/delete/import` 流程改为统一调用请求层函数，保持行为语义不变。
