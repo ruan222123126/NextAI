@@ -63,6 +63,13 @@ const (
 	aiToolsGuideLegacyV0RelativePath = "docs/AI/AGENTS.md"
 	aiToolsGuideLegacyV1RelativePath = "docs/AI/ai-tools.md"
 	aiToolsGuideLegacyV2RelativePath = "docs/ai-tools.md"
+	claudeBasePromptRelativePath     = "prompts/claude/main.md"
+	claudeDoingTasksRelativePath     = "prompts/claude/doing-tasks.md"
+	claudeExecutionCareRelativePath  = "prompts/claude/executing-actions-with-care.md"
+	claudeToolUsageRelativePath      = "prompts/claude/tool-usage-policy.md"
+	claudeToneStyleRelativePath      = "prompts/claude/tone-and-style.md"
+	claudeLocalPolicyRelativePath    = aiToolsGuideRelativePath
+	claudeToolGuideRelativePath      = aiToolsGuideLegacyRelativePath
 	codexBasePromptRelativePath      = "prompts/codex/codex-rs/core/prompt.md"
 	codexOrchestratorRelativePath    = "prompts/codex/codex-rs/core/templates/agents/orchestrator.md"
 	codexModelTemplateRelativePath   = "prompts/codex/codex-rs/core/templates/model_instructions/gpt-5.2-codex_instructions_template.md"
@@ -73,9 +80,11 @@ const (
 	codexToolGuideRelativePath       = aiToolsGuideLegacyRelativePath
 	promptModeDefault                = "default"
 	promptModeCodex                  = "codex"
+	promptModeClaude                 = "claude"
 	promptModeVariantDefault         = "default"
 	promptModeVariantCodexV1         = "codex_v1"
 	promptModeVariantCodexV2         = "codex_v2"
+	promptModeVariantClaudeV1        = "claude_v1"
 	collaborationModeDefaultName     = "Default"
 	collaborationModePlanName        = "Plan"
 	chatMetaPromptModeKey            = "prompt_mode"
@@ -169,6 +178,7 @@ func NewServer(cfg config.Config) (*Server, error) {
 	srv.registerToolPlugin(plugin.NewShellTool())
 	srv.registerToolPlugin(plugin.NewViewFileLinesTool(""))
 	srv.registerToolPlugin(plugin.NewEditFileLinesTool(""))
+	srv.registerToolPlugin(plugin.NewFindTool())
 	if parseBool(os.Getenv(enableBrowserToolEnv)) {
 		browserTool, toolErr := plugin.NewBrowserTool(strings.TrimSpace(os.Getenv(browserToolAgentDirEnv)))
 		if toolErr != nil {
@@ -302,6 +312,7 @@ func (s *Server) Handler() http.Handler {
 				ListWorkspaceFiles: s.listWorkspaceFiles,
 				GetWorkspaceFile:   s.getWorkspaceFile,
 				PutWorkspaceFile:   s.putWorkspaceFile,
+				UploadWorkspace:    s.uploadWorkspaceFile,
 				DeleteWorkspace:    s.deleteWorkspaceFile,
 				ExportWorkspace:    s.exportWorkspace,
 				ImportWorkspace:    s.importWorkspace,

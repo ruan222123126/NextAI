@@ -28,6 +28,7 @@ type AdminHandlers struct {
 	ListWorkspaceFiles stdhttp.HandlerFunc
 	GetWorkspaceFile   stdhttp.HandlerFunc
 	PutWorkspaceFile   stdhttp.HandlerFunc
+	UploadWorkspace    stdhttp.HandlerFunc
 	DeleteWorkspace    stdhttp.HandlerFunc
 	ExportWorkspace    stdhttp.HandlerFunc
 	ImportWorkspace    stdhttp.HandlerFunc
@@ -70,6 +71,7 @@ func registerAdminRoutes(api chi.Router, handlers AdminHandlers) {
 		r.Get("/files", mustHandler("list-workspace-files", handlers.ListWorkspaceFiles))
 		r.Get("/files/*", mustHandler("get-workspace-file", handlers.GetWorkspaceFile))
 		r.Put("/files/*", mustHandler("put-workspace-file", handlers.PutWorkspaceFile))
+		r.Post("/uploads", mustHandler("upload-workspace-file", handlers.UploadWorkspace))
 		r.Delete("/files/*", mustHandler("delete-workspace-file", handlers.DeleteWorkspace))
 		r.Get("/export", mustHandler("export-workspace", handlers.ExportWorkspace))
 		r.Post("/import", mustHandler("import-workspace", handlers.ImportWorkspace))

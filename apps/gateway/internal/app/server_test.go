@@ -1,10 +1,12 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -105,6 +107,22 @@ func writeWebFixture(t *testing.T, baseDir string) string {
 	return webDir
 }
 
+type stubToolPlugin struct {
+	name   string
+	invoke func(input map[string]interface{}) (map[string]interface{}, error)
+}
+
+func (p *stubToolPlugin) Name() string {
+	return p.name
+}
+
+func (p *stubToolPlugin) Invoke(input map[string]interface{}) (map[string]interface{}, error) {
+	if p.invoke == nil {
+		return map[string]interface{}{"ok": true}, nil
+	}
+	return p.invoke(input)
+}
+
 func collectSystemMessagesFromModelRequest(t *testing.T, requestBody map[string]interface{}) []string {
 	t.Helper()
 	rawMessages, ok := requestBody["messages"].([]interface{})
@@ -121,6 +139,38 @@ func collectSystemMessagesFromModelRequest(t *testing.T, requestBody map[string]
 		}
 	}
 	return out
+}
+
+func configureOpenAIProviderForTest(t *testing.T, srv *Server, baseURL string) {
+	t.Helper()
+
+	configProvider := `{"api_key":"sk-test","base_url":"` + baseURL + `"}`
+	w1 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w1, httptest.NewRequest(http.MethodPut, "/models/openai/config", strings.NewReader(configProvider)))
+	if w1.Code != http.StatusOK {
+		t.Fatalf("config provider status=%d body=%s", w1.Code, w1.Body.String())
+	}
+	setActive := `{"provider_id":"openai","model":"gpt-4o-mini"}`
+	w2 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w2, httptest.NewRequest(http.MethodPut, "/models/active", strings.NewReader(setActive)))
+	if w2.Code != http.StatusOK {
+		t.Fatalf("set active status=%d body=%s", w2.Code, w2.Body.String())
+	}
+}
+
+func intFromAny(raw interface{}) (int, bool) {
+	switch value := raw.(type) {
+	case int:
+		return value, true
+	case int32:
+		return int(value), true
+	case int64:
+		return int(value), true
+	case float64:
+		return int(value), true
+	default:
+		return 0, false
+	}
 }
 
 func TestFindRepoRootFallsBackToCurrentWorkingDirectoryWithoutGit(t *testing.T) {
@@ -700,7 +750,7 @@ func TestProcessAgentPersistsToolCallNoticesInHistory(t *testing.T) {
 	}
 	first, _ := rawNotices[0].(map[string]interface{})
 	raw, _ := first["raw"].(string)
-	if !strings.Contains(raw, `"type":"tool_call"`) || !strings.Contains(raw, `"name":"view"`) {
+	if !strings.Contains(raw, `"type":"tool_result"`) || !strings.Contains(raw, `"name":"view"`) || !strings.Contains(raw, `line-1`) {
 		t.Fatalf("unexpected persisted tool notice raw: %q", raw)
 	}
 	toolOrder, ok := assistant.Metadata["tool_order"].(float64)
@@ -1390,6 +1440,27 @@ func TestProcessAgentRejectsShellToolWithoutCommand(t *testing.T) {
 	}
 }
 
+func TestProcessAgentAcceptsBizParamsShellInputCommandForBackwardCompatibility(t *testing.T) {
+	srv := newTestServer(t)
+
+	procReq := `{
+		"input":[{"role":"user","type":"message","content":[{"type":"text","text":"/shell compat"}]}],
+		"session_id":"s-shell-biz-compat",
+		"user_id":"u-shell-biz-compat",
+		"channel":"console",
+		"stream":false,
+		"biz_params":{"tool":{"name":"shell","input":{"command":"printf compat"}}}
+	}`
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/agent/process", strings.NewReader(procReq)))
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got=%d body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"reply":"$ printf compat`) {
+		t.Fatalf("unexpected body: %s", w.Body.String())
+	}
+}
+
 func TestPrependSystemLayersPreservesOrder(t *testing.T) {
 	input := []domain.AgentInputMessage{
 		{
@@ -1606,6 +1677,54 @@ func TestBuildSystemLayersForCodexModeV2IncludesLocalPolicyAndToolGuide(t *testi
 	toolLayer := byName["codex_tool_guide_system"]
 	if toolLayer.Source != codexToolGuideRelativePath {
 		t.Fatalf("expected tool guide source=%q, got=%q", codexToolGuideRelativePath, toolLayer.Source)
+	}
+}
+
+func TestBuildSystemLayersForCodexModeV2ToolGuideUsesItemsSchemaExamples(t *testing.T) {
+	t.Setenv("NEXTAI_DISABLE_QQ_INBOUND_SUPERVISOR", "true")
+	srv, err := NewServer(config.Config{
+		Host:              "127.0.0.1",
+		Port:              "0",
+		DataDir:           t.TempDir(),
+		EnableCodexModeV2: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { srv.Close() })
+
+	layers, err := srv.buildSystemLayersForMode(promptModeCodex)
+	if err != nil {
+		t.Fatalf("buildSystemLayersForMode(codex) failed: %v", err)
+	}
+
+	toolGuideContent := ""
+	for _, layer := range layers {
+		if layer.Name != "codex_tool_guide_system" {
+			continue
+		}
+		toolGuideContent = layer.Content
+		break
+	}
+	if strings.TrimSpace(toolGuideContent) == "" {
+		t.Fatalf("expected codex_tool_guide_system layer in codex v2, got=%#v", layers)
+	}
+
+	if !strings.Contains(toolGuideContent, `"items": [`) {
+		t.Fatalf("expected tool guide to include items schema examples, got=%q", toolGuideContent)
+	}
+
+	legacyPatterns := []string{
+		`"shell": [`,
+		`"view": [`,
+		`"edit": [`,
+		`"browser": [`,
+		`"search": [`,
+	}
+	for _, pattern := range legacyPatterns {
+		if strings.Contains(toolGuideContent, pattern) {
+			t.Fatalf("expected tool guide to avoid legacy top-level shortcut pattern %q, got=%q", pattern, toolGuideContent)
+		}
 	}
 }
 
@@ -1923,6 +2042,50 @@ func TestGetAgentSystemLayersSupportsCodexModeQuery(t *testing.T) {
 	}
 }
 
+func TestGetAgentSystemLayersSupportsClaudeModeQuery(t *testing.T) {
+	t.Setenv("NEXTAI_DISABLE_QQ_INBOUND_SUPERVISOR", "true")
+	srv, err := NewServer(config.Config{
+		Host:                          "127.0.0.1",
+		Port:                          "0",
+		DataDir:                       t.TempDir(),
+		EnablePromptContextIntrospect: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { srv.Close() })
+
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/agent/system-layers?prompt_mode=claude", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got=%d body=%s", w.Code, w.Body.String())
+	}
+
+	var body agentSystemLayersResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode response failed: %v body=%s", err, w.Body.String())
+	}
+	if body.ModeVariant != promptModeVariantClaudeV1 {
+		t.Fatalf("expected mode_variant=%q, got=%q", promptModeVariantClaudeV1, body.ModeVariant)
+	}
+	if len(body.Layers) < 1 {
+		t.Fatalf("expected at least 1 layer, got=%d", len(body.Layers))
+	}
+	if body.Layers[0].Name != "claude_base_system" {
+		t.Fatalf("expected first layer claude_base_system, got=%q", body.Layers[0].Name)
+	}
+	sumTokens := 0
+	for _, layer := range body.Layers {
+		if strings.TrimSpace(layer.LayerHash) == "" {
+			t.Fatalf("expected non-empty layer_hash for layer %q", layer.Name)
+		}
+		sumTokens += layer.EstimatedTokens
+	}
+	if sumTokens != body.EstimatedTokensTotal {
+		t.Fatalf("expected estimated_tokens_total=%d, got=%d", sumTokens, body.EstimatedTokensTotal)
+	}
+}
+
 func TestGetAgentSystemLayersSupportsCodexModeQueryV2(t *testing.T) {
 	t.Setenv("NEXTAI_DISABLE_QQ_INBOUND_SUPERVISOR", "true")
 	srv, err := NewServer(config.Config{
@@ -2152,6 +2315,75 @@ func TestWorkspaceFileConfigAndSkillCRUD(t *testing.T) {
 	}
 }
 
+func TestWorkspaceUploadFileStoresContentAndReturnsAbsolutePath(t *testing.T) {
+	srv := newTestServer(t)
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	part, err := writer.CreateFormFile("file", "demo notes.txt")
+	if err != nil {
+		t.Fatalf("create multipart file failed: %v", err)
+	}
+	if _, err := part.Write([]byte("hello upload")); err != nil {
+		t.Fatalf("write multipart content failed: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close multipart writer failed: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/workspace/uploads", &body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("upload status=%d body=%s", w.Code, w.Body.String())
+	}
+
+	var out struct {
+		Uploaded bool   `json:"uploaded"`
+		Path     string `json:"path"`
+		Name     string `json:"name"`
+		Size     int64  `json:"size"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode upload response failed: %v body=%s", err, w.Body.String())
+	}
+	if !out.Uploaded {
+		t.Fatalf("expected uploaded=true, got=%+v", out)
+	}
+	if !filepath.IsAbs(out.Path) {
+		t.Fatalf("expected absolute upload path, got=%q", out.Path)
+	}
+	if strings.Contains(out.Name, " ") {
+		t.Fatalf("expected sanitized upload name without spaces, got=%q", out.Name)
+	}
+	if out.Size != int64(len("hello upload")) {
+		t.Fatalf("expected size=%d, got=%d", len("hello upload"), out.Size)
+	}
+	raw, err := os.ReadFile(out.Path)
+	if err != nil {
+		t.Fatalf("read uploaded file failed: %v", err)
+	}
+	if string(raw) != "hello upload" {
+		t.Fatalf("unexpected uploaded content: %s", string(raw))
+	}
+}
+
+func TestWorkspaceUploadFileRequiresMultipartFileField(t *testing.T) {
+	srv := newTestServer(t)
+
+	req := httptest.NewRequest(http.MethodPost, "/workspace/uploads", strings.NewReader(`{"x":1}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got=%d body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"code":"invalid_multipart"`) {
+		t.Fatalf("unexpected error body: %s", w.Body.String())
+	}
+}
+
 func TestWorkspaceImportReplace(t *testing.T) {
 	srv := newTestServer(t)
 
@@ -2297,6 +2529,162 @@ func TestProcessAgentUsesDefaultPromptModeWhenPromptModeIsOmitted(t *testing.T) 
 	}
 }
 
+func TestProcessAgentCompletedEventIncludesModelRequestMeta(t *testing.T) {
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/chat/completions" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"provider reply"}}]}`))
+	}))
+	defer mock.Close()
+
+	srv := newTestServer(t)
+
+	configProvider := `{"api_key":"sk-test","base_url":"` + mock.URL + `"}`
+	w1 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w1, httptest.NewRequest(http.MethodPut, "/models/openai/config", strings.NewReader(configProvider)))
+	if w1.Code != http.StatusOK {
+		t.Fatalf("config provider status=%d body=%s", w1.Code, w1.Body.String())
+	}
+
+	setActive := `{"provider_id":"openai","model":"gpt-4o-mini"}`
+	w2 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w2, httptest.NewRequest(http.MethodPut, "/models/active", strings.NewReader(setActive)))
+	if w2.Code != http.StatusOK {
+		t.Fatalf("set active status=%d body=%s", w2.Code, w2.Body.String())
+	}
+
+	traceText := "trace meta hello"
+	procReq := fmt.Sprintf(`{"input":[{"role":"user","type":"message","content":[{"type":"text","text":%q}]}],"session_id":"s-trace-meta","user_id":"u-trace-meta","channel":"console","stream":false}`, traceText)
+	w3 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w3, httptest.NewRequest(http.MethodPost, "/agent/process", strings.NewReader(procReq)))
+	if w3.Code != http.StatusOK {
+		t.Fatalf("process status=%d body=%s", w3.Code, w3.Body.String())
+	}
+
+	var out domain.AgentProcessResponse
+	if err := json.Unmarshal(w3.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode response failed: %v body=%s", err, w3.Body.String())
+	}
+
+	var completed *domain.AgentEvent
+	for idx := range out.Events {
+		if out.Events[idx].Type == "completed" {
+			completed = &out.Events[idx]
+			break
+		}
+	}
+	if completed == nil {
+		t.Fatalf("completed event missing, events=%+v", out.Events)
+	}
+	if len(completed.Meta) == 0 {
+		t.Fatalf("expected completed meta, events=%+v", out.Events)
+	}
+	modelRequest, ok := completed.Meta["model_request"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected completed.meta.model_request, got=%#v", completed.Meta["model_request"])
+	}
+	if modelRequest["prompt_mode"] != promptModeDefault {
+		t.Fatalf("expected prompt_mode=%q, got=%#v", promptModeDefault, modelRequest["prompt_mode"])
+	}
+	if modelRequest["provider_id"] != "openai" {
+		t.Fatalf("expected provider_id=openai, got=%#v", modelRequest["provider_id"])
+	}
+	if modelRequest["model"] != "gpt-4o-mini" {
+		t.Fatalf("expected model=gpt-4o-mini, got=%#v", modelRequest["model"])
+	}
+
+	rawLayers, ok := modelRequest["system_layers"].([]interface{})
+	if !ok || len(rawLayers) == 0 {
+		t.Fatalf("expected non-empty system_layers, got=%#v", modelRequest["system_layers"])
+	}
+
+	rawInput, ok := modelRequest["input"].([]interface{})
+	if !ok || len(rawInput) == 0 {
+		t.Fatalf("expected non-empty input, got=%#v", modelRequest["input"])
+	}
+	hasSystem := false
+	hasUserTrace := false
+	for _, item := range rawInput {
+		message, _ := item.(map[string]interface{})
+		role, _ := message["role"].(string)
+		switch role {
+		case "system":
+			hasSystem = true
+		case "user":
+			contentList, _ := message["content"].([]interface{})
+			for _, contentItem := range contentList {
+				contentMap, _ := contentItem.(map[string]interface{})
+				text, _ := contentMap["text"].(string)
+				if strings.Contains(text, traceText) {
+					hasUserTrace = true
+					break
+				}
+			}
+		}
+	}
+	if !hasSystem {
+		t.Fatalf("expected system content in model_request.input, got=%#v", rawInput)
+	}
+	if !hasUserTrace {
+		t.Fatalf("expected user content in model_request.input, got=%#v", rawInput)
+	}
+}
+
+func TestProcessAgentStreamCompletedEventIncludesModelRequestMeta(t *testing.T) {
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/chat/completions" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"provider stream reply\"}}]}\n\n")
+		_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer mock.Close()
+
+	srv := newTestServer(t)
+
+	configProvider := `{"api_key":"sk-test","base_url":"` + mock.URL + `"}`
+	w1 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w1, httptest.NewRequest(http.MethodPut, "/models/openai/config", strings.NewReader(configProvider)))
+	if w1.Code != http.StatusOK {
+		t.Fatalf("config provider status=%d body=%s", w1.Code, w1.Body.String())
+	}
+
+	setActive := `{"provider_id":"openai","model":"gpt-4o-mini"}`
+	w2 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w2, httptest.NewRequest(http.MethodPut, "/models/active", strings.NewReader(setActive)))
+	if w2.Code != http.StatusOK {
+		t.Fatalf("set active status=%d body=%s", w2.Code, w2.Body.String())
+	}
+
+	traceText := "stream trace meta hello"
+	procReq := fmt.Sprintf(`{"input":[{"role":"user","type":"message","content":[{"type":"text","text":%q}]}],"session_id":"s-stream-trace","user_id":"u-stream-trace","channel":"console","stream":true}`, traceText)
+	w3 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w3, httptest.NewRequest(http.MethodPost, "/agent/process", strings.NewReader(procReq)))
+	if w3.Code != http.StatusOK {
+		t.Fatalf("process status=%d body=%s", w3.Code, w3.Body.String())
+	}
+	body := w3.Body.String()
+	if !strings.Contains(body, `"type":"completed"`) {
+		t.Fatalf("expected completed event, body=%s", body)
+	}
+	if !strings.Contains(body, `"model_request"`) {
+		t.Fatalf("expected completed event to include model_request meta, body=%s", body)
+	}
+	if !strings.Contains(body, `"prompt_mode":"default"`) {
+		t.Fatalf("expected prompt_mode in model_request meta, body=%s", body)
+	}
+	if !strings.Contains(body, traceText) {
+		t.Fatalf("expected user trace text in model_request meta, body=%s", body)
+	}
+	if !strings.Contains(body, `"system_layers"`) {
+		t.Fatalf("expected system_layers in model_request meta, body=%s", body)
+	}
+}
+
 func TestProcessAgentCodexPromptModePersistsAndIsReused(t *testing.T) {
 	requests := make([]map[string]interface{}, 0, 2)
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -2377,6 +2765,86 @@ func TestProcessAgentCodexPromptModePersistsAndIsReused(t *testing.T) {
 	}
 }
 
+func TestProcessAgentClaudePromptModePersistsAndIsReused(t *testing.T) {
+	requests := make([]map[string]interface{}, 0, 2)
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/chat/completions" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		defer r.Body.Close()
+		body := map[string]interface{}{}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode provider request failed: %v", err)
+		}
+		requests = append(requests, body)
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"provider reply"}}]}`))
+	}))
+	defer mock.Close()
+
+	srv := newTestServer(t)
+
+	configProvider := `{"api_key":"sk-test","base_url":"` + mock.URL + `"}`
+	w1 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w1, httptest.NewRequest(http.MethodPut, "/models/openai/config", strings.NewReader(configProvider)))
+	if w1.Code != http.StatusOK {
+		t.Fatalf("config provider status=%d body=%s", w1.Code, w1.Body.String())
+	}
+	setActive := `{"provider_id":"openai","model":"gpt-4o-mini"}`
+	w2 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w2, httptest.NewRequest(http.MethodPut, "/models/active", strings.NewReader(setActive)))
+	if w2.Code != http.StatusOK {
+		t.Fatalf("set active status=%d body=%s", w2.Code, w2.Body.String())
+	}
+
+	firstReq := `{"input":[{"role":"user","type":"message","content":[{"type":"text","text":"hello claude"}]}],"session_id":"s-claude-prompt-mode","user_id":"u-claude-prompt-mode","channel":"console","stream":false,"biz_params":{"prompt_mode":"claude"}}`
+	firstW := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(firstW, httptest.NewRequest(http.MethodPost, "/agent/process", strings.NewReader(firstReq)))
+	if firstW.Code != http.StatusOK {
+		t.Fatalf("first process status=%d body=%s", firstW.Code, firstW.Body.String())
+	}
+
+	secondReq := `{"input":[{"role":"user","type":"message","content":[{"type":"text","text":"hello again"}]}],"session_id":"s-claude-prompt-mode","user_id":"u-claude-prompt-mode","channel":"console","stream":false}`
+	secondW := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(secondW, httptest.NewRequest(http.MethodPost, "/agent/process", strings.NewReader(secondReq)))
+	if secondW.Code != http.StatusOK {
+		t.Fatalf("second process status=%d body=%s", secondW.Code, secondW.Body.String())
+	}
+
+	if len(requests) < 2 {
+		t.Fatalf("expected at least 2 model requests, got=%d", len(requests))
+	}
+	for idx, reqBody := range requests[:2] {
+		systemMessages := collectSystemMessagesFromModelRequest(t, reqBody)
+		if len(systemMessages) < 1 {
+			t.Fatalf("request %d expected at least 1 system message in claude mode, got=%d", idx+1, len(systemMessages))
+		}
+		if !strings.Contains(systemMessages[0], "## "+claudeBasePromptRelativePath) {
+			t.Fatalf("request %d should start with claude prompt layer, got=%q", idx+1, systemMessages[0])
+		}
+		if strings.Contains(systemMessages[0], codexBasePromptRelativePath) {
+			t.Fatalf("request %d should not include codex base layer in first message, got=%q", idx+1, systemMessages[0])
+		}
+	}
+
+	chatsW := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(chatsW, httptest.NewRequest(http.MethodGet, "/chats?user_id=u-claude-prompt-mode&channel=console", nil))
+	if chatsW.Code != http.StatusOK {
+		t.Fatalf("list chats status=%d body=%s", chatsW.Code, chatsW.Body.String())
+	}
+	var chats []domain.ChatSpec
+	if err := json.Unmarshal(chatsW.Body.Bytes(), &chats); err != nil {
+		t.Fatalf("decode chats failed: %v body=%s", err, chatsW.Body.String())
+	}
+	if len(chats) == 0 {
+		t.Fatalf("expected chat record for claude prompt mode")
+	}
+	mode, _ := chats[0].Meta[chatMetaPromptModeKey].(string)
+	if mode != promptModeClaude {
+		t.Fatalf("expected chat meta prompt_mode=%q, got=%v", promptModeClaude, chats[0].Meta[chatMetaPromptModeKey])
+	}
+}
+
 func TestProcessAgentRejectsInvalidPromptMode(t *testing.T) {
 	srv := newTestServer(t)
 
@@ -2453,6 +2921,32 @@ func TestProcessAgentReturnsCodexPromptUnavailableWhenPromptMissingInV2(t *testi
 		t.Fatalf("expected 500, got=%d body=%s", w.Code, w.Body.String())
 	}
 	if !strings.Contains(w.Body.String(), `"code":"codex_prompt_unavailable"`) {
+		t.Fatalf("unexpected body: %s", w.Body.String())
+	}
+}
+
+func TestProcessAgentReturnsClaudePromptUnavailableWhenPromptMissing(t *testing.T) {
+	repoRoot, err := findRepoRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	claudePath := filepath.Join(repoRoot, filepath.FromSlash(claudeBasePromptRelativePath))
+	backupPath := fmt.Sprintf("%s.bak-%d", claudePath, time.Now().UnixNano())
+	if err := os.Rename(claudePath, backupPath); err != nil {
+		t.Fatalf("rename claude prompt failed: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = os.Rename(backupPath, claudePath)
+	})
+
+	srv := newTestServer(t)
+	procReq := `{"input":[{"role":"user","type":"message","content":[{"type":"text","text":"hello"}]}],"session_id":"s-claude-missing","user_id":"u-claude-missing","channel":"console","stream":false,"biz_params":{"prompt_mode":"claude"}}`
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/agent/process", strings.NewReader(procReq)))
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got=%d body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"code":"claude_prompt_unavailable"`) {
 		t.Fatalf("unexpected body: %s", w.Body.String())
 	}
 }
@@ -2753,23 +3247,26 @@ func TestProcessAgentRejectsSingleViewObjectInput(t *testing.T) {
 	}
 }
 
-func TestProcessAgentRejectsSingleShellObjectInput(t *testing.T) {
+func TestProcessAgentAcceptsSingleShellObjectInputForBackwardCompatibility(t *testing.T) {
 	srv := newTestServer(t)
 	procReq := `{
-		"input":[{"role":"user","type":"message","content":[{"type":"text","text":"shell object invalid"}]}],
-		"session_id":"s-shell-object-invalid",
-		"user_id":"u-shell-object-invalid",
+		"input":[{"role":"user","type":"message","content":[{"type":"text","text":"shell object compat"}]}],
+		"session_id":"s-shell-object-compat",
+		"user_id":"u-shell-object-compat",
 		"channel":"console",
 		"stream":false,
 		"shell":{"input":{"command":"printf hi"}}
 	}`
 	w := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/agent/process", strings.NewReader(procReq)))
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("expected 400, got=%d body=%s", w.Code, w.Body.String())
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got=%d body=%s", w.Code, w.Body.String())
 	}
-	if !strings.Contains(w.Body.String(), `"code":"invalid_tool_input"`) {
+	if !strings.Contains(w.Body.String(), `"reply":"$ printf hi`) {
 		t.Fatalf("unexpected body: %s", w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"type":"tool_call"`) || !strings.Contains(w.Body.String(), `"type":"tool_result"`) {
+		t.Fatalf("expected tool_call/tool_result events, body=%s", w.Body.String())
 	}
 }
 
@@ -3272,6 +3769,584 @@ func TestProcessAgentStillSupportsLegacyBizParamsToolFormat(t *testing.T) {
 	}
 	if !strings.Contains(w.Body.String(), "1: line-1") {
 		t.Fatalf("expected legacy format output, got=%s", w.Body.String())
+	}
+}
+
+func TestProcessAgentRejectsLegacyBizParamsToolInputObjectWithoutItems(t *testing.T) {
+	srv := newTestServer(t)
+	_, absPath := newToolTestPath(t, "legacy-view-input-object")
+	if err := os.WriteFile(absPath, []byte("line-1\nline-2\n"), 0o644); err != nil {
+		t.Fatalf("seed tool test file failed: %v", err)
+	}
+
+	procReq := fmt.Sprintf(`{
+		"input":[{"role":"user","type":"message","content":[{"type":"text","text":"legacy view input object"}]}],
+		"session_id":"s-legacy-view-input-object",
+		"user_id":"u-legacy-view-input-object",
+		"channel":"console",
+		"stream":false,
+		"biz_params":{"tool":{"name":"view","input":{"path":%q,"start":1,"end":1}}}
+	}`, absPath)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/agent/process", strings.NewReader(procReq)))
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got=%d body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"code":"invalid_tool_input"`) {
+		t.Fatalf("unexpected body: %s", w.Body.String())
+	}
+}
+
+func TestProcessAgentSupportsLegacyProviderViewArgumentsObjectInCodexMode(t *testing.T) {
+	_, absPath := newToolTestPath(t, "legacy-provider-view-object")
+	if err := os.WriteFile(absPath, []byte("line-1\nline-2\n"), 0o644); err != nil {
+		t.Fatalf("seed tool test file failed: %v", err)
+	}
+	toolArgs, err := json.Marshal(map[string]interface{}{
+		"path":  absPath,
+		"start": 1,
+		"end":   1,
+	})
+	if err != nil {
+		t.Fatalf("marshal tool args failed: %v", err)
+	}
+
+	var calls int
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if r.Method != http.MethodPost || r.URL.Path != "/chat/completions" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		if calls == 1 {
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"choices": []map[string]interface{}{
+					{
+						"message": map[string]interface{}{
+							"content": "",
+							"tool_calls": []map[string]interface{}{
+								{
+									"id":   "call_view_legacy",
+									"type": "function",
+									"function": map[string]interface{}{
+										"name":      "view",
+										"arguments": string(toolArgs),
+									},
+								},
+							},
+						},
+					},
+				},
+			})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"choices": []map[string]interface{}{
+				{
+					"message": map[string]interface{}{
+						"content": "legacy provider args recovered",
+					},
+				},
+			},
+		})
+	}))
+	defer mock.Close()
+
+	srv := newTestServer(t)
+	configProvider := `{"api_key":"sk-test","base_url":"` + mock.URL + `"}`
+	w1 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w1, httptest.NewRequest(http.MethodPut, "/models/openai/config", strings.NewReader(configProvider)))
+	if w1.Code != http.StatusOK {
+		t.Fatalf("config provider status=%d body=%s", w1.Code, w1.Body.String())
+	}
+	setActive := `{"provider_id":"openai","model":"gpt-4o-mini"}`
+	w2 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w2, httptest.NewRequest(http.MethodPut, "/models/active", strings.NewReader(setActive)))
+	if w2.Code != http.StatusOK {
+		t.Fatalf("set active status=%d body=%s", w2.Code, w2.Body.String())
+	}
+
+	procReq := `{"input":[{"role":"user","type":"message","content":[{"type":"text","text":"legacy provider args"}]}],"session_id":"s-legacy-provider-view-object","user_id":"u-legacy-provider-view-object","channel":"console","stream":false,"biz_params":{"prompt_mode":"codex"}}`
+	w3 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w3, httptest.NewRequest(http.MethodPost, "/agent/process", strings.NewReader(procReq)))
+	if w3.Code != http.StatusOK {
+		t.Fatalf("process status=%d body=%s", w3.Code, w3.Body.String())
+	}
+	if calls < 2 {
+		t.Fatalf("expected at least 2 model calls, got=%d", calls)
+	}
+
+	var out domain.AgentProcessResponse
+	if err := json.Unmarshal(w3.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode response failed: %v body=%s", err, w3.Body.String())
+	}
+	if out.Reply != "legacy provider args recovered" {
+		t.Fatalf("unexpected final reply: %q", out.Reply)
+	}
+	hasToolResult := false
+	for _, evt := range out.Events {
+		if evt.Type == "tool_result" && evt.ToolResult != nil && evt.ToolResult.Name == "view" && evt.ToolResult.OK {
+			hasToolResult = true
+		}
+	}
+	if !hasToolResult {
+		t.Fatalf("expected successful view tool_result event, got=%+v", out.Events)
+	}
+}
+
+func TestProcessAgentDefaultModeAlsoSupportsLegacyProviderViewArgumentsObject(t *testing.T) {
+	_, absPath := newToolTestPath(t, "legacy-provider-view-object-default")
+	if err := os.WriteFile(absPath, []byte("line-1\nline-2\n"), 0o644); err != nil {
+		t.Fatalf("seed tool test file failed: %v", err)
+	}
+	toolArgs, err := json.Marshal(map[string]interface{}{
+		"path":  absPath,
+		"start": 1,
+		"end":   1,
+	})
+	if err != nil {
+		t.Fatalf("marshal tool args failed: %v", err)
+	}
+
+	var calls int
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if r.Method != http.MethodPost || r.URL.Path != "/chat/completions" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		if calls == 1 {
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"choices": []map[string]interface{}{
+					{
+						"message": map[string]interface{}{
+							"content": "",
+							"tool_calls": []map[string]interface{}{
+								{
+									"id":   "call_view_legacy_default",
+									"type": "function",
+									"function": map[string]interface{}{
+										"name":      "view",
+										"arguments": string(toolArgs),
+									},
+								},
+							},
+						},
+					},
+				},
+			})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"choices": []map[string]interface{}{
+				{
+					"message": map[string]interface{}{"content": "default mode done"},
+				},
+			},
+		})
+	}))
+	defer mock.Close()
+
+	srv := newTestServer(t)
+	configureOpenAIProviderForTest(t, srv, mock.URL)
+
+	procReq := `{"input":[{"role":"user","type":"message","content":[{"type":"text","text":"legacy provider args default"}]}],"session_id":"s-legacy-provider-view-object-default","user_id":"u-legacy-provider-view-object-default","channel":"console","stream":false}`
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/agent/process", strings.NewReader(procReq)))
+	if w.Code != http.StatusOK {
+		t.Fatalf("process status=%d body=%s", w.Code, w.Body.String())
+	}
+	if calls < 2 {
+		t.Fatalf("expected at least 2 model calls, got=%d", calls)
+	}
+
+	var out domain.AgentProcessResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode response failed: %v body=%s", err, w.Body.String())
+	}
+	if out.Reply != "default mode done" {
+		t.Fatalf("unexpected final reply: %q", out.Reply)
+	}
+	hasToolResult := false
+	for _, evt := range out.Events {
+		if evt.Type == "tool_result" && evt.ToolResult != nil && evt.ToolResult.Name == "view" && evt.ToolResult.OK {
+			hasToolResult = true
+		}
+	}
+	if !hasToolResult {
+		t.Fatalf("expected successful view tool_result in default mode, got=%+v", out.Events)
+	}
+}
+
+func TestProcessAgentCodexModeNormalizesExecCommandAlias(t *testing.T) {
+	var calls int
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if r.Method != http.MethodPost || r.URL.Path != "/chat/completions" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		if calls == 1 {
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"choices": []map[string]interface{}{
+					{
+						"message": map[string]interface{}{
+							"content": "",
+							"tool_calls": []map[string]interface{}{
+								{
+									"id":   "call_exec",
+									"type": "function",
+									"function": map[string]interface{}{
+										"name":      "exec_command",
+										"arguments": `{"cmd":"pwd","workdir":"/tmp","yield_time_ms":1501}`,
+									},
+								},
+							},
+						},
+					},
+				},
+			})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"choices": []map[string]interface{}{
+				{
+					"message": map[string]interface{}{"content": "exec alias ok"},
+				},
+			},
+		})
+	}))
+	defer mock.Close()
+
+	srv := newTestServer(t)
+	var captured map[string]interface{}
+	srv.tools["shell"] = &stubToolPlugin{
+		name: "shell",
+		invoke: func(input map[string]interface{}) (map[string]interface{}, error) {
+			captured = safeMap(input)
+			return map[string]interface{}{"ok": true, "text": "shell stub ok"}, nil
+		},
+	}
+	configureOpenAIProviderForTest(t, srv, mock.URL)
+
+	procReq := `{"input":[{"role":"user","type":"message","content":[{"type":"text","text":"run exec_command"}]}],"session_id":"s-codex-exec-alias","user_id":"u-codex-exec-alias","channel":"console","stream":false,"biz_params":{"prompt_mode":"codex"}}`
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/agent/process", strings.NewReader(procReq)))
+	if w.Code != http.StatusOK {
+		t.Fatalf("process status=%d body=%s", w.Code, w.Body.String())
+	}
+	if calls < 2 {
+		t.Fatalf("expected at least 2 model calls, got=%d", calls)
+	}
+	if captured == nil {
+		t.Fatalf("shell plugin not invoked")
+	}
+	items, ok := captured["items"].([]interface{})
+	if !ok || len(items) != 1 {
+		t.Fatalf("items invalid: %#v", captured)
+	}
+	item, ok := items[0].(map[string]interface{})
+	if !ok {
+		t.Fatalf("item invalid: %#v", items[0])
+	}
+	if got, _ := item["command"].(string); got != "pwd" {
+		t.Fatalf("command=%q want=pwd", got)
+	}
+	if got, _ := item["cwd"].(string); got != "/tmp" {
+		t.Fatalf("cwd=%q want=/tmp", got)
+	}
+	timeout, ok := intFromAny(item["timeout_seconds"])
+	if !ok || timeout != 2 {
+		t.Fatalf("timeout_seconds=%v want=2", item["timeout_seconds"])
+	}
+}
+
+func TestProcessAgentCodexModeRoutesOpenLocalPathToView(t *testing.T) {
+	_, absPath := newToolTestPath(t, "codex-open-local")
+	if err := os.WriteFile(absPath, []byte("line-1\nline-2\nline-3\n"), 0o644); err != nil {
+		t.Fatalf("seed tool test file failed: %v", err)
+	}
+
+	var calls int
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if r.Method != http.MethodPost || r.URL.Path != "/chat/completions" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		if calls == 1 {
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"choices": []map[string]interface{}{
+					{
+						"message": map[string]interface{}{
+							"content": "",
+							"tool_calls": []map[string]interface{}{
+								{
+									"id":   "call_open_local",
+									"type": "function",
+									"function": map[string]interface{}{
+										"name":      "open",
+										"arguments": fmt.Sprintf(`{"path":%q,"lineno":2}`, absPath),
+									},
+								},
+							},
+						},
+					},
+				},
+			})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"choices": []map[string]interface{}{
+				{
+					"message": map[string]interface{}{"content": "open local ok"},
+				},
+			},
+		})
+	}))
+	defer mock.Close()
+
+	srv := newTestServer(t)
+	configureOpenAIProviderForTest(t, srv, mock.URL)
+
+	procReq := `{"input":[{"role":"user","type":"message","content":[{"type":"text","text":"open local file"}]}],"session_id":"s-codex-open-local","user_id":"u-codex-open-local","channel":"console","stream":false,"biz_params":{"prompt_mode":"codex"}}`
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/agent/process", strings.NewReader(procReq)))
+	if w.Code != http.StatusOK {
+		t.Fatalf("process status=%d body=%s", w.Code, w.Body.String())
+	}
+	if calls < 2 {
+		t.Fatalf("expected at least 2 model calls, got=%d", calls)
+	}
+	if !strings.Contains(w.Body.String(), "2: line-2") {
+		t.Fatalf("expected open local routed to view output, body=%s", w.Body.String())
+	}
+}
+
+func TestProcessAgentCodexModeRoutesOpenURLToBrowser(t *testing.T) {
+	var calls int
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if r.Method != http.MethodPost || r.URL.Path != "/chat/completions" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		if calls == 1 {
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"choices": []map[string]interface{}{
+					{
+						"message": map[string]interface{}{
+							"content": "",
+							"tool_calls": []map[string]interface{}{
+								{
+									"id":   "call_open_url",
+									"type": "function",
+									"function": map[string]interface{}{
+										"name":      "open",
+										"arguments": `{"arguments":{"path":"https://example.com/docs"}}`,
+									},
+								},
+							},
+						},
+					},
+				},
+			})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"choices": []map[string]interface{}{
+				{
+					"message": map[string]interface{}{"content": "open url ok"},
+				},
+			},
+		})
+	}))
+	defer mock.Close()
+
+	srv := newTestServer(t)
+	var browserInput map[string]interface{}
+	srv.tools["browser"] = &stubToolPlugin{
+		name: "browser",
+		invoke: func(input map[string]interface{}) (map[string]interface{}, error) {
+			browserInput = safeMap(input)
+			return map[string]interface{}{
+				"ok":   true,
+				"text": "browser summary from stub",
+			}, nil
+		},
+	}
+	configureOpenAIProviderForTest(t, srv, mock.URL)
+
+	procReq := `{"input":[{"role":"user","type":"message","content":[{"type":"text","text":"open url"}]}],"session_id":"s-codex-open-url","user_id":"u-codex-open-url","channel":"console","stream":false,"biz_params":{"prompt_mode":"codex"}}`
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/agent/process", strings.NewReader(procReq)))
+	if w.Code != http.StatusOK {
+		t.Fatalf("process status=%d body=%s", w.Code, w.Body.String())
+	}
+	if calls < 2 {
+		t.Fatalf("expected at least 2 model calls, got=%d", calls)
+	}
+	items, ok := browserInput["items"].([]interface{})
+	if !ok || len(items) != 1 {
+		t.Fatalf("browser items invalid: %#v", browserInput)
+	}
+	item, ok := items[0].(map[string]interface{})
+	if !ok {
+		t.Fatalf("browser item invalid: %#v", items[0])
+	}
+	task, _ := item["task"].(string)
+	if !strings.Contains(task, "https://example.com/docs") {
+		t.Fatalf("browser task should include url, task=%q", task)
+	}
+	if !strings.Contains(w.Body.String(), "browser summary from stub") {
+		t.Fatalf("expected browser summary in response body=%s", w.Body.String())
+	}
+}
+
+func TestProcessAgentCodexModeRoutesClickScreenshotAsApprox(t *testing.T) {
+	var calls int
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if r.Method != http.MethodPost || r.URL.Path != "/chat/completions" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		if calls == 1 {
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"choices": []map[string]interface{}{
+					{
+						"message": map[string]interface{}{
+							"content": "",
+							"tool_calls": []map[string]interface{}{
+								{
+									"id":   "call_click",
+									"type": "function",
+									"function": map[string]interface{}{
+										"name":      "click",
+										"arguments": `{"ref_id":"https://example.com","selector":"#login"}`,
+									},
+								},
+								{
+									"id":   "call_shot",
+									"type": "function",
+									"function": map[string]interface{}{
+										"name":      "screenshot",
+										"arguments": `{"url":"https://example.com/dashboard"}`,
+									},
+								},
+							},
+						},
+					},
+				},
+			})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"choices": []map[string]interface{}{
+				{
+					"message": map[string]interface{}{"content": "approx done"},
+				},
+			},
+		})
+	}))
+	defer mock.Close()
+
+	srv := newTestServer(t)
+	var invoked int
+	srv.tools["browser"] = &stubToolPlugin{
+		name: "browser",
+		invoke: func(input map[string]interface{}) (map[string]interface{}, error) {
+			invoked++
+			return map[string]interface{}{
+				"ok":   true,
+				"text": "browser action ok",
+			}, nil
+		},
+	}
+	configureOpenAIProviderForTest(t, srv, mock.URL)
+
+	procReq := `{"input":[{"role":"user","type":"message","content":[{"type":"text","text":"click and screenshot"}]}],"session_id":"s-codex-click-shot","user_id":"u-codex-click-shot","channel":"console","stream":false,"biz_params":{"prompt_mode":"codex"}}`
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/agent/process", strings.NewReader(procReq)))
+	if w.Code != http.StatusOK {
+		t.Fatalf("process status=%d body=%s", w.Code, w.Body.String())
+	}
+	if calls < 2 {
+		t.Fatalf("expected at least 2 model calls, got=%d", calls)
+	}
+	if invoked != 2 {
+		t.Fatalf("browser invoked=%d want=2", invoked)
+	}
+	if !strings.Contains(w.Body.String(), "mode=approx action=click") {
+		t.Fatalf("expected click approx marker, body=%s", w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "mode=approx action=screenshot") {
+		t.Fatalf("expected screenshot approx marker, body=%s", w.Body.String())
+	}
+}
+
+func TestProcessAgentCodexModeSupportsFindToolCall(t *testing.T) {
+	_, absPath := newToolTestPath(t, "codex-find")
+	if err := os.WriteFile(absPath, []byte("alpha\nneedle line\nbeta\n"), 0o644); err != nil {
+		t.Fatalf("seed tool test file failed: %v", err)
+	}
+
+	var calls int
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if r.Method != http.MethodPost || r.URL.Path != "/chat/completions" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		if calls == 1 {
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"choices": []map[string]interface{}{
+					{
+						"message": map[string]interface{}{
+							"content": "",
+							"tool_calls": []map[string]interface{}{
+								{
+									"id":   "call_find",
+									"type": "function",
+									"function": map[string]interface{}{
+										"name":      "find",
+										"arguments": fmt.Sprintf(`{"path":%q,"pattern":"needle"}`, absPath),
+									},
+								},
+							},
+						},
+					},
+				},
+			})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"choices": []map[string]interface{}{
+				{
+					"message": map[string]interface{}{"content": "find done"},
+				},
+			},
+		})
+	}))
+	defer mock.Close()
+
+	srv := newTestServer(t)
+	configureOpenAIProviderForTest(t, srv, mock.URL)
+
+	procReq := `{"input":[{"role":"user","type":"message","content":[{"type":"text","text":"find in file"}]}],"session_id":"s-codex-find","user_id":"u-codex-find","channel":"console","stream":false,"biz_params":{"prompt_mode":"codex"}}`
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/agent/process", strings.NewReader(procReq)))
+	if w.Code != http.StatusOK {
+		t.Fatalf("process status=%d body=%s", w.Code, w.Body.String())
+	}
+	if calls < 2 {
+		t.Fatalf("expected at least 2 model calls, got=%d", calls)
+	}
+	if !strings.Contains(w.Body.String(), `"name":"find"`) {
+		t.Fatalf("expected find tool event, body=%s", w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `matched 1 line`) {
+		t.Fatalf("expected find summary, body=%s", w.Body.String())
 	}
 }
 

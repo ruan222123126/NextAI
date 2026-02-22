@@ -74,6 +74,34 @@ func TestResolveShellExecutorReturnsUnavailableWhenNoneFound(t *testing.T) {
 	}
 }
 
+func TestParseShellItemsAcceptsLegacySingleCommandObject(t *testing.T) {
+	items, err := parseShellItems(map[string]interface{}{
+		"command": "pwd",
+		"cwd":     "/tmp",
+	})
+	if err != nil {
+		t.Fatalf("parse shell items failed: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("expected 1 item, got=%d", len(items))
+	}
+	if got := items[0]["command"]; got != "pwd" {
+		t.Fatalf("unexpected command: %#v", got)
+	}
+	if got := items[0]["cwd"]; got != "/tmp" {
+		t.Fatalf("unexpected cwd: %#v", got)
+	}
+}
+
+func TestParseShellItemsRejectsMissingItemsAndLegacyCommand(t *testing.T) {
+	_, err := parseShellItems(map[string]interface{}{
+		"cwd": "/tmp",
+	})
+	if !errors.Is(err, ErrShellToolItemsInvalid) {
+		t.Fatalf("expected ErrShellToolItemsInvalid, got=%v", err)
+	}
+}
+
 func fakeLookPath(available map[string]bool) func(file string) (string, error) {
 	return func(file string) (string, error) {
 		if available[file] {

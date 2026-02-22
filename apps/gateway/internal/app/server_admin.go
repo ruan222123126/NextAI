@@ -385,6 +385,10 @@ const (
 	workspaceDocsAIDir     = "docs/AI"
 	workspacePromptsDir    = "prompts"
 	workspacePromptDir     = "prompt"
+	workspaceUploadDir     = "uploads"
+	workspaceUploadField   = "file"
+	workspaceUploadMaxSize = int64(20 << 20)
+	workspaceUploadNameMax = 96
 )
 
 type workspaceFileEntry struct {
@@ -417,6 +421,13 @@ type workspaceExportPayload struct {
 type workspaceImportRequest struct {
 	Mode    string                 `json:"mode"`
 	Payload workspaceExportPayload `json:"payload"`
+}
+
+type workspaceUploadResponse struct {
+	Uploaded bool   `json:"uploaded"`
+	Path     string `json:"path"`
+	Name     string `json:"name"`
+	Size     int64  `json:"size"`
 }
 
 func (s *Server) listWorkspaceFiles(w http.ResponseWriter, _ *http.Request) {
@@ -486,6 +497,70 @@ func (s *Server) putWorkspaceFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]bool{"updated": true})
+}
+
+func (s *Server) uploadWorkspaceFile(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, workspaceUploadMaxSize)
+	if err := r.ParseMultipartForm(workspaceUploadMaxSize); err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			writeErr(
+				w,
+				http.StatusRequestEntityTooLarge,
+				"payload_too_large",
+				"upload file exceeds size limit",
+				map[string]int64{"max_bytes": workspaceUploadMaxSize},
+			)
+			return
+		}
+		writeErr(w, http.StatusBadRequest, "invalid_multipart", "invalid multipart form data", nil)
+		return
+	}
+
+	srcFile, header, err := r.FormFile(workspaceUploadField)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid_multipart", "multipart field \"file\" is required", nil)
+		return
+	}
+	defer srcFile.Close()
+
+	fileName := sanitizeWorkspaceUploadName(header.Filename)
+	targetDir := filepath.Join(s.cfg.DataDir, workspaceUploadDir)
+	if err := os.MkdirAll(targetDir, 0o755); err != nil {
+		writeErr(w, http.StatusInternalServerError, "file_error", err.Error(), nil)
+		return
+	}
+
+	targetPath := filepath.Join(targetDir, fmt.Sprintf("%s-%s", newID("upload"), fileName))
+	dstFile, err := os.OpenFile(targetPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "file_error", err.Error(), nil)
+		return
+	}
+	writtenSize, copyErr := io.Copy(dstFile, srcFile)
+	closeErr := dstFile.Close()
+	if copyErr != nil {
+		_ = os.Remove(targetPath)
+		writeErr(w, http.StatusInternalServerError, "file_error", copyErr.Error(), nil)
+		return
+	}
+	if closeErr != nil {
+		_ = os.Remove(targetPath)
+		writeErr(w, http.StatusInternalServerError, "file_error", closeErr.Error(), nil)
+		return
+	}
+
+	absPath, err := filepath.Abs(targetPath)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "file_error", err.Error(), nil)
+		return
+	}
+	writeJSON(w, http.StatusOK, workspaceUploadResponse{
+		Uploaded: true,
+		Path:     filepath.Clean(absPath),
+		Name:     fileName,
+		Size:     writtenSize,
+	})
 }
 
 func (s *Server) deleteWorkspaceFile(w http.ResponseWriter, r *http.Request) {
@@ -701,6 +776,38 @@ func normalizeWorkspaceFilePath(raw string) (string, bool) {
 		cleaned = append(cleaned, part)
 	}
 	return strings.Join(cleaned, "/"), true
+}
+
+func sanitizeWorkspaceUploadName(raw string) string {
+	normalized := strings.TrimSpace(strings.ReplaceAll(raw, "\\", "/"))
+	baseName := strings.TrimSpace(filepath.Base(normalized))
+	if baseName == "" || baseName == "." || baseName == ".." {
+		return "upload.bin"
+	}
+	var builder strings.Builder
+	builder.Grow(len(baseName))
+	for _, ch := range baseName {
+		switch {
+		case ch >= 'a' && ch <= 'z':
+			builder.WriteRune(ch)
+		case ch >= 'A' && ch <= 'Z':
+			builder.WriteRune(ch)
+		case ch >= '0' && ch <= '9':
+			builder.WriteRune(ch)
+		case ch == '.' || ch == '-' || ch == '_':
+			builder.WriteRune(ch)
+		case ch == ' ':
+			builder.WriteByte('_')
+		}
+	}
+	cleaned := strings.Trim(builder.String(), "._-")
+	if cleaned == "" {
+		return "upload.bin"
+	}
+	if len(cleaned) > workspaceUploadNameMax {
+		cleaned = cleaned[:workspaceUploadNameMax]
+	}
+	return cleaned
 }
 
 func workspaceSkillNameFromPath(filePath string) (string, bool) {
@@ -1054,6 +1161,16 @@ func mapToolError(err error) (status int, code string, message string) {
 				return http.StatusBadRequest, "invalid_tool_input", "tool input provider is unsupported"
 			case errors.Is(te.Err, plugin.ErrSearchToolProviderUnconfigured):
 				return http.StatusBadRequest, "invalid_tool_input", "tool input provider is not configured"
+			case errors.Is(te.Err, plugin.ErrFindToolItemsInvalid):
+				return http.StatusBadRequest, "invalid_tool_input", "tool input items must be a non-empty array of objects"
+			case errors.Is(te.Err, plugin.ErrFindToolPathMissing):
+				return http.StatusBadRequest, "invalid_tool_input", "tool input path is required"
+			case errors.Is(te.Err, plugin.ErrFindToolPathInvalid):
+				return http.StatusBadRequest, "invalid_tool_input", "tool input path is invalid"
+			case errors.Is(te.Err, plugin.ErrFindToolPatternMissing):
+				return http.StatusBadRequest, "invalid_tool_input", "tool input pattern is required"
+			case errors.Is(te.Err, plugin.ErrFindToolFileNotFound):
+				return http.StatusBadRequest, "invalid_tool_input", "target file does not exist"
 			default:
 				return http.StatusBadGateway, te.Code, te.Message
 			}
@@ -1346,6 +1463,9 @@ func (s *Server) buildSystemLayersForMode(mode string) ([]systemPromptLayer, err
 		}
 		return s.buildCodexSystemLayers()
 	}
+	if normalizedMode == promptModeClaude {
+		return s.buildClaudeSystemLayers()
+	}
 	return s.getSystemPromptService().BuildLayers(
 		[]string{aiToolsGuideRelativePath},
 		[]string{
@@ -1474,6 +1594,52 @@ func (s *Server) buildCodexSystemLayers() ([]systemPromptLayer, error) {
 		return nil, err
 	}
 	return layers, nil
+}
+
+func (s *Server) buildClaudeSystemLayers() ([]systemPromptLayer, error) {
+	source, content, err := loadRequiredSystemLayer([]string{claudeBasePromptRelativePath})
+	if err != nil {
+		return nil, err
+	}
+
+	layers := []systemPromptLayer{
+		{
+			Name:    "claude_base_system",
+			Role:    "system",
+			Source:  source,
+			Content: systempromptservice.FormatLayerSourceContent(source, content),
+		},
+	}
+
+	if layers, err = appendCodexOptionalLayer(layers, "claude_doing_tasks_system", claudeDoingTasksRelativePath, nil); err != nil {
+		return nil, err
+	}
+	if layers, err = appendCodexOptionalLayer(layers, "claude_execution_care_system", claudeExecutionCareRelativePath, nil); err != nil {
+		return nil, err
+	}
+	if layers, err = appendCodexOptionalLayer(layers, "claude_tool_usage_policy_system", claudeToolUsageRelativePath, nil); err != nil {
+		return nil, err
+	}
+	if layers, err = appendCodexOptionalLayer(layers, "claude_tone_style_system", claudeToneStyleRelativePath, nil); err != nil {
+		return nil, err
+	}
+	if layers, err = appendCodexOptionalLayer(layers, "claude_local_policy_system", claudeLocalPolicyRelativePath, nil); err != nil {
+		return nil, err
+	}
+	if layers, err = appendCodexOptionalLayerFromCandidates(
+		layers,
+		"claude_tool_guide_system",
+		[]string{
+			claudeToolGuideRelativePath,
+			aiToolsGuideLegacyV1RelativePath,
+			aiToolsGuideLegacyV2RelativePath,
+		},
+		nil,
+	); err != nil {
+		return nil, err
+	}
+
+	return dedupeLayersByNormalizedContent(layers), nil
 }
 
 func appendCodexOptionalLayer(
@@ -1780,6 +1946,9 @@ func (s *Server) resolvePromptModeVariant(mode string) string {
 	normalizedMode, ok := normalizePromptMode(mode)
 	if !ok || normalizedMode == promptModeDefault {
 		return promptModeVariantDefault
+	}
+	if normalizedMode == promptModeClaude {
+		return promptModeVariantClaudeV1
 	}
 	if s != nil && s.cfg.EnableCodexModeV2 {
 		return promptModeVariantCodexV2

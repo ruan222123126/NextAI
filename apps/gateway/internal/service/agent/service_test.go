@@ -172,3 +172,223 @@ func TestProcessRunnerErrorMapped(t *testing.T) {
 		t.Fatalf("unexpected process error: %+v", processErr)
 	}
 }
+
+func TestProcessCodexModeNormalizesLegacyProviderViewObject(t *testing.T) {
+	t.Parallel()
+
+	callCount := 0
+	svc := NewService(Dependencies{
+		Runner: adapters.AgentRunner{
+			GenerateTurnFunc: func(context.Context, domain.AgentProcessRequest, runner.GenerateConfig, []runner.ToolDefinition) (runner.TurnResult, error) {
+				callCount++
+				if callCount == 1 {
+					return runner.TurnResult{
+						ToolCalls: []runner.ToolCall{
+							{
+								ID:   "call_view",
+								Name: "view_file_lines",
+								Arguments: map[string]interface{}{
+									"input": map[string]interface{}{
+										"path":       "/tmp/test.txt",
+										"start_line": 2,
+										"end_line":   4,
+									},
+								},
+							},
+						},
+					}, nil
+				}
+				return runner.TurnResult{Text: "done"}, nil
+			},
+		},
+		ToolRuntime: adapters.AgentToolRuntime{
+			ListToolDefinitionsFunc: func() []runner.ToolDefinition { return nil },
+			ExecuteToolCallFunc: func(name string, input map[string]interface{}) (string, error) {
+				if name != "view" {
+					t.Fatalf("tool name=%s want=view", name)
+				}
+				items, ok := input["items"].([]interface{})
+				if !ok || len(items) != 1 {
+					t.Fatalf("items not normalized: %#v", input)
+				}
+				item, ok := items[0].(map[string]interface{})
+				if !ok {
+					t.Fatalf("item type invalid: %#v", items[0])
+				}
+				if _, hasStartLine := item["start_line"]; !hasStartLine {
+					t.Fatalf("expected legacy field kept for compatibility, input=%#v", item)
+				}
+				if gotStart, _ := item["start"].(float64); gotStart != 2 {
+					t.Fatalf("start=%v want=2", item["start"])
+				}
+				if gotEnd, _ := item["end"].(float64); gotEnd != 4 {
+					t.Fatalf("end=%v want=4", item["end"])
+				}
+				return "view-ok", nil
+			},
+		},
+		ErrorMapper: adapters.AgentErrorMapper{
+			MapToolErrorFunc:   func(err error) (int, string, string) { return http.StatusBadRequest, "tool_error", err.Error() },
+			MapRunnerErrorFunc: func(err error) (int, string, string) { return http.StatusBadGateway, "runner_error", err.Error() },
+		},
+	})
+
+	result, processErr := svc.Process(context.Background(), ProcessParams{
+		Request:        domain.AgentProcessRequest{Input: []domain.AgentInputMessage{{Role: "user", Type: "message"}}},
+		EffectiveInput: []domain.AgentInputMessage{{Role: "user", Type: "message"}},
+		PromptMode:     "codex",
+		ReplyChunkSize: 16,
+	}, nil)
+	if processErr != nil {
+		t.Fatalf("process error: %+v", processErr)
+	}
+	if result.Reply != "done" {
+		t.Fatalf("reply=%q want=done", result.Reply)
+	}
+}
+
+func TestProcessCodexModeNormalizesExecCommandLegacyParams(t *testing.T) {
+	t.Parallel()
+
+	callCount := 0
+	svc := NewService(Dependencies{
+		Runner: adapters.AgentRunner{
+			GenerateTurnFunc: func(context.Context, domain.AgentProcessRequest, runner.GenerateConfig, []runner.ToolDefinition) (runner.TurnResult, error) {
+				callCount++
+				if callCount == 1 {
+					return runner.TurnResult{
+						ToolCalls: []runner.ToolCall{
+							{
+								ID:   "call_shell",
+								Name: "exec_command",
+								Arguments: map[string]interface{}{
+									"arguments": map[string]interface{}{
+										"cmd":           "pwd",
+										"workdir":       "/tmp",
+										"yield_time_ms": 1501,
+									},
+								},
+							},
+						},
+					}, nil
+				}
+				return runner.TurnResult{Text: "done"}, nil
+			},
+		},
+		ToolRuntime: adapters.AgentToolRuntime{
+			ListToolDefinitionsFunc: func() []runner.ToolDefinition { return nil },
+			ExecuteToolCallFunc: func(name string, input map[string]interface{}) (string, error) {
+				if name != "shell" {
+					t.Fatalf("tool name=%s want=shell", name)
+				}
+				items, ok := input["items"].([]interface{})
+				if !ok || len(items) != 1 {
+					t.Fatalf("items not normalized: %#v", input)
+				}
+				item, ok := items[0].(map[string]interface{})
+				if !ok {
+					t.Fatalf("item type invalid: %#v", items[0])
+				}
+				if got, _ := item["command"].(string); got != "pwd" {
+					t.Fatalf("command=%q want=pwd", got)
+				}
+				if got, _ := item["cwd"].(string); got != "/tmp" {
+					t.Fatalf("cwd=%q want=/tmp", got)
+				}
+				switch got := item["timeout_seconds"].(type) {
+				case int:
+					if got != 2 {
+						t.Fatalf("timeout_seconds=%v want=2", item["timeout_seconds"])
+					}
+				case float64:
+					if got != 2 {
+						t.Fatalf("timeout_seconds=%v want=2", item["timeout_seconds"])
+					}
+				default:
+					t.Fatalf("timeout_seconds type invalid: %#v", item["timeout_seconds"])
+				}
+				return "shell-ok", nil
+			},
+		},
+		ErrorMapper: adapters.AgentErrorMapper{
+			MapToolErrorFunc:   func(err error) (int, string, string) { return http.StatusBadRequest, "tool_error", err.Error() },
+			MapRunnerErrorFunc: func(err error) (int, string, string) { return http.StatusBadGateway, "runner_error", err.Error() },
+		},
+	})
+
+	result, processErr := svc.Process(context.Background(), ProcessParams{
+		Request:        domain.AgentProcessRequest{Input: []domain.AgentInputMessage{{Role: "user", Type: "message"}}},
+		EffectiveInput: []domain.AgentInputMessage{{Role: "user", Type: "message"}},
+		PromptMode:     "codex",
+	}, nil)
+	if processErr != nil {
+		t.Fatalf("process error: %+v", processErr)
+	}
+	if result.Reply != "done" {
+		t.Fatalf("reply=%q want=done", result.Reply)
+	}
+}
+
+func TestProcessDefaultModeAlsoNormalizesLegacyProviderInput(t *testing.T) {
+	t.Parallel()
+
+	callCount := 0
+	svc := NewService(Dependencies{
+		Runner: adapters.AgentRunner{
+			GenerateTurnFunc: func(context.Context, domain.AgentProcessRequest, runner.GenerateConfig, []runner.ToolDefinition) (runner.TurnResult, error) {
+				callCount++
+				if callCount == 1 {
+					return runner.TurnResult{
+						ToolCalls: []runner.ToolCall{
+							{
+								ID:   "call_shell",
+								Name: "exec_command",
+								Arguments: map[string]interface{}{
+									"cmd":     "pwd",
+									"workdir": "/tmp",
+								},
+							},
+						},
+					}, nil
+				}
+				return runner.TurnResult{Text: "done"}, nil
+			},
+		},
+		ToolRuntime: adapters.AgentToolRuntime{
+			ListToolDefinitionsFunc: func() []runner.ToolDefinition { return nil },
+			ExecuteToolCallFunc: func(name string, input map[string]interface{}) (string, error) {
+				if name != "shell" {
+					t.Fatalf("tool name=%s want=shell", name)
+				}
+				items, ok := input["items"].([]interface{})
+				if !ok || len(items) != 1 {
+					t.Fatalf("default mode should auto-wrap items, got=%#v", input)
+				}
+				item, ok := items[0].(map[string]interface{})
+				if !ok {
+					t.Fatalf("item type invalid: %#v", items[0])
+				}
+				if got, _ := item["command"].(string); got != "pwd" {
+					t.Fatalf("command=%q want=pwd", got)
+				}
+				if got, _ := item["cwd"].(string); got != "/tmp" {
+					t.Fatalf("cwd=%q want=/tmp", got)
+				}
+				return "shell-ok", nil
+			},
+		},
+		ErrorMapper: adapters.AgentErrorMapper{
+			MapToolErrorFunc:   func(err error) (int, string, string) { return http.StatusBadRequest, "tool_error", err.Error() },
+			MapRunnerErrorFunc: func(err error) (int, string, string) { return http.StatusBadGateway, "runner_error", err.Error() },
+		},
+	})
+
+	_, processErr := svc.Process(context.Background(), ProcessParams{
+		Request:        domain.AgentProcessRequest{Input: []domain.AgentInputMessage{{Role: "user", Type: "message"}}},
+		EffectiveInput: []domain.AgentInputMessage{{Role: "user", Type: "message"}},
+		PromptMode:     "default",
+	}, nil)
+	if processErr != nil {
+		t.Fatalf("process error: %+v", processErr)
+	}
+}

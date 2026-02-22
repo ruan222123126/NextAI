@@ -6,7 +6,10 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 
 	"nextai/apps/gateway/internal/domain"
@@ -60,11 +63,8 @@ func (s *Server) getAgentSystemLayers(w http.ResponseWriter, r *http.Request) {
 
 	layers, err := s.buildSystemLayersForMode(promptMode)
 	if err != nil {
-		if promptMode == promptModeCodex {
-			writeErr(w, http.StatusInternalServerError, "codex_prompt_unavailable", "codex prompt is unavailable", nil)
-			return
-		}
-		writeErr(w, http.StatusInternalServerError, "ai_tool_guide_unavailable", "ai tools guide is unavailable", nil)
+		errorCode, errorMessage := promptUnavailableErrorForMode(promptMode)
+		writeErr(w, http.StatusInternalServerError, errorCode, errorMessage, nil)
 		return
 	}
 
@@ -203,11 +203,8 @@ func (s *Server) processAgentWithBody(w http.ResponseWriter, r *http.Request, bo
 
 	systemLayers, err := s.buildSystemLayersForMode(effectivePromptMode)
 	if err != nil {
-		if effectivePromptMode == promptModeCodex {
-			writeErr(w, http.StatusInternalServerError, "codex_prompt_unavailable", "codex prompt is unavailable", nil)
-			return
-		}
-		writeErr(w, http.StatusInternalServerError, "ai_tool_guide_unavailable", "ai tools guide is unavailable", nil)
+		errorCode, errorMessage := promptUnavailableErrorForMode(effectivePromptMode)
+		writeErr(w, http.StatusInternalServerError, errorCode, errorMessage, nil)
 		return
 	}
 
@@ -312,15 +309,6 @@ func (s *Server) processAgentWithBody(w http.ResponseWriter, r *http.Request, bo
 
 	reply := ""
 	events := make([]domain.AgentEvent, 0, 12)
-	emitEvent := func(evt domain.AgentEvent) {
-		if !streaming {
-			return
-		}
-		payload, _ := json.Marshal(evt)
-		_, _ = fmt.Fprintf(w, "data: %s\n\n", payload)
-		flusher.Flush()
-		streamStarted = true
-	}
 	effectiveInput := []domain.AgentInputMessage{}
 	generateConfig := runner.GenerateConfig{}
 	if !hasToolCall {
@@ -357,6 +345,17 @@ func (s *Server) processAgentWithBody(w http.ResponseWriter, r *http.Request, bo
 			effectiveInput = prependSystemLayers(req.Input, systemLayers)
 		}
 	}
+	completedEventMeta := buildCompletedModelRequestMeta(effectivePromptMode, systemLayers, effectiveInput, generateConfig)
+	emitEvent := func(evt domain.AgentEvent) {
+		evt = withCompletedEventMeta(evt, completedEventMeta)
+		if !streaming {
+			return
+		}
+		payload, _ := json.Marshal(evt)
+		_, _ = fmt.Fprintf(w, "data: %s\n\n", payload)
+		flusher.Flush()
+		streamStarted = true
+	}
 
 	processResult, processErr := s.getAgentService().Process(
 		r.Context(),
@@ -371,6 +370,7 @@ func (s *Server) processAgentWithBody(w http.ResponseWriter, r *http.Request, bo
 			ReplyChunkSize: replyChunkSizeDefault,
 			GenerateConfig: generateConfig,
 			EffectiveInput: effectiveInput,
+			PromptMode:     effectivePromptMode,
 		},
 		emitEvent,
 	)
@@ -379,7 +379,7 @@ func (s *Server) processAgentWithBody(w http.ResponseWriter, r *http.Request, bo
 		return
 	}
 	reply = processResult.Reply
-	events = processResult.Events
+	events = withCompletedEventMetaForEvents(processResult.Events, completedEventMeta)
 
 	assistant := domain.RuntimeMessage{
 		ID:      newID("msg"),
@@ -786,8 +786,25 @@ func normalizePromptMode(raw string) (string, bool) {
 		return promptModeDefault, true
 	case promptModeCodex:
 		return promptModeCodex, true
+	case promptModeClaude:
+		return promptModeClaude, true
 	default:
 		return "", false
+	}
+}
+
+func promptUnavailableErrorForMode(mode string) (string, string) {
+	normalizedMode, ok := normalizePromptMode(mode)
+	if !ok {
+		return "ai_tool_guide_unavailable", "ai tools guide is unavailable"
+	}
+	switch normalizedMode {
+	case promptModeCodex:
+		return "codex_prompt_unavailable", "codex prompt is unavailable"
+	case promptModeClaude:
+		return "claude_prompt_unavailable", "claude prompt is unavailable"
+	default:
+		return "ai_tool_guide_unavailable", "ai tools guide is unavailable"
 	}
 }
 
@@ -894,11 +911,30 @@ func (s *Server) listToolDefinitions() []runner.ToolDefinition {
 	if len(s.tools) == 0 {
 		return nil
 	}
-	names := make([]string, 0, len(s.tools))
+	nameSet := map[string]struct{}{}
 	for name := range s.tools {
 		if s.toolDisabled(name) {
 			continue
 		}
+		nameSet[name] = struct{}{}
+	}
+
+	_, hasView := nameSet["view"]
+	_, hasBrowser := nameSet["browser"]
+	if (hasView || hasBrowser) && !s.toolDisabled("open") {
+		nameSet["open"] = struct{}{}
+	}
+	if hasBrowser {
+		if !s.toolDisabled("click") {
+			nameSet["click"] = struct{}{}
+		}
+		if !s.toolDisabled("screenshot") {
+			nameSet["screenshot"] = struct{}{}
+		}
+	}
+
+	names := make([]string, 0, len(nameSet))
+	for name := range nameSet {
 		names = append(names, name)
 	}
 	sort.Strings(names)
@@ -1099,6 +1135,146 @@ func buildToolDefinition(name string) runner.ToolDefinition {
 				"additionalProperties": false,
 			},
 		}
+	case "open":
+		return runner.ToolDefinition{
+			Name:        "open",
+			Description: "Open a local absolute path via view or open an HTTP(S) URL via browser summary task.",
+			Parameters: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"path": map[string]interface{}{
+						"type":        "string",
+						"description": "Absolute local file path or HTTP(S) URL.",
+					},
+					"url": map[string]interface{}{
+						"type":        "string",
+						"description": "Alternative URL field, same as path when using HTTP(S).",
+					},
+					"lineno": map[string]interface{}{
+						"type":        "integer",
+						"minimum":     1,
+						"description": "Optional line anchor for local file open.",
+					},
+					"start": map[string]interface{}{
+						"type":        "integer",
+						"minimum":     1,
+						"description": "Optional 1-based start line for local file open.",
+					},
+					"end": map[string]interface{}{
+						"type":        "integer",
+						"minimum":     1,
+						"description": "Optional 1-based end line for local file open.",
+					},
+					"timeout_seconds": map[string]interface{}{
+						"type":        "integer",
+						"minimum":     1,
+						"description": "Optional browser timeout when path/url is HTTP(S).",
+					},
+				},
+				"additionalProperties": true,
+			},
+		}
+	case "find":
+		return runner.ToolDefinition{
+			Name:        "find",
+			Description: "Find plain-text pattern in one or multiple workspace files. input must be an array.",
+			Parameters: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"items": map[string]interface{}{
+						"type":        "array",
+						"description": "Array of find operations; pass one item for single-file find.",
+						"minItems":    1,
+						"items": map[string]interface{}{
+							"type": "object",
+							"properties": map[string]interface{}{
+								"path": map[string]interface{}{
+									"type":        "string",
+									"description": "Workspace file path (relative or absolute within workspace).",
+								},
+								"pattern": map[string]interface{}{
+									"type":        "string",
+									"description": "Literal pattern text to match.",
+								},
+								"ignore_case": map[string]interface{}{
+									"type":        "boolean",
+									"description": "Optional case-insensitive match flag.",
+								},
+							},
+							"required":             []string{"path", "pattern"},
+							"additionalProperties": false,
+						},
+					},
+				},
+				"required":             []string{"items"},
+				"additionalProperties": false,
+			},
+		}
+	case "click":
+		return runner.ToolDefinition{
+			Name:        "click",
+			Description: "Approximate click action routed to browser tool. No persistent page session is guaranteed.",
+			Parameters: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"url": map[string]interface{}{
+						"type":        "string",
+						"description": "Optional target URL.",
+					},
+					"ref_id": map[string]interface{}{
+						"type":        "string",
+						"description": "Optional reference id or URL from previous context.",
+					},
+					"id": map[string]interface{}{
+						"description": "Optional clickable element id.",
+					},
+					"selector": map[string]interface{}{
+						"type":        "string",
+						"description": "Optional CSS/XPath selector.",
+					},
+					"task": map[string]interface{}{
+						"type":        "string",
+						"description": "Optional explicit browser task text.",
+					},
+					"timeout_seconds": map[string]interface{}{
+						"type":    "integer",
+						"minimum": 1,
+					},
+				},
+				"additionalProperties": true,
+			},
+		}
+	case "screenshot":
+		return runner.ToolDefinition{
+			Name:        "screenshot",
+			Description: "Approximate screenshot action routed to browser tool. No persistent page session is guaranteed.",
+			Parameters: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"url": map[string]interface{}{
+						"type":        "string",
+						"description": "Optional target URL.",
+					},
+					"ref_id": map[string]interface{}{
+						"type":        "string",
+						"description": "Optional reference id or URL from previous context.",
+					},
+					"path": map[string]interface{}{
+						"type":        "string",
+						"description": "Optional screenshot output hint.",
+					},
+					"task": map[string]interface{}{
+						"type":        "string",
+						"description": "Optional explicit browser task text.",
+					},
+					"timeout_seconds": map[string]interface{}{
+						"type":    "integer",
+						"minimum": 1,
+					},
+				},
+				"additionalProperties": true,
+			},
+		}
 	default:
 		return runner.ToolDefinition{
 			Name: name,
@@ -1161,6 +1337,83 @@ func cloneAgentInputMessages(input []domain.AgentInputMessage) []domain.AgentInp
 	return out
 }
 
+type completedModelRequestLayer struct {
+	Name    string `json:"name"`
+	Role    string `json:"role"`
+	Source  string `json:"source,omitempty"`
+	Content string `json:"content"`
+}
+
+type completedModelRequestPayload struct {
+	PromptMode   string                       `json:"prompt_mode,omitempty"`
+	ProviderID   string                       `json:"provider_id,omitempty"`
+	Model        string                       `json:"model,omitempty"`
+	SystemLayers []completedModelRequestLayer `json:"system_layers,omitempty"`
+	Input        []domain.AgentInputMessage   `json:"input"`
+}
+
+func buildCompletedModelRequestMeta(
+	promptMode string,
+	systemLayers []systemPromptLayer,
+	input []domain.AgentInputMessage,
+	generateConfig runner.GenerateConfig,
+) map[string]interface{} {
+	if len(input) == 0 {
+		return nil
+	}
+	trace := completedModelRequestPayload{
+		PromptMode: strings.TrimSpace(promptMode),
+		ProviderID: strings.TrimSpace(generateConfig.ProviderID),
+		Model:      strings.TrimSpace(generateConfig.Model),
+		Input:      cloneAgentInputMessages(input),
+	}
+	if len(systemLayers) > 0 {
+		trace.SystemLayers = make([]completedModelRequestLayer, 0, len(systemLayers))
+		for _, layer := range systemLayers {
+			trace.SystemLayers = append(trace.SystemLayers, completedModelRequestLayer{
+				Name:    strings.TrimSpace(layer.Name),
+				Role:    strings.TrimSpace(layer.Role),
+				Source:  strings.TrimSpace(layer.Source),
+				Content: layer.Content,
+			})
+		}
+	}
+	return map[string]interface{}{"model_request": trace}
+}
+
+func withCompletedEventMetaForEvents(events []domain.AgentEvent, completedMeta map[string]interface{}) []domain.AgentEvent {
+	if len(events) == 0 || len(completedMeta) == 0 {
+		return events
+	}
+	out := make([]domain.AgentEvent, 0, len(events))
+	for _, evt := range events {
+		out = append(out, withCompletedEventMeta(evt, completedMeta))
+	}
+	return out
+}
+
+func withCompletedEventMeta(evt domain.AgentEvent, completedMeta map[string]interface{}) domain.AgentEvent {
+	if evt.Type != "completed" || len(completedMeta) == 0 {
+		return evt
+	}
+	evt.Meta = mergeEventMeta(evt.Meta, completedMeta)
+	return evt
+}
+
+func mergeEventMeta(base map[string]interface{}, extra map[string]interface{}) map[string]interface{} {
+	if len(base) == 0 && len(extra) == 0 {
+		return nil
+	}
+	out := make(map[string]interface{}, len(base)+len(extra))
+	for key, value := range base {
+		out[key] = value
+	}
+	for key, value := range extra {
+		out[key] = value
+	}
+	return out
+}
+
 func summarizeAgentEventText(text string) string {
 	trimmed := strings.TrimSpace(text)
 	if trimmed == "" {
@@ -1174,7 +1427,7 @@ func summarizeAgentEventText(text string) string {
 }
 
 func buildAssistantMessageMetadata(events []domain.AgentEvent) map[string]interface{} {
-	notices := make([]map[string]interface{}, 0, 2)
+	notices := make([]persistedToolNotice, 0, 2)
 	textOrder := 0
 	toolOrder := 0
 	for idx, evt := range events {
@@ -1198,14 +1451,55 @@ func buildAssistantMessageMetadata(events []domain.AgentEvent) map[string]interf
 			if err != nil {
 				continue
 			}
-			notices = append(notices, map[string]interface{}{"raw": string(raw)})
+			notices = append(notices, persistedToolNotice{
+				raw:  string(raw),
+				step: evt.Step,
+				name: strings.TrimSpace(evt.ToolCall.Name),
+			})
+		case "tool_result":
+			if evt.ToolResult == nil {
+				continue
+			}
+			if toolOrder == 0 {
+				toolOrder = idx + 1
+			}
+			raw, err := json.Marshal(domain.AgentEvent{
+				Type:       "tool_result",
+				Step:       evt.Step,
+				ToolResult: evt.ToolResult,
+			})
+			if err != nil {
+				continue
+			}
+			notice := persistedToolNotice{
+				raw:        string(raw),
+				step:       evt.Step,
+				name:       strings.TrimSpace(evt.ToolResult.Name),
+				fromResult: true,
+			}
+			pendingIdx := findPendingToolCallNoticeIndex(notices, notice.step, notice.name)
+			if pendingIdx >= 0 {
+				notices[pendingIdx] = notice
+				continue
+			}
+			notices = append(notices, notice)
 		}
 	}
 	if len(notices) == 0 {
 		return nil
 	}
+	serializedNotices := make([]map[string]interface{}, 0, len(notices))
+	for _, notice := range notices {
+		if strings.TrimSpace(notice.raw) == "" {
+			continue
+		}
+		serializedNotices = append(serializedNotices, map[string]interface{}{"raw": notice.raw})
+	}
+	if len(serializedNotices) == 0 {
+		return nil
+	}
 	out := map[string]interface{}{
-		"tool_call_notices": notices,
+		"tool_call_notices": serializedNotices,
 	}
 	if textOrder > 0 {
 		out["text_order"] = textOrder
@@ -1214,6 +1508,39 @@ func buildAssistantMessageMetadata(events []domain.AgentEvent) map[string]interf
 		out["tool_order"] = toolOrder
 	}
 	return out
+}
+
+type persistedToolNotice struct {
+	raw        string
+	step       int
+	name       string
+	fromResult bool
+}
+
+func findPendingToolCallNoticeIndex(notices []persistedToolNotice, step int, name string) int {
+	for idx := len(notices) - 1; idx >= 0; idx-- {
+		notice := notices[idx]
+		if notice.fromResult {
+			continue
+		}
+		if !toolNoticeMatches(notice, step, name) {
+			continue
+		}
+		return idx
+	}
+	return -1
+}
+
+func toolNoticeMatches(notice persistedToolNotice, step int, name string) bool {
+	if step > 0 && notice.step > 0 && notice.step != step {
+		return false
+	}
+	noticeName := strings.TrimSpace(notice.name)
+	incomingName := strings.TrimSpace(name)
+	if noticeName != "" && incomingName != "" && !strings.EqualFold(noticeName, incomingName) {
+		return false
+	}
+	return true
 }
 
 type channelError struct {
@@ -1373,7 +1700,7 @@ func parseShortcutToolCall(rawRequest map[string]interface{}) (toolCall, bool, e
 	if len(rawRequest) == 0 {
 		return toolCall{}, false, nil
 	}
-	shortcuts := []string{"view", "edit", "shell", "browser", "search"}
+	shortcuts := []string{"view", "edit", "shell", "browser", "search", "open", "find", "click", "screenshot"}
 	matched := make([]string, 0, 1)
 	for _, key := range shortcuts {
 		if raw, ok := rawRequest[key]; ok && raw != nil {
@@ -1417,52 +1744,338 @@ func normalizeToolName(name string) string {
 		return "view"
 	case "edit_file_lines", "edit_file_lins", "edit_file":
 		return "edit"
+	case "exec_command", "functions.exec_command":
+		return "shell"
 	case "web_browser", "browser_use", "browser_tool":
 		return "browser"
 	case "web_search", "search_api", "search_tool":
 		return "search"
+	case "open":
+		return "open"
+	case "find":
+		return "find"
+	case "click":
+		return "click"
+	case "screenshot":
+		return "screenshot"
 	default:
 		return name
 	}
 }
 
 func (s *Server) executeToolCall(call toolCall) (string, error) {
-	if s.toolDisabled(call.Name) {
+	name := normalizeToolName(strings.ToLower(strings.TrimSpace(call.Name)))
+	if name == "" {
+		name = strings.ToLower(strings.TrimSpace(call.Name))
+	}
+	input := safeMap(call.Input)
+
+	if s.toolDisabled(name) {
 		return "", &toolError{
 			Code:    "tool_disabled",
-			Message: fmt.Sprintf("tool %q is disabled by server config", call.Name),
-		}
-	}
-	plug, ok := s.tools[call.Name]
-	if !ok {
-		return "", &toolError{
-			Code:    "tool_not_supported",
-			Message: fmt.Sprintf("tool %q is not supported", call.Name),
+			Message: fmt.Sprintf("tool %q is disabled by server config", name),
 		}
 	}
 
-	result, err := plug.Invoke(call.Input)
-	if err != nil {
+	switch name {
+	case "open":
+		return s.executeOpenToolCall(input)
+	case "click", "screenshot":
+		return s.executeApproxBrowserToolCall(name, input)
+	default:
+		result, err := s.invokeRegisteredTool(name, input)
+		if err != nil {
+			return "", err
+		}
+		return renderToolResult(name, result)
+	}
+}
+
+func (s *Server) executeOpenToolCall(input map[string]interface{}) (string, error) {
+	targetName, targetInput, routeErr := buildOpenToolRoute(input)
+	if routeErr != nil {
 		return "", &toolError{
 			Code:    "tool_invoke_failed",
-			Message: fmt.Sprintf("tool %q invocation failed", call.Name),
+			Message: `tool "open" invocation failed`,
+			Err:     routeErr,
+		}
+	}
+	result, err := s.invokeRegisteredTool(targetName, targetInput)
+	if err != nil {
+		return "", err
+	}
+	return renderToolResult("open", result)
+}
+
+func (s *Server) executeApproxBrowserToolCall(action string, input map[string]interface{}) (string, error) {
+	browserInput, routeErr := buildApproxBrowserToolInput(action, input)
+	if routeErr != nil {
+		return "", &toolError{
+			Code:    "tool_invoke_failed",
+			Message: fmt.Sprintf("tool %q invocation failed", action),
+			Err:     routeErr,
+		}
+	}
+	result, err := s.invokeRegisteredTool("browser", browserInput)
+	if err != nil {
+		return "", err
+	}
+	approx := map[string]interface{}{
+		"mode":        "approx",
+		"action":      action,
+		"target_tool": "browser",
+		"result":      result,
+	}
+	if ok, exists := result["ok"]; exists {
+		approx["ok"] = ok
+	}
+	originalText := strings.TrimSpace(stringValue(result["text"]))
+	if originalText == "" {
+		approx["text"] = fmt.Sprintf("mode=approx action=%s routed_to=browser", action)
+	} else {
+		approx["text"] = fmt.Sprintf("mode=approx action=%s routed_to=browser\n%s", action, originalText)
+	}
+	return renderToolResult(action, approx)
+}
+
+func (s *Server) invokeRegisteredTool(name string, input map[string]interface{}) (map[string]interface{}, error) {
+	normalized := normalizeToolName(strings.ToLower(strings.TrimSpace(name)))
+	if normalized == "" {
+		normalized = strings.ToLower(strings.TrimSpace(name))
+	}
+	if s.toolDisabled(normalized) {
+		return nil, &toolError{
+			Code:    "tool_disabled",
+			Message: fmt.Sprintf("tool %q is disabled by server config", normalized),
+		}
+	}
+	plug, ok := s.tools[normalized]
+	if !ok {
+		return nil, &toolError{
+			Code:    "tool_not_supported",
+			Message: fmt.Sprintf("tool %q is not supported", normalized),
+		}
+	}
+	result, err := plug.Invoke(input)
+	if err != nil {
+		return nil, &toolError{
+			Code:    "tool_invoke_failed",
+			Message: fmt.Sprintf("tool %q invocation failed", normalized),
 			Err:     err,
 		}
 	}
+	return result, nil
+}
 
+func renderToolResult(name string, result map[string]interface{}) (string, error) {
 	if text, ok := result["text"].(string); ok && strings.TrimSpace(text) != "" {
 		return text, nil
 	}
-
 	encoded, err := json.Marshal(result)
 	if err != nil {
 		return "", &toolError{
 			Code:    "tool_invalid_result",
-			Message: fmt.Sprintf("tool %q returned invalid result", call.Name),
+			Message: fmt.Sprintf("tool %q returned invalid result", name),
 			Err:     err,
 		}
 	}
 	return string(encoded), nil
+}
+
+func buildOpenToolRoute(input map[string]interface{}) (string, map[string]interface{}, error) {
+	item := firstToolInputItem(input)
+	pathOrURL := firstNonEmptyString(item, "path", "url", "ref_id")
+	if pathOrURL == "" {
+		return "", nil, plugin.ErrFileLinesToolPathMissing
+	}
+	if isHTTPURL(pathOrURL) {
+		browserItem := map[string]interface{}{
+			"task": fmt.Sprintf("打开 URL 并提取结构化摘要。\nURL: %s", strings.TrimSpace(pathOrURL)),
+		}
+		if timeout, ok := firstPositiveInt(item, "timeout_seconds", "yield_time_ms"); ok {
+			browserItem["timeout_seconds"] = timeout
+		}
+		return "browser", map[string]interface{}{
+			"items": []interface{}{browserItem},
+		}, nil
+	}
+	if !filepath.IsAbs(pathOrURL) {
+		return "", nil, plugin.ErrFileLinesToolPathInvalid
+	}
+	pathValue := filepath.Clean(pathOrURL)
+	start, hasStart := firstPositiveInt(item, "start", "start_line", "lineno", "line")
+	if !hasStart {
+		start = 1
+	}
+	end, hasEnd := firstPositiveInt(item, "end", "end_line")
+	if !hasEnd {
+		if hasStart {
+			end = start
+		} else {
+			end = start + 199
+		}
+	}
+	if end < start {
+		end = start
+	}
+	return "view", map[string]interface{}{
+		"items": []interface{}{
+			map[string]interface{}{
+				"path":  pathValue,
+				"start": start,
+				"end":   end,
+			},
+		},
+	}, nil
+}
+
+func buildApproxBrowserToolInput(action string, input map[string]interface{}) (map[string]interface{}, error) {
+	item := firstToolInputItem(input)
+	task := strings.TrimSpace(firstNonEmptyString(item, "task", "query"))
+	if task == "" {
+		target := firstNonEmptyString(item, "url", "ref_id", "ref", "path")
+		switch action {
+		case "click":
+			clickTarget := strings.TrimSpace(firstNonEmptyString(item, "selector", "id", "text", "target"))
+			if target == "" && clickTarget == "" {
+				return nil, plugin.ErrBrowserToolTaskMissing
+			}
+			lines := []string{
+				"以近似模式执行 click 操作，访问目标并尝试点击后返回结构化摘要。",
+				"要求：明确标注 mode=approx，且不保证页面会话状态连续。",
+			}
+			if target != "" {
+				lines = append(lines, "目标: "+target)
+			}
+			if clickTarget != "" {
+				lines = append(lines, "点击元素: "+clickTarget)
+			}
+			task = strings.Join(lines, "\n")
+		case "screenshot":
+			if target == "" {
+				return nil, plugin.ErrBrowserToolTaskMissing
+			}
+			lines := []string{
+				"以近似模式执行 screenshot 操作，访问目标并输出截图结果摘要。",
+				"要求：明确标注 mode=approx，且不保证页面会话状态连续。",
+				"目标: " + target,
+			}
+			if outputHint := strings.TrimSpace(firstNonEmptyString(item, "output", "output_path", "save_as")); outputHint != "" {
+				lines = append(lines, "输出建议: "+outputHint)
+			}
+			task = strings.Join(lines, "\n")
+		default:
+			return nil, plugin.ErrBrowserToolTaskMissing
+		}
+	}
+	browserItem := map[string]interface{}{"task": task}
+	if timeout, ok := firstPositiveInt(item, "timeout_seconds", "yield_time_ms"); ok {
+		browserItem["timeout_seconds"] = timeout
+	}
+	return map[string]interface{}{
+		"items": []interface{}{browserItem},
+	}, nil
+}
+
+func firstToolInputItem(input map[string]interface{}) map[string]interface{} {
+	if input == nil {
+		return map[string]interface{}{}
+	}
+	rawItems, hasItems := input["items"]
+	if hasItems && rawItems != nil {
+		switch value := rawItems.(type) {
+		case []interface{}:
+			if len(value) > 0 {
+				if first, ok := value[0].(map[string]interface{}); ok {
+					return safeMap(first)
+				}
+			}
+		case map[string]interface{}:
+			return safeMap(value)
+		}
+	}
+	return safeMap(input)
+}
+
+func firstNonEmptyString(input map[string]interface{}, keys ...string) string {
+	if len(input) == 0 {
+		return ""
+	}
+	for _, key := range keys {
+		value := strings.TrimSpace(stringValue(input[key]))
+		if value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func firstPositiveInt(input map[string]interface{}, keys ...string) (int, bool) {
+	if len(input) == 0 {
+		return 0, false
+	}
+	for _, key := range keys {
+		value, ok := parsePositiveIntAny(input[key])
+		if ok {
+			return value, true
+		}
+	}
+	return 0, false
+}
+
+func parsePositiveIntAny(raw interface{}) (int, bool) {
+	switch value := raw.(type) {
+	case int:
+		if value > 0 {
+			return value, true
+		}
+	case int32:
+		if value > 0 {
+			return int(value), true
+		}
+	case int64:
+		if value > 0 {
+			return int(value), true
+		}
+	case float64:
+		number := int(value)
+		if float64(number) == value && number > 0 {
+			return number, true
+		}
+	case string:
+		number, err := strconv.Atoi(strings.TrimSpace(value))
+		if err == nil && number > 0 {
+			return number, true
+		}
+	}
+	return 0, false
+}
+
+func stringValue(v interface{}) string {
+	switch value := v.(type) {
+	case string:
+		return value
+	case fmt.Stringer:
+		return value.String()
+	default:
+		return ""
+	}
+}
+
+func isHTTPURL(raw string) bool {
+	candidate := strings.TrimSpace(raw)
+	if candidate == "" {
+		return false
+	}
+	parsed, err := url.Parse(candidate)
+	if err != nil {
+		return false
+	}
+	if parsed.Host == "" {
+		return false
+	}
+	scheme := strings.ToLower(strings.TrimSpace(parsed.Scheme))
+	return scheme == "http" || scheme == "https"
 }
 
 func (s *Server) resolveChannel(name string) (plugin.ChannelPlugin, map[string]interface{}, string, error) {

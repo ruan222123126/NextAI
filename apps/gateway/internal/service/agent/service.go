@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"nextai/apps/gateway/internal/domain"
@@ -21,6 +22,7 @@ type ProcessParams struct {
 	Request           domain.AgentProcessRequest
 	EffectiveInput    []domain.AgentInputMessage
 	GenerateConfig    runner.GenerateConfig
+	PromptMode        string
 	HasToolCall       bool
 	RequestedToolCall ToolCall
 	Streaming         bool
@@ -238,6 +240,8 @@ func (s *Service) Process(
 		workflowInput = append(workflowInput, assistantMessage)
 
 		for _, call := range turn.ToolCalls {
+			execName := normalizeProviderToolName(call.Name)
+			execInput := normalizeProviderToolInput(execName, strings.TrimSpace(params.PromptMode), safeMap(call.Arguments))
 			appendEvent(domain.AgentEvent{
 				Type: "tool_call",
 				Step: step,
@@ -246,7 +250,7 @@ func (s *Service) Process(
 					Input: safeMap(call.Arguments),
 				},
 			})
-			toolReply, toolErr := s.deps.ToolRuntime.ExecuteToolCall(call.Name, safeMap(call.Arguments))
+			toolReply, toolErr := s.deps.ToolRuntime.ExecuteToolCall(execName, execInput)
 			if toolErr != nil {
 				toolReply = s.deps.ToolRuntime.FormatToolErrorFeedback(toolErr)
 				appendEvent(domain.AgentEvent{
@@ -410,4 +414,280 @@ func safeMap(v map[string]interface{}) map[string]interface{} {
 		return fallback
 	}
 	return out
+}
+
+func normalizeProviderToolName(name string) string {
+	normalized := strings.ToLower(strings.TrimSpace(name))
+	switch normalized {
+	case "view_file_lines", "view_file_lins", "view_file":
+		return "view"
+	case "edit_file_lines", "edit_file_lins", "edit_file":
+		return "edit"
+	case "exec_command", "functions.exec_command":
+		return "shell"
+	case "web_browser", "browser_use", "browser_tool":
+		return "browser"
+	case "web_search", "search_api", "search_tool":
+		return "search"
+	case "open":
+		return "open"
+	case "find":
+		return "find"
+	case "click":
+		return "click"
+	case "screenshot":
+		return "screenshot"
+	default:
+		return normalized
+	}
+}
+
+func normalizeProviderToolInput(name, promptMode string, input map[string]interface{}) map[string]interface{} {
+	normalized := normalizeProviderToolInputCompat(name, safeMap(input))
+	if !isCodexPromptMode(promptMode) {
+		return normalized
+	}
+	return normalizeCodexProviderToolInput(name, normalized)
+}
+
+func isCodexPromptMode(promptMode string) bool {
+	return strings.EqualFold(strings.TrimSpace(promptMode), "codex")
+}
+
+func normalizeCodexProviderToolInput(name string, input map[string]interface{}) map[string]interface{} {
+	return normalizeProviderToolInputCompat(name, input)
+}
+
+func normalizeProviderToolInputCompat(name string, input map[string]interface{}) map[string]interface{} {
+	cloned := unwrapCodexProviderToolInput(safeMap(input))
+	if len(cloned) == 0 {
+		return cloned
+	}
+
+	if rawItems, ok := cloned["items"]; ok && rawItems != nil {
+		if item, isObject := rawItems.(map[string]interface{}); isObject {
+			cloned["items"] = []interface{}{safeMap(item)}
+		}
+	}
+
+	if rawItems, ok := cloned["items"]; ok && rawItems != nil {
+		if entries, isArray := rawItems.([]interface{}); isArray {
+			normalizedEntries := make([]interface{}, 0, len(entries))
+			for _, rawEntry := range entries {
+				entry, isObject := rawEntry.(map[string]interface{})
+				if !isObject {
+					normalizedEntries = append(normalizedEntries, rawEntry)
+					continue
+				}
+				item := safeMap(entry)
+				applyCodexProviderInputAliases(item)
+				if name == "shell" {
+					normalizeLegacyProviderShellInput(item)
+				}
+				normalizedEntries = append(normalizedEntries, item)
+			}
+			cloned["items"] = normalizedEntries
+		}
+		return cloned
+	}
+
+	applyCodexProviderInputAliases(cloned)
+	if name == "shell" {
+		normalizeLegacyProviderShellInput(cloned)
+	}
+	if !isLegacySingleItemInput(name, cloned) {
+		return cloned
+	}
+	return map[string]interface{}{
+		"items": []interface{}{cloned},
+	}
+}
+
+func unwrapCodexProviderToolInput(input map[string]interface{}) map[string]interface{} {
+	current := safeMap(input)
+	for depth := 0; depth < 4; depth++ {
+		next, changed := unwrapCodexProviderToolInputOnce(current)
+		if !changed {
+			break
+		}
+		current = next
+	}
+	return current
+}
+
+func unwrapCodexProviderToolInputOnce(input map[string]interface{}) (map[string]interface{}, bool) {
+	for _, key := range []string{"input", "arguments", "args"} {
+		raw, ok := input[key]
+		if !ok || raw == nil {
+			continue
+		}
+		switch value := raw.(type) {
+		case map[string]interface{}:
+			return safeMap(value), true
+		case []interface{}:
+			return map[string]interface{}{"items": value}, true
+		case string:
+			parsed, ok := parseCodexJSONMap(value)
+			if ok {
+				return parsed, true
+			}
+			parsedItems, ok := parseCodexJSONArray(value)
+			if ok {
+				return map[string]interface{}{"items": parsedItems}, true
+			}
+		}
+	}
+	return input, false
+}
+
+func parseCodexJSONMap(raw string) (map[string]interface{}, bool) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return nil, false
+	}
+	var parsed map[string]interface{}
+	if err := json.Unmarshal([]byte(trimmed), &parsed); err != nil || parsed == nil {
+		return nil, false
+	}
+	return parsed, true
+}
+
+func parseCodexJSONArray(raw string) ([]interface{}, bool) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return nil, false
+	}
+	var parsed []interface{}
+	if err := json.Unmarshal([]byte(trimmed), &parsed); err != nil || parsed == nil {
+		return nil, false
+	}
+	return parsed, true
+}
+
+func applyCodexProviderInputAliases(input map[string]interface{}) {
+	if input == nil {
+		return
+	}
+	applyCodexAliasIfMissing(input, "start_line", "start")
+	applyCodexAliasIfMissing(input, "end_line", "end")
+	applyCodexAliasIfMissing(input, "q", "query")
+	applyCodexAliasIfMissing(input, "num_results", "count")
+	applyCodexAliasIfMissing(input, "workdir", "cwd")
+	if _, hasTimeout := input["timeout_seconds"]; !hasTimeout {
+		timeoutMillis, ok := parsePositiveIntFromAny(input["yield_time_ms"])
+		if ok {
+			timeoutSeconds := timeoutMillis / 1000
+			if timeoutMillis%1000 != 0 {
+				timeoutSeconds++
+			}
+			if timeoutSeconds < 1 {
+				timeoutSeconds = 1
+			}
+			input["timeout_seconds"] = timeoutSeconds
+		}
+	}
+}
+
+func applyCodexAliasIfMissing(input map[string]interface{}, source, target string) {
+	if input == nil {
+		return
+	}
+	if _, hasTarget := input[target]; hasTarget {
+		return
+	}
+	value, hasSource := input[source]
+	if !hasSource || value == nil {
+		return
+	}
+	input[target] = value
+}
+
+func normalizeLegacyProviderShellInput(input map[string]interface{}) {
+	if input == nil {
+		return
+	}
+	if _, hasCommand := input["command"]; !hasCommand {
+		if rawCmd, ok := input["cmd"]; ok {
+			input["command"] = rawCmd
+		}
+	}
+	if _, hasCwd := input["cwd"]; !hasCwd {
+		if rawWorkdir, ok := input["workdir"]; ok {
+			input["cwd"] = rawWorkdir
+		}
+	}
+	if _, hasTimeout := input["timeout_seconds"]; hasTimeout {
+		return
+	}
+	timeoutMillis, ok := parsePositiveIntFromAny(input["yield_time_ms"])
+	if !ok {
+		return
+	}
+	timeoutSeconds := timeoutMillis / 1000
+	if timeoutMillis%1000 != 0 {
+		timeoutSeconds++
+	}
+	if timeoutSeconds < 1 {
+		timeoutSeconds = 1
+	}
+	input["timeout_seconds"] = timeoutSeconds
+}
+
+func isLegacySingleItemInput(name string, input map[string]interface{}) bool {
+	switch name {
+	case "view":
+		return hasAnyToolInputField(input, "path", "start", "end", "start_line", "end_line")
+	case "edit":
+		return hasAnyToolInputField(input, "path", "start", "end", "start_line", "end_line", "content")
+	case "shell":
+		return hasAnyToolInputField(input, "command", "cmd")
+	case "browser":
+		return hasAnyToolInputField(input, "task", "query")
+	case "search":
+		return hasAnyToolInputField(input, "query", "q")
+	case "find":
+		return hasAnyToolInputField(input, "path", "pattern", "ignore_case")
+	default:
+		return false
+	}
+}
+
+func hasAnyToolInputField(input map[string]interface{}, keys ...string) bool {
+	if len(input) == 0 || len(keys) == 0 {
+		return false
+	}
+	for _, key := range keys {
+		if value, ok := input[key]; ok && value != nil {
+			return true
+		}
+	}
+	return false
+}
+
+func parsePositiveIntFromAny(raw interface{}) (int, bool) {
+	switch value := raw.(type) {
+	case int:
+		if value > 0 {
+			return value, true
+		}
+	case int32:
+		if value > 0 {
+			return int(value), true
+		}
+	case int64:
+		if value > 0 {
+			return int(value), true
+		}
+	case float64:
+		number := int(value)
+		if float64(number) == value && number > 0 {
+			return number, true
+		}
+	case string:
+		number, err := strconv.Atoi(strings.TrimSpace(value))
+		if err == nil && number > 0 {
+			return number, true
+		}
+	}
+	return 0, false
 }

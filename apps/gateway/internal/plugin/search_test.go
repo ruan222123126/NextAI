@@ -8,7 +8,18 @@ import (
 	"testing"
 )
 
+func clearSearchEnvVars(t *testing.T) {
+	t.Setenv(searchSerpAPIKeyEnv, "")
+	t.Setenv(searchSerpAPIBaseEnv, "")
+	t.Setenv(searchTavilyKeyEnv, "")
+	t.Setenv(searchTavilyBaseEnv, "")
+	t.Setenv(searchBraveKeyEnv, "")
+	t.Setenv(searchBraveBaseEnv, "")
+	t.Setenv(searchDefaultProviderEnv, "")
+}
+
 func TestNewSearchToolFromEnvRequiresProvider(t *testing.T) {
+	clearSearchEnvVars(t)
 	_, err := NewSearchToolFromEnv()
 	if !errors.Is(err, ErrSearchToolProvidersMissing) {
 		t.Fatalf("expected ErrSearchToolProvidersMissing, got=%v", err)
@@ -16,6 +27,7 @@ func TestNewSearchToolFromEnvRequiresProvider(t *testing.T) {
 }
 
 func TestSearchToolInvokeSerpAPI(t *testing.T) {
+	clearSearchEnvVars(t)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/search.json" {
 			t.Fatalf("unexpected path: %s", r.URL.Path)
@@ -58,6 +70,7 @@ func TestSearchToolInvokeSerpAPI(t *testing.T) {
 }
 
 func TestSearchToolInvokeTavilyWithProviderOverride(t *testing.T) {
+	clearSearchEnvVars(t)
 	serp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`{"organic_results":[{"title":"Serp","link":"https://serp.example"}]}`))
 	}))
@@ -110,6 +123,7 @@ func TestSearchToolInvokeTavilyWithProviderOverride(t *testing.T) {
 }
 
 func TestSearchToolRejectsInvalidInput(t *testing.T) {
+	clearSearchEnvVars(t)
 	t.Setenv(searchSerpAPIKeyEnv, "serp-key")
 	tool, err := NewSearchToolFromEnv()
 	if err != nil {

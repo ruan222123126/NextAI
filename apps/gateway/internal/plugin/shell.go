@@ -117,6 +117,9 @@ func (t *ShellTool) invokeOne(input map[string]interface{}) (map[string]interfac
 func parseShellItems(input map[string]interface{}) ([]map[string]interface{}, error) {
 	rawItems, ok := input["items"]
 	if !ok || rawItems == nil {
+		if _, hasLegacyCommand := input["command"]; hasLegacyCommand {
+			return []map[string]interface{}{cloneShellInputMap(input)}, nil
+		}
 		return nil, ErrShellToolItemsInvalid
 	}
 	entries, ok := rawItems.([]interface{})
