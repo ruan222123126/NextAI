@@ -110,6 +110,45 @@ func TestDeleteProviderClearsActiveModel(t *testing.T) {
 	}
 }
 
+func TestConfigureProviderSupportsStoreFlag(t *testing.T) {
+	t.Parallel()
+
+	store := newTestStore(t)
+	svc := NewService(Dependencies{Store: store})
+
+	enableStore := true
+	provider, err := svc.ConfigureProvider(ConfigureProviderInput{
+		ProviderID: "openai",
+		Store:      &enableStore,
+	})
+	if err != nil {
+		t.Fatalf("configure provider failed: %v", err)
+	}
+	if !provider.Store {
+		t.Fatalf("expected provider.Store=true")
+	}
+
+	catalog, err := svc.GetCatalog()
+	if err != nil {
+		t.Fatalf("get catalog failed: %v", err)
+	}
+	if len(catalog.Providers) == 0 || !catalog.Providers[0].Store {
+		t.Fatalf("expected catalog provider store=true, providers=%+v", catalog.Providers)
+	}
+
+	disableStore := false
+	provider, err = svc.ConfigureProvider(ConfigureProviderInput{
+		ProviderID: "openai",
+		Store:      &disableStore,
+	})
+	if err != nil {
+		t.Fatalf("configure provider disable failed: %v", err)
+	}
+	if provider.Store {
+		t.Fatalf("expected provider.Store=false")
+	}
+}
+
 func newTestStore(t *testing.T) *repo.Store {
 	t.Helper()
 

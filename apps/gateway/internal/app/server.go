@@ -27,6 +27,7 @@ import (
 	"nextai/apps/gateway/internal/runner"
 	"nextai/apps/gateway/internal/service/adapters"
 	agentservice "nextai/apps/gateway/internal/service/agent"
+	codexpromptservice "nextai/apps/gateway/internal/service/codexprompt"
 	cronservice "nextai/apps/gateway/internal/service/cron"
 	modelservice "nextai/apps/gateway/internal/service/model"
 	"nextai/apps/gateway/internal/service/ports"
@@ -58,45 +59,72 @@ const (
 
 	cronLeaseDirName = "cron-leases"
 
-	aiToolsGuideRelativePath         = "prompts/AGENTS.md"
-	aiToolsGuideLegacyRelativePath   = "prompts/ai-tools.md"
-	aiToolsGuideLegacyV0RelativePath = "docs/AI/AGENTS.md"
-	aiToolsGuideLegacyV1RelativePath = "docs/AI/ai-tools.md"
-	aiToolsGuideLegacyV2RelativePath = "docs/ai-tools.md"
-	claudeBasePromptRelativePath     = "prompts/claude/main.md"
-	claudeDoingTasksRelativePath     = "prompts/claude/doing-tasks.md"
-	claudeExecutionCareRelativePath  = "prompts/claude/executing-actions-with-care.md"
-	claudeToolUsageRelativePath      = "prompts/claude/tool-usage-policy.md"
-	claudeToneStyleRelativePath      = "prompts/claude/tone-and-style.md"
-	claudeLocalPolicyRelativePath    = aiToolsGuideRelativePath
-	claudeToolGuideRelativePath      = aiToolsGuideLegacyRelativePath
-	codexBasePromptRelativePath      = "prompts/codex/codex-rs/core/prompt.md"
-	codexOrchestratorRelativePath    = "prompts/codex/codex-rs/core/templates/agents/orchestrator.md"
-	codexModelTemplateRelativePath   = "prompts/codex/codex-rs/core/templates/model_instructions/gpt-5.2-codex_instructions_template.md"
-	codexPersonalityRelativePath     = "prompts/codex/codex-rs/core/templates/personalities/gpt-5.2-codex_pragmatic.md"
-	codexCollabDefaultRelativePath   = "prompts/codex/codex-rs/core/templates/collaboration_mode/default.md"
-	codexExperimentalRelativePath    = "prompts/codex/codex-rs/core/templates/collab/experimental_prompt.md"
-	codexLocalPolicyRelativePath     = aiToolsGuideRelativePath
-	codexToolGuideRelativePath       = aiToolsGuideLegacyRelativePath
-	promptModeDefault                = "default"
-	promptModeCodex                  = "codex"
-	promptModeClaude                 = "claude"
-	promptModeVariantDefault         = "default"
-	promptModeVariantCodexV1         = "codex_v1"
-	promptModeVariantCodexV2         = "codex_v2"
-	promptModeVariantClaudeV1        = "claude_v1"
-	collaborationModeDefaultName     = "Default"
-	collaborationModePlanName        = "Plan"
-	chatMetaPromptModeKey            = "prompt_mode"
-	aiToolsGuidePathEnv              = "NEXTAI_AI_TOOLS_GUIDE_PATH"
-	disabledToolsEnv                 = "NEXTAI_DISABLED_TOOLS"
-	enableBrowserToolEnv             = "NEXTAI_ENABLE_BROWSER_TOOL"
-	browserToolAgentDirEnv           = "NEXTAI_BROWSER_AGENT_DIR"
-	enableSearchToolEnv              = "NEXTAI_ENABLE_SEARCH_TOOL"
-	disableQQInboundSupervisorEnv    = "NEXTAI_DISABLE_QQ_INBOUND_SUPERVISOR"
+	aiToolsGuideRelativePath             = "prompts/AGENTS.md"
+	aiToolsGuideLegacyRelativePath       = "prompts/ai-tools.md"
+	aiToolsGuideLegacyV0RelativePath     = "docs/AI/AGENTS.md"
+	aiToolsGuideLegacyV1RelativePath     = "docs/AI/ai-tools.md"
+	aiToolsGuideLegacyV2RelativePath     = "docs/ai-tools.md"
+	claudeBasePromptRelativePath         = "prompts/claude/main.md"
+	claudeDoingTasksRelativePath         = "prompts/claude/doing-tasks.md"
+	claudeExecutionCareRelativePath      = "prompts/claude/executing-actions-with-care.md"
+	claudeToolUsageRelativePath          = "prompts/claude/tool-usage-policy.md"
+	claudeToneStyleRelativePath          = "prompts/claude/tone-and-style.md"
+	claudeLocalPolicyRelativePath        = aiToolsGuideRelativePath
+	claudeToolGuideRelativePath          = aiToolsGuideLegacyRelativePath
+	codexBasePromptRelativePath          = "prompts/codex/codex-rs/core/prompt.md"
+	codexOrchestratorRelativePath        = "prompts/codex/codex-rs/core/templates/agents/orchestrator.md"
+	codexModelTemplateRelativePath       = "prompts/codex/codex-rs/core/templates/model_instructions/gpt-5.2-codex_instructions_template.md"
+	codexPersonalityRelativePath         = "prompts/codex/codex-rs/core/templates/personalities/gpt-5.2-codex_pragmatic.md"
+	codexReviewPromptRelativePath        = "prompts/codex/codex-rs/core/review_prompt.md"
+	codexReviewHistoryCompletedPath      = "prompts/codex/codex-rs/core/templates/review/history_message_completed.md"
+	codexReviewHistoryInterruptedPath    = "prompts/codex/codex-rs/core/templates/review/history_message_interrupted.md"
+	codexCompactPromptRelativePath       = "prompts/codex/codex-rs/core/templates/compact/prompt.md"
+	codexCompactSummaryPrefixPath        = "prompts/codex/codex-rs/core/templates/compact/summary_prefix.md"
+	codexMemoriesConsolidationPath       = "prompts/codex/codex-rs/core/templates/memories/consolidation.md"
+	codexMemoriesReadPathPath            = "prompts/codex/codex-rs/core/templates/memories/read_path.md"
+	codexMemoriesStageOneInputPath       = "prompts/codex/codex-rs/core/templates/memories/stage_one_input.md"
+	codexMemoriesStageOneSystemPath      = "prompts/codex/codex-rs/core/templates/memories/stage_one_system.md"
+	codexSearchToolDescriptionPath       = "prompts/codex/codex-rs/core/templates/search_tool/tool_description.md"
+	codexRuntimeCatalogRelativePath      = "prompts/codex/models.runtime.json"
+	codexCollabDefaultRelativePath       = "prompts/codex/codex-rs/core/templates/collaboration_mode/default.md"
+	codexCollabPlanRelativePath          = "prompts/codex/codex-rs/core/templates/collaboration_mode/plan.md"
+	codexCollabExecuteRelativePath       = "prompts/codex/codex-rs/core/templates/collaboration_mode/execute.md"
+	codexCollabPairProgrammingPath       = "prompts/codex/codex-rs/core/templates/collaboration_mode/pair_programming.md"
+	codexExperimentalRelativePath        = "prompts/codex/codex-rs/core/templates/collab/experimental_prompt.md"
+	codexLocalPolicyRelativePath         = aiToolsGuideRelativePath
+	codexToolGuideRelativePath           = aiToolsGuideLegacyRelativePath
+	codexPromptSourceFile                = codexpromptservice.PromptSourceFile
+	codexPromptSourceCatalog             = codexpromptservice.PromptSourceCatalog
+	defaultCodexModelSlug                = "gpt-5.2-codex"
+	defaultCodexPersonality              = codexpromptservice.PersonalityPragmatic
+	promptModeDefault                    = "default"
+	promptModeCodex                      = "codex"
+	promptModeClaude                     = "claude"
+	promptModeVariantDefault             = "default"
+	promptModeVariantCodexV1             = "codex_v1"
+	promptModeVariantCodexV2             = "codex_v2"
+	promptModeVariantClaudeV1            = "claude_v1"
+	collaborationModeDefaultName         = "Default"
+	collaborationModePlanName            = "Plan"
+	collaborationModeExecuteName         = "Execute"
+	collaborationModePairProgrammingName = "PairProgramming"
+	chatMetaPromptModeKey                = "prompt_mode"
+	aiToolsGuidePathEnv                  = "NEXTAI_AI_TOOLS_GUIDE_PATH"
+	disabledToolsEnv                     = "NEXTAI_DISABLED_TOOLS"
+	enableBrowserToolEnv                 = "NEXTAI_ENABLE_BROWSER_TOOL"
+	browserToolAgentDirEnv               = "NEXTAI_BROWSER_AGENT_DIR"
+	enableSearchToolEnv                  = "NEXTAI_ENABLE_SEARCH_TOOL"
+	disableQQInboundSupervisorEnv        = "NEXTAI_DISABLE_QQ_INBOUND_SUPERVISOR"
+	codexMemoryRootOverrideEnv           = "NEXTAI_CODEX_MEMORY_ROOT"
 
 	replyChunkSizeDefault = 12
 	contextResetCommand   = "/new"
+	reviewTaskCommand     = "/review"
+	compactTaskCommand    = "/compact"
+	memoryTaskCommand     = "/memory"
+	planTaskCommand       = "/plan"
+	executeTaskCommand    = "/execute"
+	pairTaskCommand       = "/pair_programming"
 	contextResetReply     = "上下文已清理，已开始新会话。"
 
 	defaultProcessChannel = "console"
@@ -141,9 +169,11 @@ type Server struct {
 	modelService        *modelservice.Service
 	systemPromptService *systempromptservice.Service
 	workspaceService    *workspaceservice.Service
+	codexPromptResolver codexpromptservice.CodexInstructionResolver
 
 	disabledTools map[string]struct{}
 	qqInboundMu   sync.RWMutex
+	memoryMu      sync.Mutex
 	qqInbound     qqInboundRuntimeState
 
 	cronStop chan struct{}
@@ -171,6 +201,19 @@ func NewServer(cfg config.Config) (*Server, error) {
 		),
 		cronStop: make(chan struct{}),
 		cronDone: make(chan struct{}),
+	}
+	srv.cfg.CodexPromptSource = normalizeCodexPromptSource(srv.cfg.CodexPromptSource)
+	if srv.cfg.CodexPromptSource == codexPromptSourceCatalog || srv.cfg.EnableCodexPromptShadowCompare {
+		resolver, resolverErr := codexpromptservice.NewResolver(codexRuntimeCatalogRelativePath)
+		if resolverErr != nil {
+			if srv.cfg.CodexPromptSource == codexPromptSourceCatalog {
+				return nil, fmt.Errorf("init codex prompt resolver failed: %w", resolverErr)
+			}
+			log.Printf("warning: disable codex prompt shadow compare due to catalog load failure: %v", resolverErr)
+			srv.cfg.EnableCodexPromptShadowCompare = false
+		} else {
+			srv.codexPromptResolver = resolver
+		}
 	}
 	srv.registerChannelPlugin(channel.NewConsoleChannel())
 	srv.registerChannelPlugin(channel.NewWebhookChannel())

@@ -6,14 +6,16 @@ import (
 )
 
 type Config struct {
-	Host                          string
-	Port                          string
-	DataDir                       string
-	APIKey                        string
-	WebDir                        string
-	EnablePromptTemplates         bool
-	EnablePromptContextIntrospect bool
-	EnableCodexModeV2             bool
+	Host                           string
+	Port                           string
+	DataDir                        string
+	APIKey                         string
+	WebDir                         string
+	EnablePromptTemplates          bool
+	EnablePromptContextIntrospect  bool
+	EnableCodexModeV2              bool
+	CodexPromptSource              string
+	EnableCodexPromptShadowCompare bool
 }
 
 func Load() Config {
@@ -34,18 +36,33 @@ func Load() Config {
 	enablePromptTemplates := parseEnvBool("NEXTAI_ENABLE_PROMPT_TEMPLATES")
 	enablePromptContextIntrospect := parseEnvBool("NEXTAI_ENABLE_PROMPT_CONTEXT_INTROSPECT")
 	enableCodexModeV2 := parseEnvBool("NEXTAI_ENABLE_CODEX_MODE_V2")
+	codexPromptSource := parseCodexPromptSource("NEXTAI_CODEX_PROMPT_SOURCE")
+	enableCodexPromptShadowCompare := parseEnvBool("NEXTAI_CODEX_PROMPT_SHADOW_COMPARE")
 	return Config{
-		Host:                          host,
-		Port:                          port,
-		DataDir:                       dataDir,
-		APIKey:                        apiKey,
-		WebDir:                        webDir,
-		EnablePromptTemplates:         enablePromptTemplates,
-		EnablePromptContextIntrospect: enablePromptContextIntrospect,
-		EnableCodexModeV2:             enableCodexModeV2,
+		Host:                           host,
+		Port:                           port,
+		DataDir:                        dataDir,
+		APIKey:                         apiKey,
+		WebDir:                         webDir,
+		EnablePromptTemplates:          enablePromptTemplates,
+		EnablePromptContextIntrospect:  enablePromptContextIntrospect,
+		EnableCodexModeV2:              enableCodexModeV2,
+		CodexPromptSource:              codexPromptSource,
+		EnableCodexPromptShadowCompare: enableCodexPromptShadowCompare,
 	}
 }
 
 func parseEnvBool(key string) bool {
 	return strings.EqualFold(strings.TrimSpace(os.Getenv(key)), "true")
+}
+
+func parseCodexPromptSource(key string) string {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(key))) {
+	case "catalog":
+		return "catalog"
+	case "file":
+		fallthrough
+	default:
+		return "file"
+	}
 }

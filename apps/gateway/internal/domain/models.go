@@ -14,6 +14,7 @@ const (
 	DefaultCronJobInterval = "60s"
 	CronMetaSystemDefault  = "system_default"
 )
+
 type APIErrorBody struct {
 	Error APIError `json:"error"`
 }
@@ -235,6 +236,7 @@ type ProviderInfo struct {
 	OpenAICompatible   bool              `json:"openai_compatible"`
 	APIKeyPrefix       string            `json:"api_key_prefix"`
 	Models             []ModelInfo       `json:"models"`
+	Store              bool              `json:"store"`
 	Headers            map[string]string `json:"headers,omitempty"`
 	TimeoutMS          int               `json:"timeout_ms,omitempty"`
 	ModelAliases       map[string]string `json:"model_aliases,omitempty"`

@@ -136,10 +136,12 @@ expect(hasRequired(providerInfo, "display_name"), "ProviderInfo.required 必须�
 expect(providerInfo?.properties?.openai_compatible?.type === "boolean", "ProviderInfo.openai_compatible 必须是 boolean");
 expect(hasRequired(providerInfo, "openai_compatible"), "ProviderInfo.required 必须包含 openai_compatible");
 expect(providerInfo?.properties?.enabled?.type === "boolean", "ProviderInfo.enabled 必须是 boolean");
+expect(providerInfo?.properties?.store?.type === "boolean", "ProviderInfo.store 必须是 boolean");
 expect(hasRequired(providerInfo, "models"), "ProviderInfo.required 必须包含 models");
 expect(hasRequired(providerTypeInfo, "id"), "ProviderTypeInfo.required 必须包含 id");
 expect(hasRequired(providerTypeInfo, "display_name"), "ProviderTypeInfo.required 必须包含 display_name");
 expect(providerConfigPatch?.properties?.timeout_ms?.minimum === 0, "ProviderConfigPatch.timeout_ms 必须设置 minimum=0");
+expect(providerConfigPatch?.properties?.store?.type === "boolean", "ProviderConfigPatch.store 必须是 boolean");
 expect(deleteResult?.properties?.deleted?.type === "boolean", "DeleteResult.deleted 必须是 boolean");
 expect(hasRequired(deleteResult, "deleted"), "DeleteResult.required 必须包含 deleted");
 expect(hasRequired(modelCatalogInfo, "providers"), "ModelCatalogInfo.required 必须包含 providers");

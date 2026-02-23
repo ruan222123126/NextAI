@@ -30,8 +30,9 @@ type ProcessParams struct {
 }
 
 type ProcessResult struct {
-	Reply  string
-	Events []domain.AgentEvent
+	Reply              string
+	Events             []domain.AgentEvent
+	ProviderResponseID string
 }
 
 type ProcessError struct {
@@ -136,6 +137,8 @@ func (s *Service) Process(
 	}
 
 	workflowInput := cloneAgentInputMessages(params.EffectiveInput)
+	generateConfig := params.GenerateConfig
+	providerResponseID := strings.TrimSpace(generateConfig.PreviousResponseID)
 	step := 1
 
 	for {
@@ -149,7 +152,7 @@ func (s *Service) Process(
 			runErr error
 		)
 		if params.Streaming {
-			turn, runErr = s.deps.Runner.GenerateTurnStream(ctx, turnReq, params.GenerateConfig, s.deps.ToolRuntime.ListToolDefinitions(), func(delta string) {
+			turn, runErr = s.deps.Runner.GenerateTurnStream(ctx, turnReq, generateConfig, s.deps.ToolRuntime.ListToolDefinitions(), func(delta string) {
 				if delta == "" {
 					return
 				}
@@ -161,7 +164,7 @@ func (s *Service) Process(
 				})
 			})
 		} else {
-			turn, runErr = s.deps.Runner.GenerateTurn(ctx, turnReq, params.GenerateConfig, s.deps.ToolRuntime.ListToolDefinitions())
+			turn, runErr = s.deps.Runner.GenerateTurn(ctx, turnReq, generateConfig, s.deps.ToolRuntime.ListToolDefinitions())
 		}
 		if runErr != nil {
 			if recoveredCall, recovered := s.deps.ToolRuntime.RecoverInvalidProviderToolCall(runErr, step); recovered {
@@ -216,6 +219,11 @@ func (s *Service) Process(
 			status, code, message := s.deps.ErrorMapper.MapRunnerError(runErr)
 			return ProcessResult{}, &ProcessError{Status: status, Code: code, Message: message}
 		}
+		if responseID := strings.TrimSpace(turn.ResponseID); responseID != "" {
+			providerResponseID = responseID
+			generateConfig.PreviousResponseID = responseID
+		}
+
 		if len(turn.ToolCalls) == 0 {
 			reply = strings.TrimSpace(turn.Text)
 			if reply == "" {
@@ -224,7 +232,11 @@ func (s *Service) Process(
 			if !params.Streaming || !stepHadStreamingDelta {
 				appendReplyDeltas(step, reply)
 			}
-			appendEvent(domain.AgentEvent{Type: "completed", Step: step, Reply: reply})
+			completed := domain.AgentEvent{Type: "completed", Step: step, Reply: reply}
+			if providerResponseID != "" {
+				completed.Meta = map[string]interface{}{"provider_response_id": providerResponseID}
+			}
+			appendEvent(completed)
 			break
 		}
 
@@ -295,7 +307,7 @@ func (s *Service) Process(
 		step++
 	}
 
-	return ProcessResult{Reply: reply, Events: events}, nil
+	return ProcessResult{Reply: reply, Events: events, ProviderResponseID: providerResponseID}, nil
 }
 
 func (s *Service) validateDependencies() error {

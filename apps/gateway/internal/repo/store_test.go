@@ -16,11 +16,12 @@ func TestLoadKeepsCustomProviderAndActiveProvider(t *testing.T) {
     "Custom-OpenAI": {
       "api_key": "sk-legacy",
       "base_url": "http://127.0.0.1:19002/v1",
-      "display_name": "Legacy Gateway",
-      "enabled": true,
-      "headers": {"X-Test": "1"},
-      "timeout_ms": 12000,
-      "model_aliases": {"fast": "gpt-4o-mini"}
+	    "display_name": "Legacy Gateway",
+	    "enabled": true,
+	    "store": true,
+	    "headers": {"X-Test": "1"},
+	    "timeout_ms": 12000,
+	    "model_aliases": {"fast": "gpt-4o-mini"}
     }
   },
   "active_llm": {"provider_id": "Custom-OpenAI", "model": "legacy-model"}
@@ -56,6 +57,9 @@ func TestLoadKeepsCustomProviderAndActiveProvider(t *testing.T) {
 		}
 		if custom.ModelAliases["fast"] != "gpt-4o-mini" {
 			t.Fatalf("expected model_aliases preserved, got=%v", custom.ModelAliases)
+		}
+		if custom.Store == nil || !*custom.Store {
+			t.Fatalf("expected store preserved, got=%v", custom.Store)
 		}
 
 		if st.ActiveLLM.ProviderID != "custom-openai" {

@@ -45,6 +45,8 @@ type agentSystemLayersResponse struct {
 	EstimatedTokensTotal int                    `json:"estimated_tokens_total"`
 }
 
+const assistantMetadataProviderResponseIDKey = "provider_response_id"
+
 func (s *Server) getAgentSystemLayers(w http.ResponseWriter, r *http.Request) {
 	if !s.cfg.EnablePromptContextIntrospect {
 		writeErr(w, http.StatusNotFound, "feature_disabled", "prompt context introspection is disabled", nil)
@@ -61,7 +63,33 @@ func (s *Server) getAgentSystemLayers(w http.ResponseWriter, r *http.Request) {
 		promptMode = normalizedMode
 	}
 
-	layers, err := s.buildSystemLayersForMode(promptMode)
+	layerOptions := codexLayerBuildOptions{}
+	if promptMode == promptModeCodex {
+		if rawTaskCommand := strings.TrimSpace(r.URL.Query().Get("task_command")); rawTaskCommand != "" {
+			taskCommand, ok := normalizeSystemLayerTaskCommand(rawTaskCommand)
+			if !ok {
+				writeErr(w, http.StatusBadRequest, "invalid_request", "invalid task_command", nil)
+				return
+			}
+			switch taskCommand {
+			case reviewTaskCommand:
+				layerOptions.ReviewTask = true
+			case compactTaskCommand:
+				layerOptions.CompactTask = true
+			case memoryTaskCommand:
+				layerOptions.MemoryTask = true
+			case planTaskCommand:
+				layerOptions.CollaborationMode = collaborationModePlanName
+			case executeTaskCommand:
+				layerOptions.CollaborationMode = collaborationModeExecuteName
+			case pairTaskCommand:
+				layerOptions.CollaborationMode = collaborationModePairProgrammingName
+			}
+		}
+		layerOptions.SessionID = strings.TrimSpace(r.URL.Query().Get("session_id"))
+	}
+
+	layers, err := s.buildSystemLayersForModeWithOptions(promptMode, layerOptions)
 	if err != nil {
 		errorCode, errorMessage := promptUnavailableErrorForMode(promptMode)
 		writeErr(w, http.StatusInternalServerError, errorCode, errorMessage, nil)
@@ -200,8 +228,28 @@ func (s *Server) processAgentWithBody(w http.ResponseWriter, r *http.Request, bo
 			}
 		})
 	}
+	reviewTaskRequested := effectivePromptMode == promptModeCodex && isReviewTaskCommand(req.Input)
+	compactTaskRequested := effectivePromptMode == promptModeCodex && isCompactTaskCommand(req.Input)
+	memoryTaskRequested := effectivePromptMode == promptModeCodex && isMemoryTaskCommand(req.Input)
+	collaborationMode := collaborationModeDefaultName
+	if effectivePromptMode == promptModeCodex {
+		switch {
+		case isPlanTaskCommand(req.Input):
+			collaborationMode = collaborationModePlanName
+		case isExecuteTaskCommand(req.Input):
+			collaborationMode = collaborationModeExecuteName
+		case isPairTaskCommand(req.Input):
+			collaborationMode = collaborationModePairProgrammingName
+		}
+	}
 
-	systemLayers, err := s.buildSystemLayersForMode(effectivePromptMode)
+	systemLayers, err := s.buildSystemLayersForModeWithOptions(effectivePromptMode, codexLayerBuildOptions{
+		SessionID:         req.SessionID,
+		ReviewTask:        reviewTaskRequested,
+		CompactTask:       compactTaskRequested,
+		MemoryTask:        memoryTaskRequested,
+		CollaborationMode: collaborationMode,
+	})
 	if err != nil {
 		errorCode, errorMessage := promptUnavailableErrorForMode(effectivePromptMode)
 		writeErr(w, http.StatusInternalServerError, errorCode, errorMessage, nil)
@@ -309,14 +357,19 @@ func (s *Server) processAgentWithBody(w http.ResponseWriter, r *http.Request, bo
 
 	reply := ""
 	events := make([]domain.AgentEvent, 0, 12)
+	memoryRolloutContents := ""
 	effectiveInput := []domain.AgentInputMessage{}
-	generateConfig := runner.GenerateConfig{}
+	generateConfig := runner.GenerateConfig{
+		PromptCacheKey: req.SessionID,
+	}
 	if !hasToolCall {
 		if activeLLM.ProviderID == "" || strings.TrimSpace(activeLLM.Model) == "" {
 			generateConfig = runner.GenerateConfig{
-				ProviderID: runner.ProviderDemo,
-				Model:      "demo-chat",
-				AdapterID:  provider.AdapterDemo,
+				ProviderID:         runner.ProviderDemo,
+				Model:              "demo-chat",
+				AdapterID:          provider.AdapterDemo,
+				PromptCacheKey:     req.SessionID,
+				PreviousResponseID: latestProviderResponseIDFromInput(historyInput),
 			}
 		} else {
 			if !providerEnabled(providerSetting) {
@@ -330,13 +383,16 @@ func (s *Server) processAgentWithBody(w http.ResponseWriter, r *http.Request, bo
 			}
 			activeLLM.Model = resolvedModel
 			generateConfig = runner.GenerateConfig{
-				ProviderID: activeLLM.ProviderID,
-				Model:      activeLLM.Model,
-				APIKey:     resolveProviderAPIKey(activeLLM.ProviderID, providerSetting),
-				BaseURL:    resolveProviderBaseURL(activeLLM.ProviderID, providerSetting),
-				AdapterID:  provider.ResolveAdapter(activeLLM.ProviderID),
-				Headers:    sanitizeStringMap(providerSetting.Headers),
-				TimeoutMS:  providerSetting.TimeoutMS,
+				ProviderID:         activeLLM.ProviderID,
+				Model:              activeLLM.Model,
+				APIKey:             resolveProviderAPIKey(activeLLM.ProviderID, providerSetting),
+				BaseURL:            resolveProviderBaseURL(activeLLM.ProviderID, providerSetting),
+				AdapterID:          provider.ResolveAdapter(activeLLM.ProviderID),
+				Headers:            sanitizeStringMap(providerSetting.Headers),
+				TimeoutMS:          providerSetting.TimeoutMS,
+				Store:              providerStoreEnabled(providerSetting),
+				PromptCacheKey:     req.SessionID,
+				PreviousResponseID: latestProviderResponseIDFromInput(historyInput),
 			}
 		}
 		if len(historyInput) > 0 {
@@ -387,12 +443,22 @@ func (s *Server) processAgentWithBody(w http.ResponseWriter, r *http.Request, bo
 		Type:    "message",
 		Content: []domain.RuntimeContent{{Type: "text", Text: reply}},
 	}
-	if metadata := buildAssistantMessageMetadata(events); len(metadata) > 0 {
+	metadata := buildAssistantMessageMetadata(events)
+	if responseID := strings.TrimSpace(processResult.ProviderResponseID); responseID != "" {
+		if metadata == nil {
+			metadata = map[string]interface{}{}
+		}
+		metadata[assistantMetadataProviderResponseIDKey] = responseID
+	}
+	if len(metadata) > 0 {
 		assistant.Metadata = metadata
 	}
 
 	_ = s.store.Write(func(state *repo.State) error {
 		state.Histories[chatID] = append(state.Histories[chatID], assistant)
+		if memoryTaskRequested && !hasToolCall {
+			memoryRolloutContents = serializeCodexMemoryRollout(state.Histories[chatID])
+		}
 		chat := state.Chats[chatID]
 		chat.UpdatedAt = nowISO()
 		if chat.Name == "New Chat" && len(req.Input) > 0 && len(req.Input[0].Content) > 0 {
@@ -418,6 +484,10 @@ func (s *Server) processAgentWithBody(w http.ResponseWriter, r *http.Request, bo
 		})
 		streamFail(status, code, message, nil)
 		return
+	}
+
+	if memoryTaskRequested && !hasToolCall {
+		s.startCodexMemoryPipeline(req.SessionID, generateConfig, memoryRolloutContents)
 	}
 
 	if !streaming {
@@ -446,6 +516,83 @@ func isContextResetCommand(input []domain.AgentInputMessage) bool {
 		}
 	}
 	return false
+}
+
+func isReviewTaskCommand(input []domain.AgentInputMessage) bool {
+	return matchesSlashCommand(input, reviewTaskCommand)
+}
+
+func isPlanTaskCommand(input []domain.AgentInputMessage) bool {
+	return matchesSlashCommand(input, planTaskCommand)
+}
+
+func isExecuteTaskCommand(input []domain.AgentInputMessage) bool {
+	return matchesSlashCommand(input, executeTaskCommand)
+}
+
+func isPairTaskCommand(input []domain.AgentInputMessage) bool {
+	return matchesSlashCommand(input, pairTaskCommand)
+}
+
+func isCompactTaskCommand(input []domain.AgentInputMessage) bool {
+	return matchesSlashCommand(input, compactTaskCommand)
+}
+
+func isMemoryTaskCommand(input []domain.AgentInputMessage) bool {
+	return matchesSlashCommand(input, memoryTaskCommand)
+}
+
+func matchesSlashCommand(input []domain.AgentInputMessage, command string) bool {
+	normalizedCommand := strings.TrimSpace(command)
+	if normalizedCommand == "" {
+		return false
+	}
+	for _, msg := range input {
+		if !strings.EqualFold(strings.TrimSpace(msg.Role), "user") {
+			continue
+		}
+		for _, part := range msg.Content {
+			if !strings.EqualFold(strings.TrimSpace(part.Type), "text") {
+				continue
+			}
+			text := strings.TrimSpace(part.Text)
+			if text == "" {
+				continue
+			}
+			fields := strings.Fields(text)
+			if len(fields) == 0 {
+				continue
+			}
+			return strings.EqualFold(fields[0], normalizedCommand)
+		}
+	}
+	return false
+}
+
+func normalizeSystemLayerTaskCommand(raw string) (string, bool) {
+	normalized := strings.ToLower(strings.TrimSpace(raw))
+	if normalized == "" {
+		return "", false
+	}
+	if !strings.HasPrefix(normalized, "/") {
+		normalized = "/" + normalized
+	}
+	switch normalized {
+	case reviewTaskCommand:
+		return reviewTaskCommand, true
+	case compactTaskCommand:
+		return compactTaskCommand, true
+	case memoryTaskCommand:
+		return memoryTaskCommand, true
+	case planTaskCommand:
+		return planTaskCommand, true
+	case executeTaskCommand:
+		return executeTaskCommand, true
+	case pairTaskCommand, "/pair-programming":
+		return pairTaskCommand, true
+	default:
+		return "", false
+	}
 }
 
 func (s *Server) clearChatContext(sessionID, userID, channel string) error {
@@ -886,6 +1033,31 @@ func runtimeHistoryToAgentInputMessages(history []domain.RuntimeMessage) []domai
 		out = append(out, item)
 	}
 	return out
+}
+
+func latestProviderResponseIDFromInput(history []domain.AgentInputMessage) string {
+	for idx := len(history) - 1; idx >= 0; idx-- {
+		item := history[idx]
+		if strings.TrimSpace(item.Role) != "assistant" || item.Metadata == nil {
+			continue
+		}
+		value, ok := item.Metadata[assistantMetadataProviderResponseIDKey]
+		if !ok {
+			continue
+		}
+		id := strings.TrimSpace(stringValue(value))
+		if id != "" {
+			return id
+		}
+	}
+	return ""
+}
+
+func providerStoreEnabled(setting repo.ProviderSetting) bool {
+	if setting.Store == nil {
+		return false
+	}
+	return *setting.Store
 }
 
 func splitReplyChunks(text string, chunkSize int) []string {

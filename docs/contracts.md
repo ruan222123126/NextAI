@@ -134,7 +134,10 @@
 - Gateway adds a structured `environment_context` as an independent `system` layer when feature flag is enabled.
 - New read-only endpoint:
   - `GET /agent/system-layers`
-  - 可选 query：`prompt_mode=default|codex|claude`（默认 `default`）
+  - 可选 query：
+    - `prompt_mode=default|codex|claude`（默认 `default`）
+    - `task_command=review|compact|memory|plan|execute|pair_programming`（仅 `prompt_mode=codex` 生效，用于对齐 slash 命令场景的系统层估算）
+    - `session_id=<chat-session-id>`（可选，主要用于 `task_command=memory` 的模板变量对齐）
   - Purpose: return effective injected layers and token estimate used for this runtime.
 
 Sample response:
@@ -162,11 +165,16 @@ Sample response:
 - 若 `prompt_mode` 非法，返回：
   - `400 invalid_request`
   - `message=invalid prompt_mode`
+- 若 `task_command` 非法（仅 codex 模式校验），返回：
+  - `400 invalid_request`
+  - `message=invalid task_command`
 
 ### Feature flags
 - `NEXTAI_ENABLE_PROMPT_TEMPLATES` (default: `false`).
 - `NEXTAI_ENABLE_PROMPT_CONTEXT_INTROSPECT` (default: `false`).
 - `NEXTAI_ENABLE_CODEX_MODE_V2` (default: `false`).
+- `NEXTAI_CODEX_PROMPT_SOURCE` (default: `file`，可选 `file|catalog`)。
+- `NEXTAI_CODEX_PROMPT_SHADOW_COMPARE` (default: `false`，仅 `file` 主路径时启用并行对比日志)。
 
 ## Runtime Config Endpoint (2026-02)
 - Gateway 提供公开只读接口（不含敏感信息）：`GET /runtime-config`。
@@ -224,6 +232,12 @@ Sample response:
       - `KNOWN_MODE_NAMES` <- 当前支持模式名拼接（非硬编码）
       - `REQUEST_USER_INPUT_AVAILABILITY` <- 基于 mode 能力生成
     - V2 在编排末尾执行内容归一化去重（优先级：codex 核心层 > 本地策略层 > 工具层）。
+  - `codex_model_instructions_system` 来源可切换（层顺序不变）：
+    - `NEXTAI_CODEX_PROMPT_SOURCE=file`：使用 `prompts/codex/codex-rs/core/templates/model_instructions/gpt-5.2-codex_instructions_template.md` + personality 渲染（兼容现有行为）。
+    - `NEXTAI_CODEX_PROMPT_SOURCE=catalog`：使用 `prompts/codex/models.runtime.json#<slug>`；`slug` 优先读取当前 active model，缺省回退 `gpt-5.2-codex`；`personality` 默认 `pragmatic`。
+  - 当 `NEXTAI_CODEX_PROMPT_SOURCE=file` 且 `NEXTAI_CODEX_PROMPT_SHADOW_COMPARE=true` 时：
+    - Gateway 并行计算 catalog 结果并比较规范化内容 hash。
+    - 仅记录日志 `codex_prompt_shadow_diff`（含 `session_id/model_slug/file_hash/catalog_hash/diff_reason`），不改变接口响应。
   - 两个变体都不叠加 default 模式的系统层。
 - `prompt_mode=claude`：
   - 必选注入 `prompts/claude/main.md`（claude base）。
@@ -347,7 +361,7 @@ curl -sS http://127.0.0.1:8088/chats \
 - 快速排查：
   - `GET /models/catalog` 查看 provider 与 active_llm
   - `GET /models/active` 查看当前激活模型
-  - 检查 provider `api_key`、`base_url`、`model_aliases`
+  - 检查 provider `api_key`、`base_url`、`model_aliases`、`store`
 - 修复动作：
   - 先配置 provider，再设置 active model：
 

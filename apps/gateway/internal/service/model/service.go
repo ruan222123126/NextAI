@@ -44,6 +44,7 @@ type ConfigureProviderInput struct {
 	BaseURL      *string
 	DisplayName  *string
 	Enabled      *bool
+	Store        *bool
 	Headers      *map[string]string
 	TimeoutMS    *int
 	ModelAliases *map[string]string
@@ -128,6 +129,10 @@ func (s *Service) ConfigureProvider(input ConfigureProviderInput) (domain.Provid
 		if input.Enabled != nil {
 			enabled := *input.Enabled
 			setting.Enabled = &enabled
+		}
+		if input.Store != nil {
+			store := *input.Store
+			setting.Store = &store
 		}
 		if input.Headers != nil {
 			setting.Headers = sanitizeStringMap(*input.Headers)
@@ -277,6 +282,7 @@ func (s *Service) buildProviderInfo(providerID string, setting repo.ProviderSett
 		OpenAICompatible:   provider.ResolveAdapter(providerID) == provider.AdapterOpenAICompatible,
 		APIKeyPrefix:       spec.APIKeyPrefix,
 		Models:             provider.ResolveModels(providerID, setting.ModelAliases),
+		Store:              providerStoreEnabled(setting),
 		Headers:            sanitizeStringMap(setting.Headers),
 		TimeoutMS:          setting.TimeoutMS,
 		ModelAliases:       sanitizeStringMap(setting.ModelAliases),
@@ -332,6 +338,13 @@ func providerEnabled(setting repo.ProviderSetting) bool {
 		return true
 	}
 	return *setting.Enabled
+}
+
+func providerStoreEnabled(setting repo.ProviderSetting) bool {
+	if setting.Store == nil {
+		return false
+	}
+	return *setting.Store
 }
 
 func normalizeProviderSetting(setting *repo.ProviderSetting) {
