@@ -1,6 +1,6 @@
 # NextAI TODO
 
-更新时间：2026-02-23 17:43:59 +0800
+更新时间：2026-02-23 17:50:32 +0800
 
 ## 执行约定
 - 接手前必读本文件与 `/home/ruan/.codex/handoff/latest.md`
@@ -31,6 +31,10 @@
 ## 6. 近期完成项（摘要）
 
 ### 2026-02-23
+- 工作区分批提交完成：按 Gateway/Web/Prompts/TODO 四批提交 `3471ad3`、`2e02a0f`、`0dba6c2`、`4985eb6`，本地工作区已清空。
+- 远端同步完成：执行 `git push origin refactor/gateway-stage1-transport`，分支已推进到 `4985eb6`。
+- PR 已创建：`#22 feat: codex orchestration + web modularization refresh`（`https://github.com/ruan222123126/NextAI/pull/22`）。
+- 验证通过：`go test ./internal/app ./internal/runner ./internal/service/agent ./internal/service/model ./internal/repo ./internal/provider ./internal/config ./internal/service/codexprompt`、`pnpm -C apps/web exec tsc -p tsconfig.json --noEmit`、`pnpm -C apps/web exec vitest run test/e2e/web-active-model-chat-flow.test.ts test/e2e/web-shell-tool-flow.test.ts`。
 - Web slash 面板头部卡片移除：`apps/web/src/index.html` 删除 `composer-slash-panel-head` 结构，命令列表直接展示，不再出现顶部“命令/继续输入筛选”卡片。
 - Web slash 面板宽度对齐输入框：`apps/web/src/styles.css` 将 `.composer-slash-panel` 宽度从 `min(500px, 100%)` 调整为 `100%` 并补 `box-sizing: border-box`，确保与对话输入框等宽。
 - Web 输入区宽度对齐消息区：`apps/web/src/styles.css` 将 `.composer` 横向内边距由 `22px` 调整为 `16px`，与 `.messages` 左右留白保持一致，输入框视觉更宽。
