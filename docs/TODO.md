@@ -1,6 +1,6 @@
 # NextAI TODO
 
-更新时间：2026-02-22 20:32:32 +0800
+更新时间：2026-02-23 17:43:59 +0800
 
 ## 执行约定
 - 接手前必读本文件与 `/home/ruan/.codex/handoff/latest.md`
@@ -30,7 +30,121 @@
 
 ## 6. 近期完成项（摘要）
 
+### 2026-02-23
+- Web slash 面板头部卡片移除：`apps/web/src/index.html` 删除 `composer-slash-panel-head` 结构，命令列表直接展示，不再出现顶部“命令/继续输入筛选”卡片。
+- Web slash 面板宽度对齐输入框：`apps/web/src/styles.css` 将 `.composer-slash-panel` 宽度从 `min(500px, 100%)` 调整为 `100%` 并补 `box-sizing: border-box`，确保与对话输入框等宽。
+- Web 输入区宽度对齐消息区：`apps/web/src/styles.css` 将 `.composer` 横向内边距由 `22px` 调整为 `16px`，与 `.messages` 左右留白保持一致，输入框视觉更宽。
+- 验证通过：`pnpm -C apps/web exec tsc -p tsconfig.json --noEmit`、`pnpm -C apps/web build`。
+- 项目重启执行：按用户要求重启 `nextai-gateway` 与 `nextai-web-static.service`（`systemctl --user restart nextai-gateway nextai-web-static.service`），确保前后端实例均完成进程级重建。
+- 重启验证通过：`nextai-gateway MainPID=210425`、`nextai-web-static MainPID=210423`，`GET /healthz -> {"ok":true}`，`GET /version -> {"version":"0.1.0"}`，`HEAD http://127.0.0.1:5173/ -> HTTP/1.0 200 OK`。
+- Web 聊天区横向滚动修复：`apps/web/src/styles.css` 将 `.messages` 从 `overflow: auto` 调整为 `overflow-y: auto; overflow-x: hidden;`，关闭对话区左右滑动。
+- 长串文本撑宽兜底：`apps/web/src/styles.css` 为 `.message-text` 增加 `overflow-wrap: anywhere; word-break: break-word;`，防止 SSE 原始串/长 token 把消息区横向撑爆。
+- 验证通过：`pnpm -C apps/web lint`、`pnpm -C apps/web build`。
+- 项目前后端重启：按用户要求重启 `nextai-gateway`（`systemctl --user restart nextai-gateway`），并以静态托管方式拉起前端 `nextai-web-static`（`python3 -m http.server 5173 --bind 127.0.0.1 --directory /mnt/Files/NextAI/apps/web/dist`）。
+- 重启验证通过：`systemctl --user is-active nextai-gateway -> active`、`systemctl --user is-active nextai-web-static.service -> active`、`GET /healthz -> {"ok":true}`、`GET /version -> {"version":"0.1.0"}`、`HEAD http://127.0.0.1:5173/ -> HTTP/1.0 200 OK`。
+- 默认提示词身份约束补齐：`prompts/AGENTS.md` 新增“身份约束”段落，统一要求助手对外自称 `NextAI 编程助手`，禁止自称 `OpenCode`，并固定“你是谁”问答口径。
+- 验证通过：`cd apps/gateway && go test ./internal/app -run 'ModelRequestMeta|SystemLayersSupportsCodexModeQuery' -count=1`。
+- Web 模型管理空态挤压修复：`apps/web/src/styles.css` 将 `models-provider-card-grid` 升级为 `.detail-list.models-provider-card-grid`，避免被通用 `.detail-list` 的 `display:flex` 覆盖；并为 `.message-empty` 增加跨列、最小高度与垂直居中样式，修复“暂无提供商”文本被压扁的视觉问题。
+- 验证通过：`pnpm -C apps/web exec tsc -p tsconfig.json --noEmit`、`pnpm -C apps/web build`。
+- Gateway codex-compatible 缓存链路补齐：`apps/gateway/internal/runner/runner.go` 为 `/responses` 请求新增 `prompt_cache_key`、`previous_response_id`、`store` 字段透传，并解析 `response.created/response.completed` 的 `response.id` 回传为 `TurnResult.ResponseID`。
+- Agent 历史续接落地：`apps/gateway/internal/service/agent/service.go` 在多步循环中复用最新 `ResponseID`，`apps/gateway/internal/app/server_agent.go` 发送前按历史助手消息提取 `provider_response_id` 填充 `PreviousResponseID`，并将最新 `provider_response_id` 持久化到助手消息 metadata。
+- Provider 配置扩展：`apps/gateway/internal/repo/store.go`、`apps/gateway/internal/service/model/service.go`、`apps/gateway/internal/app/server_admin.go` 新增 provider `store` 配置项，支持 `/models/{provider_id}/config` 读写并透传到 runner。
+- 契约同步：`packages/contracts/openapi/openapi.yaml` 为 `ProviderInfo`/`ProviderConfigPatch` 新增 `store:boolean`；`tests/contract/openapi.lint.mjs` 新增对应 schema 断言；`docs/contracts.md` 的 provider 排障项补充 `store`。
+- 回归补测：新增 `apps/gateway/internal/runner/runner_test.go`（缓存字段透传、`ResponseID` 捕获）、`apps/gateway/internal/service/model/service_test.go`（provider store 配置）、`apps/gateway/internal/app/server_test.go`（跨轮次 `previous_response_id` + `prompt_cache_key` + metadata 持久化）用例；`apps/gateway/internal/repo/store_test.go` 补 `store` 兼容加载断言。
+- 验证结果：`cd apps/gateway && GOCACHE=/tmp/go-cache GOMODCACHE=/tmp/go-mod XDG_CACHE_HOME=/tmp go test ./internal/runner ./internal/service/agent ./internal/service/model ./internal/repo` 通过；`pnpm --filter @nextai/tests-contract run lint`、`pnpm --filter @nextai/tests-contract run test` 通过；`go test ./internal/app` 受外网依赖下载超时（`proxy.golang.org`）影响未完成。
+- Web 聊天发送按钮支持“发送中暂停”：`apps/web/src/main/chat-domain.ts` 引入 `AbortController` 管理当前 SSE 请求，发送中点击发送按钮可中断流并恢复可发送状态；中断场景状态文案改为 `status.replyPaused`（info），不再当作错误提示。
+- Web 发送按钮发送态视觉更新：`apps/web/src/styles.css` 为 `.composer-send-btn.is-sending` 增加正方形暂停图标（隐藏箭头 SVG），并在 `apps/web/src/main.ts` 绑定发送按钮点击事件，发送态点击仅触发暂停不重复提交。
+- Web 国际化补齐：`apps/web/src/locales/zh-CN.ts`、`apps/web/src/locales/en-US.ts` 新增 `chat.pauseAria` 与 `status.replyPaused`，并在 `applyLocaleToDocument()` 后同步发送按钮 aria 状态。
+- Web e2e 回归补测：`apps/web/test/e2e/web-active-model-chat-flow.test.ts` 新增“发送中点击发送按钮会暂停请求并恢复按钮状态”用例，覆盖发送态 aria、中断触发与状态栏提示。
+- 验证通过：`pnpm -C apps/web exec tsc -p tsconfig.json --noEmit`、`pnpm -C apps/web exec vitest run test/e2e/web-active-model-chat-flow.test.ts --testNamePattern="发送中点击发送按钮会暂停请求并恢复按钮状态|auto activates model and sends chat without Echo fallback|shows request error in assistant bubble instead of ellipsis when request fails"`。
+- Web 前端重新构建：执行 `pnpm -C apps/web build`，产物重新生成到 `apps/web/dist/`，已覆盖最新 slash 面板布局调整。
+- Web 上下文 token 估算竞态修复：`apps/web/src/main.ts` 为 `systemPromptTokens` 增加 in-flight 场景键追踪，`ensureSystemPromptTokensLoaded()` 在“进行中的请求场景已过期”时会串行补发最新场景请求，避免模式/命令切换时卡在旧估算或 `0`。
+- Token 场景缓存键增强：`apps/web/src/main.ts` 将 `prompt_context_introspect` 状态纳入缓存键，切换 introspect 开关时不会复用旧来源结果；并将非 CJK 文本长度改为按 Unicode 码点计数，和 Gateway `EstimateTokenCount` 口径对齐，降低 emoji 等字符导致的估算偏差。
+- Web e2e 回归补测：`apps/web/test/e2e/web-active-model-chat-flow.test.ts` 新增“首个 system layer 请求未完成时切换 prompt_mode 仍会刷新到新模式估算”，覆盖并发切换场景。
+- 验证通过：`pnpm -C apps/web exec tsc -p tsconfig.json --noEmit`、`pnpm -C apps/web exec vitest run test/e2e/web-active-model-chat-flow.test.ts --testNamePattern="切换 prompt_mode 后会按新模式重载 system layer token 估算|首个 system layer 请求未完成时切换 prompt_mode 仍会刷新到新模式估算|codex slash 命令会驱动 task_command 级别的 system layer 估算"`。
+- Web slash 命令面板布局按参考图重排：`apps/web/src/styles.css` 将面板头改为搜索条形布局、命令列表改为紧凑行式结构（左侧标记点 + 中间标题/描述 + 右侧命令），并增加分组标题行，整体仅调整布局不改配色。
+- Slash 面板渲染结构增强：`apps/web/src/main/composer-slash.ts` 增加分组标题渲染与命令行结构（`icon/body/command`），保持键盘选择、回填与点击行为不变。
+- Slash 命令元数据补齐：`apps/web/src/main.ts` 为命令配置增加 `group` 分类并在本地化映射中生成 `groupLabel`；`apps/web/src/locales/zh-CN.ts`、`apps/web/src/locales/en-US.ts` 新增分组文案键。
+- 验证通过：`pnpm -C apps/web exec tsc -p tsconfig.json --noEmit`、`pnpm -C apps/web exec vitest run test/e2e/web-active-model-chat-flow.test.ts --testNamePattern="输入 / 会展开 slash 面板并支持键盘选择命令"`。
+- 后端数据清空执行：按用户指令停止 `nextai-gateway`，将持久化目录 `/mnt/Files/NextAI/apps/gateway/.data` 与 `/mnt/Files/NextAI/.data` 迁移至 `/tmp/nextai-trash-20260223-153238/`，随后再次执行二次清空（`/mnt/Files/NextAI/apps/gateway/.data -> /tmp/nextai-trash-20260223-153450/`），确保已配置项、会话记忆与历史记录彻底从运行态移除。
+- 清空后重启验证：`systemctl --user is-active nextai-gateway -> active`，`GET /healthz -> {"ok":true}`，`GET /version -> {"version":"0.1.0"}`，`GET /chats` 仅剩系统默认 `chat-default`，`apps/gateway/.data/state.json` 中 `histories.chat-default` 消息数为 `0`。
+- Web 样式发布链路修复：发现页面仍展示旧版深色 slash 面板，根因是服务使用 `apps/web/dist/styles.css` 旧构建产物（11:16），执行 `pnpm -C apps/web build` 后产物已更新为新暖色样式。
+- Web slash 命令面板视觉对齐：`apps/web/src/styles.css` 重绘 `composer-slash-panel` 为浅色暖调卡片，统一边框/阴影/字体色与当前聊天主题，修复原先深色浮层与整体风格割裂的问题。
+- Web slash 列表交互细节优化：命令项改为轻量卡片样式，hover/active 与焦点态统一使用品牌橙高亮，空态补充浅色虚线边框，保证桌面与移动端观感一致。
+- 验证通过：`pnpm -C apps/web exec tsc -p tsconfig.json --noEmit`、`pnpm -C apps/web build`。
+- Web 主入口进一步安全拆分：`apps/web/src/main.ts` 抽离 slash 面板控制器到 `apps/web/src/main/composer-slash.ts`，将命令筛选、键盘选择、面板渲染统一收口为独立模块，主文件保留编排职责。
+- Web 自定义下拉拆分：`apps/web/src/main.ts` 抽离 custom select 逻辑到 `apps/web/src/main/custom-select.ts`，保留 `init/sync` 对外接口，避免主入口继续堆叠 UI 细节实现。
+- Chat 工具调用逻辑拆分：`apps/web/src/main/chat-domain.ts` 抽离工具调用摘要/结果解析到 `apps/web/src/main/chat-tool-call.ts`，保持 `createChatDomain` 返回接口不变（`normalizeToolName`、`formatToolCallSummary` 等）。
+- 验证通过：`pnpm -C apps/web exec tsc -p tsconfig.json --noEmit`、`pnpm -C apps/web exec vitest run test/e2e/web-active-model-chat-flow.test.ts --testNamePattern="输入 / 会展开 slash 面板并支持键盘选择命令|codex slash 命令会驱动 task_command 级别的 system layer 估算"`、`pnpm -C apps/web exec vitest run test/e2e/web-shell-tool-flow.test.ts --testNamePattern="发送 /shell 命令时会携带 tool 调用参数|多行 shell 命令摘要只显示省略号"`。
+- 项目重启维护：按用户要求终止 `nextai-gateway`（systemd 用户服务，原 `127.0.0.1:8088` 实例已下线），清理本地缓存（`apps/cli/node_modules/.vite`、`apps/web/node_modules/.vite`、`cd apps/gateway && go clean -cache -testcache`），随后重新启动服务。
+- 重启验证通过：`systemctl --user is-active nextai-gateway -> active`，`GET /healthz -> {"ok":true}`，`GET /version -> {"version":"0.1.0"}`，`GET /` 返回 Web 首页 HTML。
+- Codex 提示词清理：删除 `prompts/codex/codex-rs/core/` 与 `prompts/codex/codex-rs/protocol/src/prompts/` 下 17 个代码零引用的遗留文件（旧模型总提示词、分层权限模板、apply_patch 变体等），保留运行链路必需文件与 `user-codex` 模板。
+- 动态模板用途复核：确认 `prompts/codex/user-codex/prompts/refactor.md` 仍由 `/prompts:refactor` 动态加载逻辑覆盖，未纳入删除范围。
+- 验证通过：`cd apps/gateway && go test ./internal/app`。
+- Gateway Codex 协作模式增强：`apps/gateway/internal/app/server.go` 新增 `execute/pair_programming` 协作模板路径、模式枚举（`Execute`、`PairProgramming`）与命令常量（`/execute`、`/pair_programming`）。
+- 命令路由扩展（仅 codex 生效）：`apps/gateway/internal/app/server_agent.go` 在 `prompt_mode=codex` 下新增 `/execute`、`/pair_programming` 到协作模式切换；`GET /agent/system-layers` 的 `task_command` 同步支持 `execute/pair_programming`（含 `/pair-programming` 别名）。
+- 协作层注入扩展：`apps/gateway/internal/app/server_admin.go` 新增 `codex_collaboration_execute_system`、`codex_collaboration_pair_programming_system` 注入分支，并将新模式纳入已知模式列表与层级优先级。
+- Web slash 面板补齐 execute/pair_programming 入口：`apps/web/src/main.ts` 的 `COMPOSER_SLASH_COMMANDS` 新增 `/execute`、`/pair_programming` 命令（回填文本分别为 `/execute `、`/pair_programming `），并补充命令检索关键词。
+- Web slash 文案补齐：`apps/web/src/locales/zh-CN.ts`、`apps/web/src/locales/en-US.ts` 新增 `chat.slashExecuteTitle/chat.slashExecuteDesc` 与 `chat.slashPairProgrammingTitle/chat.slashPairProgrammingDesc`。
+- Web e2e 回归增强：`apps/web/test/e2e/web-active-model-chat-flow.test.ts` 的 slash 面板用例新增断言，校验命令列表包含 `/execute`、`/pair_programming`。
+- 前端估算对齐：`apps/web/src/main.ts` 的 `normalizeSystemLayerTaskCommand` 新增 `/execute`、`/pair_programming` 映射，Codex 模式下命令级 token 估算与后端协作层保持一致。
+- 回归补测与契约同步：`apps/gateway/internal/app/server_test.go` 新增 execute/pair_programming 的 system-layer 与 process 路由测试；`docs/contracts.md` 更新 `task_command` 枚举为 `review|compact|memory|plan|execute|pair_programming`。
+- 验证通过：`cd apps/gateway && go test ./internal/app`、`pnpm -C apps/web exec tsc -p tsconfig.json --noEmit`、`pnpm -C apps/web exec vitest run test/e2e/web-active-model-chat-flow.test.ts --testNamePattern="输入 / 会展开 slash 面板并支持键盘选择命令|codex slash 命令会驱动 task_command 级别的 system layer 估算"`。
+- 后端重启完成：停止旧 Gateway（监听 `127.0.0.1:8088` 的 `go run ./cmd/gateway`）并按原环境变量（`NEXTAI_ENV_FILE=/mnt/Files/NextAI/.env`、`NEXTAI_WEB_DIR=/mnt/Files/NextAI/apps/web/dist`）重新拉起。
+- 重启验证通过：`/healthz -> {"ok":true}`、`/version -> {"version":"0.1.0"}`，端口监听进程已切换为新 PID。
+- Codex 指令源运行态切换：本地 `.env` 显式新增 `NEXTAI_CODEX_PROMPT_SOURCE=catalog` 与 `NEXTAI_CODEX_PROMPT_SHADOW_COMPARE=false`，由 file 主路径切到 catalog 主路径，`prompts/codex/models.runtime.json` 正式生效。
+- 验证通过：`grep -n "NEXTAI_CODEX_PROMPT_SOURCE\\|NEXTAI_CODEX_PROMPT_SHADOW_COMPARE" .env` 命中 `catalog/false` 配置。
+- 运行态 Provider 迁移执行：通过 Gateway API 将 `codex` 配置迁移为 `codex-compatible`（复用同一 `base_url/api_key/model_aliases`），随后切换 `active_llm` 到 `codex-compatible/gpt-5.3-codex` 并删除旧 `codex` provider。
+- 迁移后验证：`GET /models/catalog` 已显示 `codex-compatible` 且 `openai_compatible=false`，`active_llm.provider_id=codex-compatible`；本地 `apps/gateway/.data/state.json` 同步落盘。
+- 风险记录：执行一次 `/agent/process` 探活仍返回 `provider_request_failed + 502 (Cloudflare/Host Error)`；直连探针（`User-Agent: Go-http-client/1.1`）显示同一时刻 `/responses -> 502`、`/chat/completions -> 200`，上游两条链路存在波动反转风险。
+- Web prompt 模板回退路径扩展：`apps/web/src/main/chat-domain.ts` 的模板加载候选新增 `prompts/codex/user-codex/prompts/<name>.md`，`/prompts:check-fix`、`/prompts:refactor` 可直接命中 user-codex 模板目录，不再要求额外复制到根 `prompts/`。
+- Web e2e 补测：`apps/web/test/e2e/web-shell-tool-flow.test.ts` 新增“check-fix 模板会回退到 codex user 目录加载”，断言加载顺序为 `prompts -> prompt -> prompts/codex/user-codex/prompts`，并确认最终发送内容来自 codex user 模板。
+- 验证通过：`pnpm -C apps/web exec tsc -p tsconfig.json --noEmit`、`pnpm -C apps/web exec vitest run test/e2e/web-shell-tool-flow.test.ts --testNamePattern="check-fix 模板会回退到 codex user 目录加载|开启 prompt 模板后，/prompts 命令会先展开再发送"`。
+- Web 上下文 token 估算修复：`apps/web/src/main.ts` 将 `systemPromptTokens` 缓存绑定 `prompt_mode`，切换 `default/codex/claude` 时自动失效并重载 `/agent/system-layers?prompt_mode=...`，避免沿用旧模式缓存导致估算偏差。
+- Web 模式切换即时刷新：`apps/web/src/main/chat-domain.ts` 在 `setActivePromptMode` 后立即触发 `renderComposerTokenEstimate()`，切换模式后无需再输入字符即可看到最新估算。
+- Web 命令级估算对齐：`apps/web/src/main.ts` 新增 `task_command` 场景感知（`review/compact/memory/plan`），在 Codex 模式输入 slash 命令时按“模式+命令+session”维度重载估算，避免 `/review` 等动态系统层被忽略。
+- Gateway 估算接口补齐命令上下文：`apps/gateway/internal/app/server_agent.go` 的 `GET /agent/system-layers` 新增可选 query `task_command` 与 `session_id`；Codex 模式下会按命令组装与 `/agent/process` 同源的系统层（如 `review/plan/memory/compact`）。
+- 回归补测：`apps/web/test/e2e/web-active-model-chat-flow.test.ts` 新增“切换 prompt_mode 后会按新模式重载 system layer token 估算”“codex slash 命令会驱动 task_command 级别的 system layer 估算”；`apps/gateway/internal/app/server_test.go` 新增 `TestGetAgentSystemLayersSupportsCodexTaskCommandQuery` 与 `TestGetAgentSystemLayersRejectsInvalidTaskCommandQuery`。
+- 契约同步：`docs/contracts.md` 为 `/agent/system-layers` 补充 `task_command`、`session_id` 可选参数与 `invalid task_command` 错误语义。
+- 验证通过：`pnpm -C apps/web exec tsc -p tsconfig.json --noEmit`、`pnpm -C apps/web exec vitest run test/e2e/web-active-model-chat-flow.test.ts --testNamePattern="切换 prompt_mode 后会按新模式重载 system layer token 估算|codex slash 命令会驱动 task_command 级别的 system layer 估算"`、`cd apps/gateway && go test ./internal/app -run "TestGetAgentSystemLayersSupportsCodexTaskCommandQuery|TestGetAgentSystemLayersRejectsInvalidTaskCommandQuery|TestGetAgentSystemLayersSupportsCodexModeQuery|TestGetAgentSystemLayersSupportsCodexModeQueryV2"`。
+- Gateway provider 类型新增 `codex-compatible`：`apps/gateway/internal/provider/catalog.go` 扩展 provider types（`openai/openai-compatible/codex-compatible`），并按 provider_id 前缀（`codex-compatible`/`codex-compatible-*`）解析自定义 provider 适配器。
+- Gateway Runner 新增 `codex-compatible` 适配器：`apps/gateway/internal/runner/runner.go` 增加 `POST /responses` SSE 链路，支持 `response.output_text.delta` 文本增量聚合、`response.output_item.done` 的 `function_call` 工具调用解析，以及无 delta 时回落到 `message.output_text`。
+- Web Models 面板新增 codex 类型接入：`apps/web/src/main/model-domain.ts` 补 `codex-compatible` 类型识别/显示，创建该类型时 provider_id 固定为 `codex-compatible(-n)`，并将 Base URL 预览改为按类型显示（`openai/openai-compatible -> /chat/completions`，`codex-compatible -> /responses`）；`apps/web/src/locales/zh-CN.ts`、`apps/web/src/locales/en-US.ts` 补 `models.providerTypeCodexCompatible`。
+- 回归补测：`apps/gateway/internal/provider/catalog_test.go`、`apps/gateway/internal/runner/runner_test.go`、`apps/gateway/internal/app/server_test.go` 新增 codex provider type 与 `/responses` 适配断言；`apps/web/test/e2e/web-active-model-chat-flow.test.ts` 新增“adding codex-compatible provider uses codex-compatible id and type”。
+- 验证通过：`cd apps/gateway && go test ./internal/provider ./internal/runner ./internal/app`、`pnpm -C apps/web exec tsc -p tsconfig.json --noEmit`、`pnpm -C apps/web exec vitest run test/e2e/web-active-model-chat-flow.test.ts --testNamePattern="adding openai-compatible provider does not overwrite existing same-type config|adding codex-compatible provider uses codex-compatible id and type|adding openai provider keeps existing config and creates openai-2 with default aliases"`。
+- Web slash 面板补齐 codex 新命令入口：`apps/web/src/main.ts` 的 `COMPOSER_SLASH_COMMANDS` 新增 `/compact`、`/memory`，回填文本分别为 `/compact `、`/memory `，并补充命令检索关键词。
+- Web slash 文案补齐：`apps/web/src/locales/zh-CN.ts`、`apps/web/src/locales/en-US.ts` 新增 `chat.slashCompactTitle/chat.slashCompactDesc` 与 `chat.slashMemoryTitle/chat.slashMemoryDesc`。
+- Web e2e 回归增强：`apps/web/test/e2e/web-active-model-chat-flow.test.ts` 的 slash 面板用例新增断言，校验命令列表包含 `/compact`、`/memory`。
+- 验证通过：`pnpm -C apps/web exec tsc -p tsconfig.json --noEmit`、`pnpm -C apps/web exec vitest run test/e2e/web-active-model-chat-flow.test.ts --testNamePattern="输入 / 会展开 slash 面板并支持键盘选择命令"`。
+- Gateway Codex 模板扩展接入：`apps/gateway/internal/app/server.go` 新增 `compact/memories/review/search_tool` 模板路径常量与 `/compact`、`/memory` 命令常量；`apps/gateway/internal/app/server_agent.go` 在 `prompt_mode=codex` 下识别 `/compact`、`/memory` 并透传任务标记；`apps/gateway/internal/app/server_admin.go` 新增条件注入链路：`/review` 注入 `templates/review/*`、`/compact` 注入 `templates/compact/*`、`/memory` 注入 `templates/memories/*`、codex 模式追加 `templates/search_tool/tool_description.md`。
+- Gateway 回归补测：`apps/gateway/internal/app/server_test.go` 新增 `TestProcessAgentCodexReviewCommandWithPromptTemplatesAddsReviewHistoryLayers`、`TestProcessAgentCodexCompactCommandAddsCompactTemplateLayers`、`TestProcessAgentCodexMemoryCommandAddsMemoryTemplateLayers`；执行 `cd apps/gateway && go test ./internal/app` 通过。
+- Gateway Codex `plan` 模式对齐：`apps/gateway/internal/app/server.go` 新增 `codexCollabPlanRelativePath` 与 `planTaskCommand`；`apps/gateway/internal/app/server_agent.go` 在 `prompt_mode=codex` 且用户首命令为 `/plan` 时切换为 Plan 协作模式；`apps/gateway/internal/app/server_admin.go` 新增协作层按模式注入逻辑，`Plan` 注入 `prompts/codex/codex-rs/core/templates/collaboration_mode/plan.md`，`Default` 继续注入并渲染 `default.md`。
+- Gateway 回归补测：`apps/gateway/internal/app/server_test.go` 新增 `TestProcessAgentCodexPlanCommandAddsPlanCollaborationLayer` 与 `TestProcessAgentDefaultModePlanCommandDoesNotAddPlanCollaborationLayer`，验证 `/plan` 仅在 codex 状态注入 plan 协作层；执行 `cd apps/gateway && go test ./internal/app` 通过。
+- Gateway Codex `/review` 逻辑对齐：`apps/gateway/internal/app/server.go` 新增 `codexReviewPromptRelativePath`；`apps/gateway/internal/app/server_agent.go` 识别用户输入以 `/review` 开头时，仅在 `prompt_mode=codex` 下开启 `ReviewTask`；`apps/gateway/internal/app/server_admin.go` 在构建 codex system layers 时追加 `codex_review_system`，并强制读取 `prompts/codex/codex-rs/core/review_prompt.md`。
+- Gateway 回归补测：`apps/gateway/internal/app/server_test.go` 新增 `TestProcessAgentCodexReviewCommandAddsReviewPromptLayer` 与 `TestProcessAgentDefaultModeReviewCommandDoesNotAddReviewPromptLayer`，验证 `/review` 专用提示词仅在 codex 模式注入；执行 `cd apps/gateway && go test ./internal/app` 通过。
+- Gateway Codex 指令源渐进替换（file -> catalog）首版落地：新增 `apps/gateway/internal/service/codexprompt/`（`catalog.go`、`resolver.go`、`types.go`）与 `prompts/codex/models.runtime.json`，支持 runtime catalog 加载、slug 索引校验、personality 模板渲染与 fallback 元信息输出。
+- Gateway 配置与注入链路扩展：`apps/gateway/internal/config/config.go` 新增 `NEXTAI_CODEX_PROMPT_SOURCE`（默认 `file`）与 `NEXTAI_CODEX_PROMPT_SHADOW_COMPARE`（默认 `false`）解析；`apps/gateway/internal/app/server.go` 在初始化阶段按 source/shadow 注入 codex resolver。
+- Codex system layer 组装改造：`apps/gateway/internal/app/server_admin.go` 为 `codex_model_instructions_system` 增加 `file|catalog` 分支；catalog source 使用 `prompts/codex/models.runtime.json#<slug>`，slug 默认回退 `gpt-5.2-codex`，personality 默认 `pragmatic`（非法值降级并 warning）。
+- Shadow compare 双跑观测：file 主路径下开启 `NEXTAI_CODEX_PROMPT_SHADOW_COMPARE=true` 时并行计算 catalog 内容 hash，对差异仅输出 `codex_prompt_shadow_diff` 日志（`session_id/model_slug/file_hash/catalog_hash/diff_reason`），不改变响应层。
+- 文档与样例同步：更新 `docs/contracts.md` 的 codex source/灰度说明与 `.env.example` 新增两个开关。
+- 测试补齐并通过：新增 `apps/gateway/internal/service/codexprompt/catalog_test.go`、`apps/gateway/internal/service/codexprompt/resolver_test.go`；扩展 `apps/gateway/internal/config/config_test.go` 与 `apps/gateway/internal/app/server_test.go`（file/catalog/source order/local policy/tool guide/shadow diff）；执行 `cd apps/gateway && go test ./internal/service/codexprompt ./internal/config ./internal/app` 通过。
+- Gateway Codex 人格注入修正：`apps/gateway/internal/app/server_admin.go` 保持 `gpt-5.2-codex_pragmatic.md` 通过 `{{ personality }}` 进行模板内联渲染，不新增独立 personality system layer。
+- Codex 指令模板恢复：`prompts/codex/codex-rs/core/templates/model_instructions/gpt-5.2-codex_instructions_template.md` 恢复内联占位 `{{ personality }}`。
+- 回归补测与契约同步：`apps/gateway/internal/app/server_test.go` 回归断言恢复为内联注入语义；`docs/contracts.md` 的 codex_v2 分层顺序与 personality 变量说明同步修正。
+- Web 聊天头部快捷入口回退：移除 `apps/web/src/index.html` 的 `chat-open-models-settings`、`chat-open-workspace-settings`、`chat-open-connection-settings` 三个按钮，避免聊天区头部出现额外“模型设置/配置文件/连接设置”按钮。
+- Web 事件清理：`apps/web/src/main.ts` 删除上述三个按钮的 DOM 绑定与点击事件，并移除不再使用的 `openSettingsSectionShortcut()`，保持设置面板仅通过侧栏/总入口进入。
+- 验证通过：`pnpm -C apps/web exec tsc -p tsconfig.json --noEmit`、`pnpm -C apps/web build`。
+- Web 配置文件面板补齐 `claude code` 独立卡片：`apps/web/src/main/workspace-domain.ts` 将 `prompts/claude/*` 从“提示词”卡片中拆分，新增 `claude` 卡片分组、启用/禁用状态持久化与二级列表视图。
+- Web 交互链路补齐：`apps/web/src/index.html` 新增 `workspace-level2-claude-view` 与 `workspace-claude-body`；`apps/web/src/main.ts` 同步新增 `open-claude` 路由、DOM 绑定与文件点击事件委托。
+- 文案同步：`apps/web/src/locales/zh-CN.ts`、`apps/web/src/locales/en-US.ts` 新增 `workspace.claudeCardTitle`、`workspace.emptyClaude`、`workspace.briefClaude`。
+- Web e2e 补测：`apps/web/test/e2e/web-shell-tool-flow.test.ts` 新增“工作区应新增 claude code 提示词卡片并支持打开文件”用例。
+- 验证通过：`pnpm -C apps/web exec tsc -p tsconfig.json --noEmit`、`pnpm -C apps/web exec vitest run test/e2e/web-shell-tool-flow.test.ts --testNamePattern="工作区应新增 codex 提示词卡片并支持文件夹层层展开|工作区应新增 claude code 提示词卡片并支持打开文件|工作区卡片应支持启用和禁用"`、`pnpm -C apps/web build`。
+
 ### 2026-02-22
+- Web `main.ts` 领域拆分落地：按 `chat/model/workspace/cron/transport/logging` 拆出 `apps/web/src/main/` 下 6 个领域模块（`chat-domain.ts`、`model-domain.ts`、`workspace-domain.ts`、`cron-domain.ts`、`transport.ts`、`logging.ts`），`apps/web/src/main.ts` 收敛为组装与编排层，文件体积降至 `3287` 行（满足 `<3500` 目标）。
+- 会话列表与消息区渲染优化：`apps/web/src/main/chat-domain.ts` 增加 `chatListDigest/searchResultsDigest/messagesDigest` 缓存，只在数据变化时重绘；并在 `renderMessageInPlace` 同步 digest，减少切会话与轮询场景闪烁。
+- 聊天主流程与设置面板路径收敛：`apps/web/src/index.html` 聊天头新增模型/工作区/连接设置快捷入口，`apps/web/src/main.ts` 新增 `openSettingsSectionShortcut()` 一步打开并定位目标设置区；`apps/web/src/styles.css` 补齐按钮样式。
+- 验证通过：执行 `pnpm -C apps/web exec tsc -p tsconfig.json --noEmit`、`pnpm -C apps/web test`（63/63）、`pnpm -r test`（workspace 全量通过，smoke 5 通过 + 1 按设计 skip）。
 - Gateway 启动入口增强：`apps/gateway/cmd/gateway/main.go` 新增 HTTP 运行时超时参数（`READ_HEADER/READ/WRITE/IDLE/SHUTDOWN`）与 `SIGINT/SIGTERM` 优雅停机流程；超时后执行强制关闭并输出降级日志，确保“重启不中断在途请求（超时可控降级）”。
 - Gateway 回归补测：新增 `apps/gateway/cmd/gateway/main_test.go`，覆盖超时配置默认值/环境变量解析、优雅停机等待在途请求、超时后强制关闭三类场景。
 - 默认日志脱敏：`apps/gateway/internal/channel/channel.go` 不再打印控制台消息明文，改为仅记录字符数；新增 `apps/gateway/internal/channel/channel_test.go` 防回归，验证日志不包含原始文本。
@@ -93,6 +207,7 @@
 
 ## 7. 待办 / 风险
 - e2e 用例 `按输出顺序渲染：文本和工具调用交错时保持时间线顺序` 存在超时不稳定
+- Web 技术债：`apps/web/src/main/chat-domain.ts` 暂保留 `// @ts-nocheck`，后续需逐步补齐类型并移除。
 - [x] 2026-02-21 14:17 +0800 Web 运行时 flag 接入：`apps/web/src/main.ts` 在 `bootstrap()` 早期拉取 `/runtime-config` 并缓存为 `runtimeFlags`，`expandPromptTemplateIfNeeded` 与 `loadSystemPromptTokens` 改为读取运行时开关；覆盖优先级实现为 `query > localStorage > runtime-config > false`。
 - [x] 2026-02-21 14:17 +0800 验证通过：执行 `cd apps/gateway && go test ./internal/app -run "TestRuntimeConfigEndpointReflectsFeatureFlags|TestRuntimeConfigEndpointBypassesAPIKeyAuth|TestAPIKeyAuthMiddleware|TestHealthz"` 与 `pnpm -C apps/web build` 均通过。
 - [x] 2026-02-21 13:23 +0800 Web 站点图标替换：在 `apps/web/src/index.html` 明确配置 NextAI 自定义 favicon（`rel="icon"` + `rel="apple-touch-icon"`），覆盖浏览器默认/缓存导致的“外部产品风格图标”显示。
