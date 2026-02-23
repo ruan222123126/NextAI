@@ -305,6 +305,74 @@ describe("web e2e: auto activate model then send chat", () => {
     expect(text).not.toBe("...");
   });
 
+  it("发送中点击发送按钮会暂停请求并恢复按钮状态", async () => {
+    let processCalled = false;
+    let aborted = false;
+
+    globalThis.fetch = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const rawURL = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      const url = new URL(rawURL);
+      const method = (init?.method ?? "GET").toUpperCase();
+
+      if (url.pathname === "/chats" && method === "GET") {
+        return Promise.resolve(jsonResponse([]));
+      }
+
+      if (url.pathname === "/models/catalog" && method === "GET") {
+        return Promise.resolve(jsonResponse({
+          providers: [],
+          provider_types: [],
+          defaults: {},
+          active_llm: {
+            provider_id: "",
+            model: "",
+          },
+        }));
+      }
+
+      if (url.pathname === "/agent/process" && method === "POST") {
+        processCalled = true;
+        const signal = init?.signal as AbortSignal | null | undefined;
+        return new Promise<Response>((_resolve, reject) => {
+          if (signal?.aborted) {
+            aborted = true;
+            reject(new DOMException("aborted", "AbortError"));
+            return;
+          }
+          signal?.addEventListener(
+            "abort",
+            () => {
+              aborted = true;
+              reject(new DOMException("aborted", "AbortError"));
+            },
+            { once: true },
+          );
+        });
+      }
+
+      return Promise.reject(new Error(`unexpected request: ${method} ${url.pathname}`));
+    }) as typeof globalThis.fetch;
+
+    await import("../../src/main.ts");
+
+    const messageInput = document.getElementById("message-input") as HTMLTextAreaElement;
+    const composerForm = document.getElementById("composer") as HTMLFormElement;
+    const sendButton = document.getElementById("send-btn") as HTMLButtonElement;
+    messageInput.value = "pause me";
+    composerForm.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+
+    await waitFor(() => processCalled && sendButton.classList.contains("is-sending"), 4000);
+    expect(sendButton.getAttribute("aria-label")).toBe("暂停请求");
+
+    sendButton.click();
+
+    await waitFor(() => aborted, 4000);
+    await waitFor(() => !sendButton.classList.contains("is-sending"), 4000);
+    const statusLine = document.getElementById("status-line")?.textContent ?? "";
+    expect(statusLine).toContain("已暂停回复接收");
+    expect(sendButton.getAttribute("aria-label")).toBe("发送消息");
+  });
+
   it("输入 / 会展开 slash 面板并支持键盘选择命令", async () => {
     let processCalled = false;
 
@@ -355,7 +423,12 @@ describe("web e2e: auto activate model then send chat", () => {
     await waitFor(() => !slashPanel.classList.contains("is-hidden"));
     const options = Array.from(slashList.querySelectorAll<HTMLButtonElement>("button[data-composer-slash-index]"));
     expect(options.length).toBeGreaterThan(1);
-    expect(options[0]?.textContent ?? "").toContain("/shell");
+    const optionTexts = options.map((item) => item.textContent ?? "");
+    expect(optionTexts.some((text) => text.includes("/shell"))).toBe(true);
+    expect(optionTexts.some((text) => text.includes("/compact"))).toBe(true);
+    expect(optionTexts.some((text) => text.includes("/memory"))).toBe(true);
+    expect(optionTexts.some((text) => text.includes("/execute"))).toBe(true);
+    expect(optionTexts.some((text) => text.includes("/pair_programming"))).toBe(true);
 
     messageInput.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true, cancelable: true }));
     messageInput.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
@@ -847,6 +920,308 @@ describe("web e2e: auto activate model then send chat", () => {
     });
   });
 
+  it("切换 prompt_mode 后会按新模式重载 system layer token 估算", async () => {
+    const requestedModes: string[] = [];
+    let defaultModeCalls = 0;
+
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const rawURL = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      const url = new URL(rawURL);
+      const method = (init?.method ?? "GET").toUpperCase();
+
+      if (url.pathname === "/runtime-config" && method === "GET") {
+        return jsonResponse({
+          features: {
+            prompt_templates: false,
+            prompt_context_introspect: true,
+          },
+        });
+      }
+
+      if (url.pathname === "/chats" && method === "GET") {
+        return jsonResponse([]);
+      }
+
+      if (url.pathname === "/models/catalog" && method === "GET") {
+        return jsonResponse({
+          providers: [
+            {
+              id: "openai",
+              name: "OPENAI",
+              display_name: "OpenAI",
+              openai_compatible: true,
+              api_key_prefix: "OPENAI_API_KEY",
+              models: [{ id: "gpt-4o-mini", name: "gpt-4o-mini", limit: { context: 32000 } }],
+              allow_custom_base_url: true,
+              enabled: true,
+              has_api_key: true,
+              current_api_key: "sk-***",
+              current_base_url: "https://api.openai.com/v1",
+            },
+          ],
+          provider_types: [{ id: "openai", display_name: "openai" }],
+          defaults: {
+            openai: "gpt-4o-mini",
+          },
+          active_llm: {
+            provider_id: "openai",
+            model: "gpt-4o-mini",
+          },
+        });
+      }
+
+      if (url.pathname === "/agent/system-layers" && method === "GET") {
+        const promptMode = url.searchParams.get("prompt_mode") ?? "default";
+        requestedModes.push(promptMode);
+        let total = 1000;
+        if (promptMode === "codex") {
+          total = 11000;
+        } else {
+          defaultModeCalls += 1;
+          if (defaultModeCalls >= 2) {
+            total = 2000;
+          }
+        }
+        return jsonResponse({
+          version: "v1",
+          mode_variant: promptMode === "codex" ? "codex_v1" : "default",
+          layers: [],
+          estimated_tokens_total: total,
+        });
+      }
+
+      if (url.pathname.startsWith("/workspace/files/") && method === "GET") {
+        return jsonResponse({ error: { code: "not_found", message: "not found" } }, 404);
+      }
+
+      throw new Error(`unexpected request: ${method} ${url.pathname}`);
+    }) as typeof globalThis.fetch;
+
+    await import("../../src/main.ts");
+
+    await waitFor(() => requestedModes.includes("default"), 4000);
+    await waitFor(() => {
+      const text = document.getElementById("composer-token-estimate")?.textContent ?? "";
+      return text.includes("1.0k/32.0k");
+    });
+
+    const promptModeSelect = document.getElementById("chat-prompt-mode-select") as HTMLSelectElement;
+    promptModeSelect.value = "codex";
+    promptModeSelect.dispatchEvent(new Event("change", { bubbles: true }));
+
+    await waitFor(() => requestedModes.includes("codex"), 4000);
+    await waitFor(() => {
+      const text = document.getElementById("composer-token-estimate")?.textContent ?? "";
+      return text.includes("11.0k/32.0k");
+    });
+
+    promptModeSelect.value = "default";
+    promptModeSelect.dispatchEvent(new Event("change", { bubbles: true }));
+
+    await waitFor(() => defaultModeCalls >= 2, 4000);
+    await waitFor(() => {
+      const text = document.getElementById("composer-token-estimate")?.textContent ?? "";
+      return text.includes("2.0k/32.0k");
+    });
+  });
+
+  it("首个 system layer 请求未完成时切换 prompt_mode 仍会刷新到新模式估算", async () => {
+    let pendingDefaultResolve: ((value: Response) => void) | null = null;
+    let defaultModeCalls = 0;
+    let codexModeCalls = 0;
+
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const rawURL = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      const url = new URL(rawURL);
+      const method = (init?.method ?? "GET").toUpperCase();
+
+      if (url.pathname === "/runtime-config" && method === "GET") {
+        return jsonResponse({
+          features: {
+            prompt_templates: false,
+            prompt_context_introspect: true,
+          },
+        });
+      }
+
+      if (url.pathname === "/chats" && method === "GET") {
+        return jsonResponse([]);
+      }
+
+      if (url.pathname === "/models/catalog" && method === "GET") {
+        return jsonResponse({
+          providers: [
+            {
+              id: "openai",
+              name: "OPENAI",
+              display_name: "OpenAI",
+              openai_compatible: true,
+              api_key_prefix: "OPENAI_API_KEY",
+              models: [{ id: "gpt-4o-mini", name: "gpt-4o-mini", limit: { context: 32000 } }],
+              allow_custom_base_url: true,
+              enabled: true,
+              has_api_key: true,
+              current_api_key: "sk-***",
+              current_base_url: "https://api.openai.com/v1",
+            },
+          ],
+          provider_types: [{ id: "openai", display_name: "openai" }],
+          defaults: {
+            openai: "gpt-4o-mini",
+          },
+          active_llm: {
+            provider_id: "openai",
+            model: "gpt-4o-mini",
+          },
+        });
+      }
+
+      if (url.pathname === "/agent/system-layers" && method === "GET") {
+        const promptMode = url.searchParams.get("prompt_mode") ?? "default";
+        if (promptMode === "default") {
+          defaultModeCalls += 1;
+          return new Promise<Response>((resolve) => {
+            pendingDefaultResolve = resolve;
+          });
+        }
+        codexModeCalls += 1;
+        return jsonResponse({
+          version: "v1",
+          mode_variant: "codex_v1",
+          layers: [],
+          estimated_tokens_total: 9000,
+        });
+      }
+
+      if (url.pathname.startsWith("/workspace/files/") && method === "GET") {
+        return jsonResponse({ error: { code: "not_found", message: "not found" } }, 404);
+      }
+
+      throw new Error(`unexpected request: ${method} ${url.pathname}`);
+    }) as typeof globalThis.fetch;
+
+    await import("../../src/main.ts");
+    await waitFor(() => pendingDefaultResolve !== null, 4000);
+    expect(defaultModeCalls).toBeGreaterThan(0);
+    const statusLine = document.getElementById("status-line") as HTMLElement;
+    await waitFor(() => (statusLine.textContent ?? "").includes("草稿会话"), 4000);
+
+    const promptModeSelect = document.getElementById("chat-prompt-mode-select") as HTMLSelectElement;
+    promptModeSelect.value = "codex";
+    promptModeSelect.dispatchEvent(new Event("change", { bubbles: true }));
+
+    pendingDefaultResolve?.(
+      jsonResponse({
+        version: "v1",
+        mode_variant: "default",
+        layers: [],
+        estimated_tokens_total: 1000,
+      }),
+    );
+
+    await waitFor(() => codexModeCalls > 0, 4000);
+    await waitFor(() => {
+      const text = document.getElementById("composer-token-estimate")?.textContent ?? "";
+      return text.includes("9.0k/32.0k");
+    }, 4000);
+  });
+
+  it("codex slash 命令会驱动 task_command 级别的 system layer 估算", async () => {
+    const requestedTaskCommands: string[] = [];
+
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const rawURL = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      const url = new URL(rawURL);
+      const method = (init?.method ?? "GET").toUpperCase();
+
+      if (url.pathname === "/runtime-config" && method === "GET") {
+        return jsonResponse({
+          features: {
+            prompt_templates: false,
+            prompt_context_introspect: true,
+          },
+        });
+      }
+
+      if (url.pathname === "/chats" && method === "GET") {
+        return jsonResponse([]);
+      }
+
+      if (url.pathname === "/models/catalog" && method === "GET") {
+        return jsonResponse({
+          providers: [
+            {
+              id: "openai",
+              name: "OPENAI",
+              display_name: "OpenAI",
+              openai_compatible: true,
+              api_key_prefix: "OPENAI_API_KEY",
+              models: [{ id: "gpt-4o-mini", name: "gpt-4o-mini", limit: { context: 32000 } }],
+              allow_custom_base_url: true,
+              enabled: true,
+              has_api_key: true,
+              current_api_key: "sk-***",
+              current_base_url: "https://api.openai.com/v1",
+            },
+          ],
+          provider_types: [{ id: "openai", display_name: "openai" }],
+          defaults: {
+            openai: "gpt-4o-mini",
+          },
+          active_llm: {
+            provider_id: "openai",
+            model: "gpt-4o-mini",
+          },
+        });
+      }
+
+      if (url.pathname === "/agent/system-layers" && method === "GET") {
+        const taskCommand = url.searchParams.get("task_command") ?? "";
+        requestedTaskCommands.push(taskCommand);
+        const total = taskCommand === "review" ? 7000 : 3000;
+        return jsonResponse({
+          version: "v1",
+          mode_variant: "codex_v1",
+          layers: [],
+          estimated_tokens_total: total,
+        });
+      }
+
+      if (url.pathname.startsWith("/workspace/files/") && method === "GET") {
+        return jsonResponse({ error: { code: "not_found", message: "not found" } }, 404);
+      }
+
+      throw new Error(`unexpected request: ${method} ${url.pathname}`);
+    }) as typeof globalThis.fetch;
+
+    await import("../../src/main.ts");
+
+    const statusLine = document.getElementById("status-line") as HTMLElement;
+    const promptModeSelect = document.getElementById("chat-prompt-mode-select") as HTMLSelectElement;
+    await waitFor(() => (statusLine.textContent ?? "").includes("草稿会话"), 4000);
+
+    const initialRequestCount = requestedTaskCommands.length;
+    promptModeSelect.value = "codex";
+    promptModeSelect.dispatchEvent(new Event("change", { bubbles: true }));
+    await waitFor(() => promptModeSelect.value === "codex", 4000);
+    await waitFor(() => requestedTaskCommands.length > initialRequestCount, 4000);
+
+    await waitFor(() => {
+      const text = document.getElementById("composer-token-estimate")?.textContent ?? "";
+      return text.includes("3.0k/32.0k");
+    }, 4000);
+
+    const messageInput = document.getElementById("message-input") as HTMLTextAreaElement;
+    messageInput.value = "/review check this";
+    messageInput.dispatchEvent(new Event("input", { bubbles: true }));
+
+    await waitFor(() => requestedTaskCommands.includes("review"), 4000);
+    await waitFor(() => {
+      const text = document.getElementById("composer-token-estimate")?.textContent ?? "";
+      return text.includes("7.0k/32.0k");
+    }, 4000);
+  });
+
   it("uploads selected files and appends returned paths into composer", async () => {
     let uploadCount = 0;
     globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -1289,6 +1664,136 @@ describe("web e2e: auto activate model then send chat", () => {
     expect(overwroteExisting).toBe(false);
     expect(catalogProviders.map((provider) => provider.id)).toContain(existingProviderID);
     expect(catalogProviders.map((provider) => provider.id)).toContain("openai-compatible-2");
+  });
+
+  it("adding codex-compatible provider uses codex-compatible id and type", async () => {
+    const openAIProvider = {
+      id: "openai",
+      name: "OPENAI",
+      display_name: "OpenAI Default",
+      openai_compatible: true,
+      api_key_prefix: "OPENAI_API_KEY",
+      models: [{ id: "gpt-4o-mini", name: "gpt-4o-mini" }],
+      allow_custom_base_url: true,
+      enabled: true,
+      store: false,
+      has_api_key: true,
+      current_api_key: "sk***123",
+      current_base_url: "https://api.openai.com/v1",
+    };
+    const catalogProviders = [openAIProvider];
+    let configuredProviderID = "";
+    let configuredStore = false;
+
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const rawURL = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      const url = new URL(rawURL);
+      const method = (init?.method ?? "GET").toUpperCase();
+
+      if (url.pathname === "/chats" && method === "GET") {
+        return jsonResponse([]);
+      }
+
+      if (url.pathname === "/models/catalog" && method === "GET") {
+        return jsonResponse({
+          providers: catalogProviders,
+          provider_types: [
+            { id: "openai", display_name: "openai" },
+            { id: "openai-compatible", display_name: "openai Compatible" },
+            { id: "codex-compatible", display_name: "codex Compatible" },
+          ],
+          defaults: {
+            openai: "gpt-4o-mini",
+          },
+          active_llm: {
+            provider_id: "openai",
+            model: "gpt-4o-mini",
+          },
+        });
+      }
+
+      if (url.pathname.startsWith("/models/") && url.pathname.endsWith("/config") && method === "PUT") {
+        const payload = JSON.parse(String(init?.body ?? "{}")) as { store?: boolean };
+        const rawProviderID = url.pathname.slice("/models/".length, url.pathname.length - "/config".length);
+        configuredProviderID = decodeURIComponent(rawProviderID);
+        configuredStore = payload.store === true;
+        catalogProviders.push({
+          id: configuredProviderID,
+          name: "CODEX-COMPATIBLE",
+          display_name: "Codex Remote",
+          openai_compatible: false,
+          api_key_prefix: "CODEX_COMPATIBLE_API_KEY",
+          models: [{ id: "gpt-5-codex", name: "gpt-5-codex" }],
+          allow_custom_base_url: true,
+          enabled: true,
+          store: configuredStore,
+          has_api_key: false,
+          current_api_key: "",
+          current_base_url: "",
+        });
+        return jsonResponse(catalogProviders.find((provider) => provider.id === configuredProviderID) ?? {}, 200);
+      }
+
+      throw new Error(`unexpected request: ${method} ${url.pathname}`);
+    }) as typeof globalThis.fetch;
+
+    await import("../../src/main.ts");
+
+    const settingsToggleButton = document.getElementById("settings-toggle") as HTMLButtonElement;
+    settingsToggleButton.click();
+    const modelsSectionButton = document.querySelector<HTMLButtonElement>('button[data-settings-section="models"]');
+    expect(modelsSectionButton).not.toBeNull();
+    modelsSectionButton?.click();
+
+    await waitFor(() =>
+      Boolean(
+        document.querySelector<HTMLButtonElement>(
+          'button[data-provider-action="select"][data-provider-id="openai"]',
+        ),
+      ),
+    );
+
+    const addProviderButton = document.getElementById("models-add-provider-btn") as HTMLButtonElement;
+    addProviderButton.click();
+
+    await waitFor(() => {
+      const level2 = document.getElementById("models-level2-view");
+      return Boolean(level2 && !level2.hasAttribute("hidden"));
+    });
+
+    const providerTypeSelect = document.getElementById("models-provider-type-select") as HTMLSelectElement;
+    providerTypeSelect.value = "codex-compatible";
+    providerTypeSelect.dispatchEvent(new Event("change", { bubbles: true }));
+
+    const providerStoreField = document.getElementById("models-provider-store-field") as HTMLElement;
+    const providerStoreInput = document.getElementById("models-provider-store-input") as HTMLInputElement;
+    expect(providerStoreField.hidden).toBe(false);
+    expect(providerStoreInput.checked).toBe(false);
+    providerStoreInput.checked = true;
+    providerStoreInput.dispatchEvent(new Event("change", { bubbles: true }));
+
+    const providerNameInput = document.getElementById("models-provider-name-input") as HTMLInputElement;
+    providerNameInput.value = "Codex Remote";
+
+    const providerForm = document.getElementById("models-provider-form") as HTMLFormElement;
+    providerForm.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+
+    await waitFor(() => configuredProviderID !== "");
+
+    expect(configuredProviderID).toBe("codex-compatible");
+    expect(configuredStore).toBe(true);
+    await waitFor(() =>
+      Boolean(
+        document.querySelector<HTMLButtonElement>(
+          `button[data-provider-action="select"][data-provider-id="${configuredProviderID}"]`,
+        ),
+      ),
+    );
+    const createdProviderButton = document.querySelector<HTMLButtonElement>(
+      `button[data-provider-action="select"][data-provider-id="${configuredProviderID}"]`,
+    );
+    expect(createdProviderButton).not.toBeNull();
+    expect(createdProviderButton?.textContent?.includes("codex Compatible")).toBe(true);
   });
 
   it("adding openai provider keeps existing config and creates openai-2 with default aliases", async () => {

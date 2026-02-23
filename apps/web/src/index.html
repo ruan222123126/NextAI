@@ -148,6 +148,12 @@
                                 <input id="models-provider-enabled-input" class="provider-enabled-toggle-input" type="checkbox" role="switch" checked />
                               </span>
                             </label>
+                            <label id="models-provider-store-field" class="provider-basic-field provider-basic-toggle" hidden>
+                              <span data-i18n="models.providerStore">Enable cache (store)</span>
+                              <span class="provider-enabled-toggle">
+                                <input id="models-provider-store-input" class="provider-enabled-toggle-input" type="checkbox" role="switch" />
+                              </span>
+                            </label>
                           </section>
 
                           <section class="provider-edit-block provider-edit-block-api-key">
@@ -206,7 +212,7 @@
                             </div>
                             <p class="hint provider-path-preview">
                               <span data-i18n="models.baseURLPreviewLabel">Preview:</span>
-                              <code id="models-provider-base-url-preview">/responses</code>
+                              <code id="models-provider-base-url-preview">/chat/completions</code>
                             </p>
                           </section>
 
@@ -368,6 +374,15 @@
                         </div>
                         <ul id="workspace-codex-tree-body" class="detail-list workspace-codex-tree"></ul>
                       </section>
+                      <section id="workspace-level2-claude-view" class="models-level models-level-edit" hidden>
+                        <div class="models-level-edit-head">
+                          <div class="models-level-edit-title-group">
+                            <h3 class="settings-section-title" data-i18n="workspace.claudeCardTitle">Claude Code Prompts</h3>
+                          </div>
+                          <button type="button" class="secondary-btn" data-workspace-action="back" data-i18n="workspace.backToCards">Back</button>
+                        </div>
+                        <ul id="workspace-claude-body" class="detail-list models-provider-card-grid workspace-file-card-grid workspace-file-cards"></ul>
+                      </section>
                     </div>
                   </section>
                   <section class="settings-section settings-section-connection" data-settings-section-panel="connection" hidden>
@@ -521,10 +536,6 @@
                       aria-hidden="true"
                       data-i18n-aria-label="chat.slashPanelAria"
                     >
-                      <div class="composer-slash-panel-head">
-                        <span class="composer-slash-panel-title" data-i18n="chat.slashPanelTitle">命令</span>
-                        <span class="composer-slash-panel-hint" data-i18n="chat.slashPanelHint">继续输入筛选</span>
-                      </div>
                       <ul id="composer-slash-list" class="composer-slash-list"></ul>
                     </div>
                     <button id="send-btn" class="composer-send-btn" type="submit" data-i18n-aria-label="chat.sendAria">
