@@ -17,6 +17,7 @@ type ProviderSetting struct {
 	BaseURL      string            `json:"base_url"`
 	DisplayName  string            `json:"display_name,omitempty"`
 	Enabled      *bool             `json:"enabled,omitempty"`
+	Store        *bool             `json:"store,omitempty"`
 	Headers      map[string]string `json:"headers,omitempty"`
 	TimeoutMS    int               `json:"timeout_ms,omitempty"`
 	ModelAliases map[string]string `json:"model_aliases,omitempty"`
@@ -437,6 +438,10 @@ func mergeProviderSetting(dst *ProviderSetting, src ProviderSetting) {
 	if src.Enabled != nil {
 		enabled := *src.Enabled
 		dst.Enabled = &enabled
+	}
+	if src.Store != nil {
+		store := *src.Store
+		dst.Store = &store
 	}
 	if len(src.Headers) > 0 {
 		dst.Headers = map[string]string{}

@@ -10,6 +10,7 @@ import (
 const (
 	AdapterDemo             = "demo"
 	AdapterOpenAICompatible = "openai-compatible"
+	AdapterCodexCompatible  = "codex-compatible"
 )
 
 type ModelSpec struct {
@@ -85,6 +86,10 @@ var providerTypes = []ProviderTypeSpec{
 		ID:          AdapterOpenAICompatible,
 		DisplayName: "openai Compatible",
 	},
+	{
+		ID:          AdapterCodexCompatible,
+		DisplayName: "codex Compatible",
+	},
 }
 
 func ListBuiltinProviderIDs() []string {
@@ -115,7 +120,7 @@ func ResolveProvider(providerID string) ProviderSpec {
 		APIKeyPrefix:       EnvPrefix(id) + "_API_KEY",
 		AllowCustomBaseURL: true,
 		DefaultBaseURL:     "",
-		Adapter:            AdapterOpenAICompatible,
+		Adapter:            resolveCustomAdapter(id),
 		Models:             []ModelSpec{},
 	}
 }
@@ -131,6 +136,17 @@ func IsBuiltinProviderID(providerID string) bool {
 
 func ResolveAdapter(providerID string) string {
 	return ResolveProvider(providerID).Adapter
+}
+
+func IsCodexCompatibleProviderID(providerID string) bool {
+	id := strings.ToLower(strings.TrimSpace(providerID))
+	if id == "" {
+		return false
+	}
+	if id == AdapterCodexCompatible {
+		return true
+	}
+	return strings.HasPrefix(id, AdapterCodexCompatible+"-")
 }
 
 func ResolveModels(providerID string, aliases map[string]string) []domain.ModelInfo {
@@ -259,6 +275,13 @@ func sortedAliasKeys(aliases map[string]string) []string {
 	}
 	sort.Strings(keys)
 	return keys
+}
+
+func resolveCustomAdapter(providerID string) string {
+	if IsCodexCompatibleProviderID(providerID) {
+		return AdapterCodexCompatible
+	}
+	return AdapterOpenAICompatible
 }
 
 func normalizeProviderID(providerID string) string {

@@ -279,6 +279,9 @@ pnpm --filter @nextai/tests-contract run test
 
 # Smoke
 cd tests/smoke && pnpm test
+
+# 一键全回归（Go + TS + contract + smoke）
+pnpm run test:all
 ```
 
 ## 相关文档

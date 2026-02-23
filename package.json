@@ -7,7 +7,12 @@
     "lint": "pnpm -r lint",
     "test": "pnpm -r test",
     "build": "pnpm -r build",
-    "contracts:check": "pnpm --dir tests/contract test"
+    "contracts:check": "pnpm --dir tests/contract test",
+    "test:go": "cd apps/gateway && go test ./...",
+    "test:ts": "pnpm -C apps/cli lint && pnpm -C apps/cli test && pnpm -C apps/web lint && pnpm -C apps/web test",
+    "test:contract": "pnpm --dir tests/contract lint && pnpm --dir tests/contract test",
+    "test:smoke": "pnpm --dir tests/smoke test",
+    "test:all": "pnpm run test:go && pnpm run test:ts && pnpm run test:contract && pnpm run test:smoke"
   },
   "devDependencies": {
     "typescript": "^5.9.3"

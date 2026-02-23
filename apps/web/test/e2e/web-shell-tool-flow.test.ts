@@ -94,26 +94,39 @@ describe("web e2e: /shell command sends biz_params.tool", () => {
           biz_params?: {
             tool?: {
               name?: string;
-              input?: { command?: string };
+              items?: Array<{ command?: string }>;
             };
           };
         };
         sessionID = payload.session_id ?? "";
         userID = payload.user_id ?? "";
         channel = payload.channel ?? "";
-        capturedCommand = payload.biz_params?.tool?.input?.command ?? "";
+        capturedCommand = payload.biz_params?.tool?.items?.[0]?.command ?? "";
         expect(payload.biz_params?.tool?.name).toBe("shell");
 
-        const sse = [
-          `data: ${JSON.stringify({ type: "step_started", step: 1 })}`,
-          `data: ${JSON.stringify({ type: "tool_call", step: 1, tool_call: { name: "shell", input: { command: capturedCommand } } })}`,
-          `data: ${JSON.stringify({ type: "tool_result", step: 1, tool_result: { name: "shell", ok: true, summary: "done" } })}`,
-          `data: ${JSON.stringify({ type: "assistant_delta", step: 1, delta: "shell done" })}`,
-          `data: ${JSON.stringify({ type: "completed", step: 1, reply: "shell done" })}`,
-          "data: [DONE]",
-          "",
-        ].join("\n\n");
-        return new Response(sse, {
+        const encoder = new TextEncoder();
+        const stream = new ReadableStream<Uint8Array>({
+          start(controller) {
+            const firstChunk = [
+              `data: ${JSON.stringify({ type: "step_started", step: 1 })}`,
+              `data: ${JSON.stringify({ type: "tool_call", step: 1, tool_call: { name: "shell", input: { command: capturedCommand } } })}`,
+              "",
+            ].join("\n\n");
+            controller.enqueue(encoder.encode(firstChunk));
+            setTimeout(() => {
+              const secondChunk = [
+                `data: ${JSON.stringify({ type: "tool_result", step: 1, tool_result: { name: "shell", ok: true, summary: "Listed files in packages\\nListed files in apps\\nRead README.md" } })}`,
+                `data: ${JSON.stringify({ type: "assistant_delta", step: 1, delta: "shell done" })}`,
+                `data: ${JSON.stringify({ type: "completed", step: 1, reply: "shell done" })}`,
+                "data: [DONE]",
+                "",
+              ].join("\n\n");
+              controller.enqueue(encoder.encode(secondChunk));
+              controller.close();
+            }, 80);
+          },
+        });
+        return new Response(stream, {
           status: 200,
           headers: {
             "content-type": "text/event-stream",
@@ -173,13 +186,21 @@ describe("web e2e: /shell command sends biz_params.tool", () => {
       return messages.some(
         (item) => {
           const summary = item.querySelector<HTMLElement>(".tool-call-summary")?.textContent ?? "";
-          const raw = item.querySelector<HTMLElement>(".tool-call-raw")?.textContent ?? "";
+          return summary.includes("执行命令：printf hello");
+        },
+      );
+    }, 4000);
+
+    await waitFor(() => {
+      const messages = Array.from(document.querySelectorAll<HTMLLIElement>("#message-list .message.assistant"));
+      return messages.some(
+        (item) => {
+          const summary = item.querySelector<HTMLElement>(".tool-call-summary")?.textContent ?? "";
           const firstClass = item.firstElementChild?.className ?? "";
           return (
             item.textContent?.includes("shell done") &&
-            summary.includes("bash printf hello") &&
-            raw.includes("done") &&
-            !raw.includes('"command":"printf hello"') &&
+            summary.includes("已浏览 1 个文件，2 个列表") &&
+            !summary.includes("printf hello") &&
             firstClass === "tool-call-list"
           );
         },
@@ -196,9 +217,815 @@ describe("web e2e: /shell command sends biz_params.tool", () => {
       }
       const firstClass = assistant.firstElementChild?.className ?? "";
       const summary = assistant.querySelector<HTMLElement>(".tool-call-summary")?.textContent ?? "";
-      const raw = assistant.querySelector<HTMLElement>(".tool-call-raw")?.textContent ?? "";
-      return firstClass === "tool-call-list" && summary.includes("bash printf hello") && !raw.includes('"command":"printf hello"');
+      return (
+        firstClass === "tool-call-list" &&
+        summary.includes("执行命令：printf hello")
+      );
     }, 4000);
+  });
+
+  it("多行 shell 命令摘要只显示省略号", async () => {
+    let processCalled = false;
+    let capturedCommand = "";
+    const multiLineCommand = "cat > /tmp/search_test_fix.go << 'EOF'\npackage plugin\nEOF";
+
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const rawURL = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      const url = new URL(rawURL);
+      const method = (init?.method ?? "GET").toUpperCase();
+
+      if (url.pathname === "/models/catalog" && method === "GET") {
+        return jsonResponse({
+          providers: [],
+          provider_types: [],
+          defaults: {},
+          active_llm: {
+            provider_id: "",
+            model: "",
+          },
+        });
+      }
+
+      if (url.pathname === "/chats" && method === "GET") {
+        return jsonResponse([]);
+      }
+
+      if (url.pathname === "/agent/process" && method === "POST") {
+        processCalled = true;
+        const payload = JSON.parse(String(init?.body ?? "{}")) as {
+          biz_params?: {
+            tool?: {
+              items?: Array<{ command?: string }>;
+            };
+          };
+        };
+        capturedCommand = payload.biz_params?.tool?.items?.[0]?.command ?? "";
+        const sse = [
+          `data: ${JSON.stringify({ type: "tool_call", step: 1, tool_call: { name: "shell", input: { command: capturedCommand } } })}`,
+          `data: ${JSON.stringify({ type: "assistant_delta", step: 1, delta: "已执行" })}`,
+          `data: ${JSON.stringify({ type: "completed", step: 1, reply: "已执行" })}`,
+          "data: [DONE]",
+          "",
+        ].join("\n\n");
+        return new Response(sse, {
+          status: 200,
+          headers: {
+            "content-type": "text/event-stream",
+          },
+        });
+      }
+
+      throw new Error(`unexpected request: ${method} ${url.pathname}`);
+    }) as typeof globalThis.fetch;
+
+    await import("../../src/main.ts");
+
+    const messageInput = document.getElementById("message-input") as HTMLTextAreaElement;
+    messageInput.value = `/shell ${multiLineCommand}`;
+    messageInput.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+
+    await waitFor(() => processCalled, 4000);
+    expect(capturedCommand).toContain("\n");
+
+    await waitFor(() => {
+      const summary = document.querySelector<HTMLElement>("#message-list .message.assistant:last-child .tool-call-summary")
+        ?.textContent ?? "";
+      return summary.includes("执行命令：...");
+    }, 4000);
+
+    const summary = document.querySelector<HTMLElement>("#message-list .message.assistant:last-child .tool-call-summary")
+      ?.textContent ?? "";
+    expect(summary).toContain("执行命令：...");
+    expect(summary).not.toContain("package plugin");
+  });
+
+  it("流式回复期间显示思考动画，完成后隐藏", async () => {
+    let processCalled = false;
+    let emitDelta: (() => void) | null = null;
+    let finishStream: (() => void) | null = null;
+
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const rawURL = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      const url = new URL(rawURL);
+      const method = (init?.method ?? "GET").toUpperCase();
+
+      if (url.pathname === "/models/catalog" && method === "GET") {
+        return jsonResponse({
+          providers: [],
+          provider_types: [],
+          defaults: {},
+          active_llm: {
+            provider_id: "",
+            model: "",
+          },
+        });
+      }
+
+      if (url.pathname === "/chats" && method === "GET") {
+        return jsonResponse([]);
+      }
+
+      if (url.pathname === "/agent/process" && method === "POST") {
+        processCalled = true;
+        const encoder = new TextEncoder();
+        const stream = new ReadableStream<Uint8Array>({
+          start(controller) {
+            const firstChunk = [`data: ${JSON.stringify({ type: "step_started", step: 1 })}`, ""].join("\n\n");
+            controller.enqueue(encoder.encode(firstChunk));
+            emitDelta = () => {
+              const deltaChunk = [`data: ${JSON.stringify({ type: "assistant_delta", step: 1, delta: "收到" })}`, ""].join(
+                "\n\n",
+              );
+              controller.enqueue(encoder.encode(deltaChunk));
+            };
+            finishStream = () => {
+              const finalChunk = [`data: ${JSON.stringify({ type: "completed", step: 1, reply: "收到" })}`, "data: [DONE]", ""].join(
+                "\n\n",
+              );
+              controller.enqueue(encoder.encode(finalChunk));
+              controller.close();
+            };
+          },
+        });
+        return new Response(stream, {
+          status: 200,
+          headers: {
+            "content-type": "text/event-stream",
+          },
+        });
+      }
+
+      throw new Error(`unexpected request: ${method} ${url.pathname}`);
+    }) as typeof globalThis.fetch;
+
+    await import("../../src/main.ts");
+
+    const messageInput = document.getElementById("message-input") as HTMLTextAreaElement;
+    messageInput.value = "测试思考动画";
+    messageInput.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+
+    await waitFor(() => processCalled, 4000);
+    await waitFor(() => {
+      const thinkingIndicator = document.getElementById("thinking-indicator") as HTMLElement | null;
+      return Boolean(thinkingIndicator && !thinkingIndicator.hidden);
+    }, 4000);
+    const thinkingIndicator = document.getElementById("thinking-indicator") as HTMLElement;
+    expect(thinkingIndicator.textContent ?? "").toContain("正在思考");
+    expect(thinkingIndicator.parentElement).toBe(document.getElementById("message-list"));
+    const pendingAssistantText = Array.from(
+      document.querySelectorAll<HTMLLIElement>("#message-list .message.assistant"),
+    ).map((item) => (item.textContent ?? "").trim());
+    expect(pendingAssistantText).not.toContain("...");
+
+    await waitFor(() => typeof emitDelta === "function", 4000);
+    emitDelta?.();
+
+    await waitFor(() => {
+      const indicator = document.getElementById("thinking-indicator") as HTMLElement | null;
+      return !indicator || indicator.hidden;
+    }, 4000);
+
+    await waitFor(() => typeof finishStream === "function", 4000);
+    finishStream?.();
+
+    await waitFor(() => {
+      const assistants = Array.from(document.querySelectorAll<HTMLLIElement>("#message-list .message.assistant"));
+      const assistant = assistants[assistants.length - 1];
+      return (assistant?.textContent ?? "").includes("收到");
+    }, 4000);
+  });
+
+  it("开启 prompt 模板后，/prompts 命令会先展开再发送", async () => {
+    window.localStorage.setItem("nextai.feature.prompt_templates", "true");
+    let processCalled = false;
+    let sessionID = "";
+    let userID = "";
+    let channel = "";
+    let expandedText = "";
+    let capturedCommand = "";
+
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const rawURL = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      const url = new URL(rawURL);
+      const method = (init?.method ?? "GET").toUpperCase();
+
+      if (url.pathname === "/models/catalog" && method === "GET") {
+        return jsonResponse({
+          providers: [],
+          provider_types: [],
+          defaults: {},
+          active_llm: {
+            provider_id: "",
+            model: "",
+          },
+        });
+      }
+
+      if (url.pathname === "/chats" && method === "GET") {
+        if (!processCalled) {
+          return jsonResponse([]);
+        }
+        return jsonResponse([
+          {
+            id: "chat-template-1",
+            name: "template",
+            session_id: sessionID,
+            user_id: userID,
+            channel,
+            created_at: "2026-02-16T12:00:00Z",
+            updated_at: "2026-02-16T12:00:10Z",
+            meta: {},
+          },
+        ]);
+      }
+
+      if (url.pathname === `/workspace/files/${encodeURIComponent("prompts/quick-task.md")}` && method === "GET") {
+        return jsonResponse({ content: "/shell $CMD" });
+      }
+
+      if (url.pathname.startsWith("/workspace/files/") && method === "GET") {
+        return jsonResponse({ content: "" });
+      }
+
+      if (url.pathname === "/agent/process" && method === "POST") {
+        processCalled = true;
+        const payload = JSON.parse(String(init?.body ?? "{}")) as {
+          session_id?: string;
+          user_id?: string;
+          channel?: string;
+          input?: Array<{
+            content?: Array<{ text?: string }>;
+          }>;
+          biz_params?: {
+            tool?: {
+              name?: string;
+              items?: Array<{ command?: string }>;
+            };
+          };
+        };
+        sessionID = payload.session_id ?? "";
+        userID = payload.user_id ?? "";
+        channel = payload.channel ?? "";
+        expandedText = payload.input?.[0]?.content?.[0]?.text ?? "";
+        capturedCommand = payload.biz_params?.tool?.items?.[0]?.command ?? "";
+        const sse = [
+          `data: ${JSON.stringify({ type: "assistant_delta", step: 1, delta: "ok" })}`,
+          `data: ${JSON.stringify({ type: "completed", step: 1, reply: "ok" })}`,
+          "data: [DONE]",
+          "",
+        ].join("\n\n");
+        return new Response(sse, {
+          status: 200,
+          headers: {
+            "content-type": "text/event-stream",
+          },
+        });
+      }
+
+      if (url.pathname === "/chats/chat-template-1" && method === "GET") {
+        return jsonResponse({
+          messages: [
+            {
+              id: "msg-user",
+              role: "user",
+              type: "message",
+              content: [{ type: "text", text: expandedText }],
+            },
+            {
+              id: "msg-assistant",
+              role: "assistant",
+              type: "message",
+              content: [{ type: "text", text: "ok" }],
+            },
+          ],
+        });
+      }
+
+      throw new Error(`unexpected request: ${method} ${url.pathname}`);
+    }) as typeof globalThis.fetch;
+
+    await import("../../src/main.ts");
+
+    const messageInput = document.getElementById("message-input") as HTMLTextAreaElement;
+    messageInput.value = "/prompts:quick-task CMD=printf_hello";
+    messageInput.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+
+    await waitFor(() => processCalled, 4000);
+    expect(expandedText).toBe("/shell printf_hello");
+    expect(capturedCommand).toBe("printf_hello");
+  });
+
+  it("check-fix 模板会回退到 codex user 目录加载", async () => {
+    window.localStorage.setItem("nextai.feature.prompt_templates", "true");
+    let processCalled = false;
+    let sessionID = "";
+    let userID = "";
+    let channel = "";
+    let expandedText = "";
+    const requestedTemplatePaths: string[] = [];
+    const fallbackTemplatePaths = new Set([
+      "prompts/check-fix.md",
+      "prompt/check-fix.md",
+      "prompts/codex/user-codex/prompts/check-fix.md",
+    ]);
+
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const rawURL = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      const url = new URL(rawURL);
+      const method = (init?.method ?? "GET").toUpperCase();
+
+      if (url.pathname === "/models/catalog" && method === "GET") {
+        return jsonResponse({
+          providers: [],
+          provider_types: [],
+          defaults: {},
+          active_llm: {
+            provider_id: "",
+            model: "",
+          },
+        });
+      }
+
+      if (url.pathname === "/chats" && method === "GET") {
+        if (!processCalled) {
+          return jsonResponse([]);
+        }
+        return jsonResponse([
+          {
+            id: "chat-check-fix-1",
+            name: "check-fix",
+            session_id: sessionID,
+            user_id: userID,
+            channel,
+            created_at: "2026-02-16T12:00:00Z",
+            updated_at: "2026-02-16T12:00:10Z",
+            meta: {},
+          },
+        ]);
+      }
+
+      if (url.pathname.startsWith("/workspace/files/") && method === "GET") {
+        const workspacePath = decodeURIComponent(url.pathname.slice("/workspace/files/".length));
+        if (fallbackTemplatePaths.has(workspacePath)) {
+          requestedTemplatePaths.push(workspacePath);
+          if (workspacePath === "prompts/codex/user-codex/prompts/check-fix.md") {
+            return jsonResponse({ content: "# 修复影响检查" });
+          }
+          return jsonResponse({ error: { code: "not_found", message: "not found" } }, 404);
+        }
+        return jsonResponse({ content: "" });
+      }
+
+      if (url.pathname === "/agent/process" && method === "POST") {
+        processCalled = true;
+        const payload = JSON.parse(String(init?.body ?? "{}")) as {
+          session_id?: string;
+          user_id?: string;
+          channel?: string;
+          input?: Array<{
+            content?: Array<{ text?: string }>;
+          }>;
+        };
+        sessionID = payload.session_id ?? "";
+        userID = payload.user_id ?? "";
+        channel = payload.channel ?? "";
+        expandedText = payload.input?.[0]?.content?.[0]?.text ?? "";
+        const sse = [
+          `data: ${JSON.stringify({ type: "assistant_delta", step: 1, delta: "ok" })}`,
+          `data: ${JSON.stringify({ type: "completed", step: 1, reply: "ok" })}`,
+          "data: [DONE]",
+          "",
+        ].join("\n\n");
+        return new Response(sse, {
+          status: 200,
+          headers: {
+            "content-type": "text/event-stream",
+          },
+        });
+      }
+
+      if (url.pathname === "/chats/chat-check-fix-1" && method === "GET") {
+        return jsonResponse({
+          messages: [
+            {
+              id: "msg-user",
+              role: "user",
+              type: "message",
+              content: [{ type: "text", text: expandedText }],
+            },
+            {
+              id: "msg-assistant",
+              role: "assistant",
+              type: "message",
+              content: [{ type: "text", text: "ok" }],
+            },
+          ],
+        });
+      }
+
+      throw new Error(`unexpected request: ${method} ${url.pathname}`);
+    }) as typeof globalThis.fetch;
+
+    await import("../../src/main.ts");
+
+    const messageInput = document.getElementById("message-input") as HTMLTextAreaElement;
+    messageInput.value = "/prompts:check-fix";
+    messageInput.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+
+    await waitFor(() => processCalled, 4000);
+    expect(expandedText).toContain("修复影响检查");
+    expect(requestedTemplatePaths).toEqual([
+      "prompts/check-fix.md",
+      "prompt/check-fix.md",
+      "prompts/codex/user-codex/prompts/check-fix.md",
+    ]);
+  });
+
+  it("prompt 模板缺少必填参数时会阻断发送", async () => {
+    window.localStorage.setItem("nextai.feature.prompt_templates", "true");
+    let processCalled = false;
+
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const rawURL = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      const url = new URL(rawURL);
+      const method = (init?.method ?? "GET").toUpperCase();
+
+      if (url.pathname === "/models/catalog" && method === "GET") {
+        return jsonResponse({
+          providers: [],
+          provider_types: [],
+          defaults: {},
+          active_llm: {
+            provider_id: "",
+            model: "",
+          },
+        });
+      }
+
+      if (url.pathname === "/chats" && method === "GET") {
+        return jsonResponse([]);
+      }
+
+      if (url.pathname === `/workspace/files/${encodeURIComponent("prompts/quick-task.md")}` && method === "GET") {
+        return jsonResponse({ content: "hello $NAME" });
+      }
+
+      if (url.pathname.startsWith("/workspace/files/") && method === "GET") {
+        return jsonResponse({ content: "" });
+      }
+
+      if (url.pathname === "/agent/process" && method === "POST") {
+        processCalled = true;
+        return new Response("unexpected", { status: 500 });
+      }
+
+      throw new Error(`unexpected request: ${method} ${url.pathname}`);
+    }) as typeof globalThis.fetch;
+
+    await import("../../src/main.ts");
+
+    const messageInput = document.getElementById("message-input") as HTMLTextAreaElement;
+    const statusLine = document.getElementById("status-line") as HTMLElement;
+    messageInput.value = "/prompts:quick-task";
+    messageInput.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+
+    await waitFor(() => (statusLine.textContent ?? "").includes("missing prompt arguments"), 4000);
+    expect(processCalled).toBe(false);
+  });
+
+  it("可在设置中切换 prompt context introspect 开关", async () => {
+    let systemLayersRequested = 0;
+    let workspacePromptFileReads = 0;
+
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const rawURL = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      const url = new URL(rawURL);
+      const method = (init?.method ?? "GET").toUpperCase();
+
+      if (url.pathname === "/runtime-config" && method === "GET") {
+        return jsonResponse({
+          features: {
+            prompt_templates: false,
+            prompt_context_introspect: false,
+          },
+        });
+      }
+
+      if (url.pathname === "/models/catalog" && method === "GET") {
+        return jsonResponse({
+          providers: [],
+          provider_types: [],
+          defaults: {},
+          active_llm: {
+            provider_id: "",
+            model: "",
+          },
+        });
+      }
+
+      if (url.pathname === "/chats" && method === "GET") {
+        return jsonResponse([]);
+      }
+
+      if (url.pathname === "/agent/system-layers" && method === "GET") {
+        systemLayersRequested += 1;
+        return jsonResponse({
+          version: "v1",
+          layers: [],
+          estimated_tokens_total: 123,
+        });
+      }
+
+      if (url.pathname.startsWith("/workspace/files/") && method === "GET") {
+        workspacePromptFileReads += 1;
+        return jsonResponse({ content: "" });
+      }
+
+      throw new Error(`unexpected request: ${method} ${url.pathname}`);
+    }) as typeof globalThis.fetch;
+
+    await import("../../src/main.ts");
+
+    await waitFor(() => workspacePromptFileReads >= 2, 4000);
+
+    const toggle = document.getElementById("feature-prompt-context-introspect") as HTMLInputElement;
+    expect(toggle.checked).toBe(false);
+
+    toggle.checked = true;
+    toggle.dispatchEvent(new Event("change", { bubbles: true }));
+
+    await waitFor(() => window.localStorage.getItem("nextai.feature.prompt_context_introspect") === "true", 4000);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    toggle.checked = false;
+    toggle.dispatchEvent(new Event("change", { bubbles: true }));
+    await waitFor(() => window.localStorage.getItem("nextai.feature.prompt_context_introspect") === "false", 4000);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    toggle.checked = true;
+    toggle.dispatchEvent(new Event("change", { bubbles: true }));
+    await waitFor(() => window.localStorage.getItem("nextai.feature.prompt_context_introspect") === "true", 4000);
+    await waitFor(() => systemLayersRequested > 0, 4000);
+    expect(toggle.checked).toBe(true);
+  });
+
+  it("聊天区提示词模式切换后，请求会携带对应 biz_params.prompt_mode", async () => {
+    let processCalls = 0;
+    const capturedModes: string[] = [];
+
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const rawURL = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      const url = new URL(rawURL);
+      const method = (init?.method ?? "GET").toUpperCase();
+
+      if (url.pathname === "/models/catalog" && method === "GET") {
+        return jsonResponse({
+          providers: [],
+          provider_types: [],
+          defaults: {},
+          active_llm: {
+            provider_id: "",
+            model: "",
+          },
+        });
+      }
+
+      if (url.pathname === "/chats" && method === "GET") {
+        return jsonResponse([]);
+      }
+
+      if (url.pathname === "/agent/process" && method === "POST") {
+        processCalls += 1;
+        const payload = JSON.parse(String(init?.body ?? "{}")) as {
+          biz_params?: {
+            prompt_mode?: string;
+          };
+        };
+        capturedModes.push(payload.biz_params?.prompt_mode ?? "");
+        const sse = [
+          `data: ${JSON.stringify({ type: "assistant_delta", step: 1, delta: "ok" })}`,
+          `data: ${JSON.stringify({ type: "completed", step: 1, reply: "ok" })}`,
+          "data: [DONE]",
+          "",
+        ].join("\n\n");
+        return new Response(sse, {
+          status: 200,
+          headers: {
+            "content-type": "text/event-stream",
+          },
+        });
+      }
+
+      throw new Error(`unexpected request: ${method} ${url.pathname}`);
+    }) as typeof globalThis.fetch;
+
+    await import("../../src/main.ts");
+
+    const promptModeSelect = document.getElementById("chat-prompt-mode-select") as HTMLSelectElement;
+    const messageInput = document.getElementById("message-input") as HTMLTextAreaElement;
+    expect(promptModeSelect.value).toBe("default");
+
+    messageInput.value = "first";
+    messageInput.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+    await waitFor(() => processCalls >= 1, 4000);
+    expect(capturedModes[0]).toBe("default");
+
+    promptModeSelect.value = "codex";
+    promptModeSelect.dispatchEvent(new Event("change", { bubbles: true }));
+
+    messageInput.value = "second";
+    messageInput.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+    await waitFor(() => processCalls >= 2, 4000);
+    expect(capturedModes[1]).toBe("codex");
+
+    promptModeSelect.value = "claude";
+    promptModeSelect.dispatchEvent(new Event("change", { bubbles: true }));
+
+    messageInput.value = "third";
+    messageInput.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+    await waitFor(() => processCalls >= 3, 4000);
+    expect(capturedModes[2]).toBe("claude");
+
+    promptModeSelect.value = "default";
+    promptModeSelect.dispatchEvent(new Event("change", { bubbles: true }));
+
+    messageInput.value = "fourth";
+    messageInput.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+    await waitFor(() => processCalls >= 4, 4000);
+    expect(capturedModes[3]).toBe("default");
+  });
+
+  it("会话间 prompt_mode 状态隔离：A=codex，B=default", async () => {
+    let processCalls = 0;
+    const captured: Array<{ sessionID: string; promptMode: string }> = [];
+    const chats = [
+      {
+        id: "chat-codex",
+        name: "Codex Chat",
+        session_id: "session-codex",
+        user_id: "demo-user",
+        channel: "console",
+        created_at: "2026-02-17T12:00:00Z",
+        updated_at: "2026-02-17T12:00:20Z",
+        meta: { prompt_mode: "codex" },
+      },
+      {
+        id: "chat-default",
+        name: "Default Chat",
+        session_id: "session-default",
+        user_id: "demo-user",
+        channel: "console",
+        created_at: "2026-02-17T12:00:01Z",
+        updated_at: "2026-02-17T12:00:10Z",
+        meta: { prompt_mode: "default" },
+      },
+    ];
+
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const rawURL = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      const url = new URL(rawURL);
+      const method = (init?.method ?? "GET").toUpperCase();
+
+      if (url.pathname === "/models/catalog" && method === "GET") {
+        return jsonResponse({
+          providers: [],
+          provider_types: [],
+          defaults: {},
+          active_llm: {
+            provider_id: "",
+            model: "",
+          },
+        });
+      }
+
+      if (url.pathname === "/chats" && method === "GET") {
+        return jsonResponse(chats);
+      }
+
+      if ((url.pathname === "/chats/chat-codex" || url.pathname === "/chats/chat-default") && method === "GET") {
+        return jsonResponse({ messages: [] });
+      }
+
+      if (url.pathname === "/agent/process" && method === "POST") {
+        processCalls += 1;
+        const payload = JSON.parse(String(init?.body ?? "{}")) as {
+          session_id?: string;
+          biz_params?: {
+            prompt_mode?: string;
+          };
+        };
+        captured.push({
+          sessionID: payload.session_id ?? "",
+          promptMode: payload.biz_params?.prompt_mode ?? "",
+        });
+        const sse = [
+          `data: ${JSON.stringify({ type: "assistant_delta", step: 1, delta: "ok" })}`,
+          `data: ${JSON.stringify({ type: "completed", step: 1, reply: "ok" })}`,
+          "data: [DONE]",
+          "",
+        ].join("\n\n");
+        return new Response(sse, {
+          status: 200,
+          headers: {
+            "content-type": "text/event-stream",
+          },
+        });
+      }
+
+      throw new Error(`unexpected request: ${method} ${url.pathname}`);
+    }) as typeof globalThis.fetch;
+
+    await import("../../src/main.ts");
+
+    const promptModeSelect = document.getElementById("chat-prompt-mode-select") as HTMLSelectElement;
+    const messageInput = document.getElementById("message-input") as HTMLTextAreaElement;
+
+    await waitFor(() => document.querySelector<HTMLButtonElement>('#chat-list .chat-item-btn[data-chat-id="chat-codex"]') !== null, 4000);
+    expect(promptModeSelect.value).toBe("codex");
+
+    messageInput.value = "for codex";
+    messageInput.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+    await waitFor(() => processCalls >= 1, 4000);
+    expect(captured[0]).toEqual({ sessionID: "session-codex", promptMode: "codex" });
+
+    const defaultChatButton = document.querySelector<HTMLButtonElement>('#chat-list .chat-item-btn[data-chat-id="chat-default"]');
+    expect(defaultChatButton).not.toBeNull();
+    defaultChatButton?.click();
+    await waitFor(() => promptModeSelect.value === "default", 4000);
+
+    messageInput.value = "for default";
+    messageInput.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+    await waitFor(() => processCalls >= 2, 4000);
+    expect(captured[1]).toEqual({ sessionID: "session-default", promptMode: "default" });
+  });
+
+  it("新会话默认 prompt_mode=default", async () => {
+    let processCalls = 0;
+    const capturedModes: string[] = [];
+
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const rawURL = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      const url = new URL(rawURL);
+      const method = (init?.method ?? "GET").toUpperCase();
+
+      if (url.pathname === "/models/catalog" && method === "GET") {
+        return jsonResponse({
+          providers: [],
+          provider_types: [],
+          defaults: {},
+          active_llm: {
+            provider_id: "",
+            model: "",
+          },
+        });
+      }
+
+      if (url.pathname === "/chats" && method === "GET") {
+        return jsonResponse([]);
+      }
+
+      if (url.pathname === "/agent/process" && method === "POST") {
+        processCalls += 1;
+        const payload = JSON.parse(String(init?.body ?? "{}")) as {
+          biz_params?: {
+            prompt_mode?: string;
+          };
+        };
+        capturedModes.push(payload.biz_params?.prompt_mode ?? "");
+        const sse = [
+          `data: ${JSON.stringify({ type: "assistant_delta", step: 1, delta: "ok" })}`,
+          `data: ${JSON.stringify({ type: "completed", step: 1, reply: "ok" })}`,
+          "data: [DONE]",
+          "",
+        ].join("\n\n");
+        return new Response(sse, {
+          status: 200,
+          headers: {
+            "content-type": "text/event-stream",
+          },
+        });
+      }
+
+      throw new Error(`unexpected request: ${method} ${url.pathname}`);
+    }) as typeof globalThis.fetch;
+
+    await import("../../src/main.ts");
+
+    const promptModeSelect = document.getElementById("chat-prompt-mode-select") as HTMLSelectElement;
+    const newChatButton = document.getElementById("new-chat") as HTMLButtonElement;
+    const messageInput = document.getElementById("message-input") as HTMLTextAreaElement;
+
+    promptModeSelect.value = "claude";
+    promptModeSelect.dispatchEvent(new Event("change", { bubbles: true }));
+    expect(promptModeSelect.value).toBe("claude");
+
+    newChatButton.click();
+    expect(promptModeSelect.value).toBe("default");
+
+    messageInput.value = "for new chat";
+    messageInput.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+    await waitFor(() => processCalls >= 1, 4000);
+    expect(capturedModes[0]).toBe("default");
   });
 
   it("按输出顺序渲染：文本和工具调用交错时保持时间线顺序", async () => {
@@ -231,11 +1058,11 @@ describe("web e2e: /shell command sends biz_params.tool", () => {
         const payload = JSON.parse(String(init?.body ?? "{}")) as {
           biz_params?: {
             tool?: {
-              input?: { command?: string };
+              items?: Array<{ command?: string }>;
             };
           };
         };
-        capturedCommand = payload.biz_params?.tool?.input?.command ?? "";
+        capturedCommand = payload.biz_params?.tool?.items?.[0]?.command ?? "";
         const sse = [
           `data: ${JSON.stringify({ type: "assistant_delta", step: 1, delta: "先返回文本" })}`,
           `data: ${JSON.stringify({ type: "tool_call", step: 1, tool_call: { name: "shell", input: { command: capturedCommand } } })}`,
@@ -269,14 +1096,16 @@ describe("web e2e: /shell command sends biz_params.tool", () => {
       if (!assistant) {
         return false;
       }
-      const childClassList = Array.from(assistant.children).map((item) => item.className);
       const summary = assistant.querySelector<HTMLElement>(".tool-call-summary")?.textContent ?? "";
       const text = assistant.textContent ?? "";
+      const firstTextIndex = text.indexOf("先返回文本");
+      const toolNoticeIndex = text.indexOf("执行命令：printf hello");
+      const secondTextIndex = text.indexOf("再返回文本");
       return (
-        childClassList.join("|") === "message-text|tool-call-list|message-text" &&
-        summary.includes("bash printf hello") &&
-        text.includes("先返回文本") &&
-        text.includes("再返回文本")
+        summary.includes("执行命令：printf hello") &&
+        firstTextIndex >= 0 &&
+        toolNoticeIndex > firstTextIndex &&
+        secondTextIndex > toolNoticeIndex
       );
     }, 4000);
   });
@@ -388,8 +1217,7 @@ describe("web e2e: /shell command sends biz_params.tool", () => {
         return false;
       }
       const summary = assistant.querySelector<HTMLElement>(".tool-call-summary")?.textContent ?? "";
-      const raw = assistant.querySelector<HTMLElement>(".tool-call-raw")?.textContent ?? "";
-      return summary.includes(`查看（${viewedPath}）`) && raw.includes(`\"path\":\"${viewedPath}\"`);
+      return summary.includes(`查看（${viewedPath}）`);
     }, 4000);
 
     const chatItemButton = document.querySelector<HTMLButtonElement>("#chat-list .chat-item-btn");
@@ -402,6 +1230,179 @@ describe("web e2e: /shell command sends biz_params.tool", () => {
       }
       const summary = assistant.querySelector<HTMLElement>(".tool-call-summary")?.textContent ?? "";
       return summary.includes(`查看（${viewedPath}）`);
+    }, 4000);
+  });
+
+  it("历史回放仅有 tool_call 且助手正文存在时显示暂无执行输出", async () => {
+    const viewedPath = "/mnt/Files/NextAI/AGENTS.md";
+
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const rawURL = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      const url = new URL(rawURL);
+      const method = (init?.method ?? "GET").toUpperCase();
+
+      if (url.pathname === "/models/catalog" && method === "GET") {
+        return jsonResponse({
+          providers: [],
+          provider_types: [],
+          defaults: {},
+          active_llm: {
+            provider_id: "",
+            model: "",
+          },
+        });
+      }
+
+      if (url.pathname === "/chats" && method === "GET") {
+        return jsonResponse([
+          {
+            id: "chat-history-only-1",
+            name: "history-only",
+            session_id: "session-history-only",
+            user_id: "user-history-only",
+            channel: "console",
+            created_at: "2026-02-22T18:00:00Z",
+            updated_at: "2026-02-22T18:00:10Z",
+            meta: {},
+          },
+        ]);
+      }
+
+      if (url.pathname === "/chats/chat-history-only-1" && method === "GET") {
+        const rawToolCall = JSON.stringify({
+          type: "tool_call",
+          step: 1,
+          tool_call: {
+            name: "view",
+            input: {
+              items: [{ path: viewedPath, start: 1, end: 20 }],
+            },
+          },
+        });
+        return jsonResponse({
+          messages: [
+            {
+              id: "msg-user",
+              role: "user",
+              type: "message",
+              content: [{ type: "text", text: "查看文件" }],
+            },
+            {
+              id: "msg-assistant",
+              role: "assistant",
+              type: "message",
+              content: [{ type: "text", text: "已查看文件" }],
+              metadata: {
+                tool_call_notices: [{ raw: rawToolCall }],
+                tool_order: 1,
+                text_order: 2,
+              },
+            },
+          ],
+        });
+      }
+
+      throw new Error(`unexpected request: ${method} ${url.pathname}`);
+    }) as typeof globalThis.fetch;
+
+    await import("../../src/main.ts");
+
+    await waitFor(() => {
+      const assistant = document.querySelector<HTMLLIElement>("#message-list .message.assistant:last-child");
+      if (!assistant) {
+        return false;
+      }
+      const summary = assistant.querySelector<HTMLElement>(".tool-call-summary")?.textContent ?? "";
+      return summary.includes(`查看（${viewedPath}）`);
+    }, 4000);
+
+    const persistedAssistant = document.querySelector<HTMLLIElement>("#message-list .message.assistant:last-child");
+    const persistedDetail = persistedAssistant?.querySelector<HTMLElement>(".tool-call-expand-preview")?.textContent ?? "";
+    expect(persistedDetail).toContain("暂无执行输出");
+    expect(persistedDetail).not.toContain("等待执行输出");
+  });
+
+  it("view 工具结果会复用同一条提示，不重复渲染工具提示", async () => {
+    let processCalled = false;
+    const viewedPath = "/mnt/Files/NextAI/AGENTS.md";
+    const viewSummary = `view ${viewedPath} [1-20] (fallback from requested [1-100], total=70)\n1: # AGENTS.md`;
+
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const rawURL = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      const url = new URL(rawURL);
+      const method = (init?.method ?? "GET").toUpperCase();
+
+      if (url.pathname === "/models/catalog" && method === "GET") {
+        return jsonResponse({
+          providers: [],
+          provider_types: [],
+          defaults: {},
+          active_llm: {
+            provider_id: "",
+            model: "",
+          },
+        });
+      }
+
+      if (url.pathname === "/chats" && method === "GET") {
+        if (!processCalled) {
+          return jsonResponse([]);
+        }
+        return jsonResponse([
+          {
+            id: "chat-view-result-1",
+            name: "view-result",
+            session_id: "session-view-result",
+            user_id: "user-view-result",
+            channel: "console",
+            created_at: "2026-02-22T18:00:00Z",
+            updated_at: "2026-02-22T18:00:10Z",
+            meta: {},
+          },
+        ]);
+      }
+
+      if (url.pathname === "/agent/process" && method === "POST") {
+        processCalled = true;
+        const sse = [
+          `data: ${JSON.stringify({ type: "tool_call", step: 1, tool_call: { name: "view", input: { items: [{ path: viewedPath, start: 1, end: 20 }] } } })}`,
+          `data: ${JSON.stringify({ type: "tool_result", step: 1, tool_result: { name: "view", ok: true, summary: viewSummary } })}`,
+          `data: ${JSON.stringify({ type: "assistant_delta", step: 1, delta: "查看完成" })}`,
+          `data: ${JSON.stringify({ type: "completed", step: 1, reply: "查看完成" })}`,
+          "data: [DONE]",
+          "",
+        ].join("\n\n");
+        return new Response(sse, {
+          status: 200,
+          headers: {
+            "content-type": "text/event-stream",
+          },
+        });
+      }
+
+      throw new Error(`unexpected request: ${method} ${url.pathname}`);
+    }) as typeof globalThis.fetch;
+
+    await import("../../src/main.ts");
+
+    const messageInput = document.getElementById("message-input") as HTMLTextAreaElement;
+    messageInput.value = "看一下 AGENTS.md";
+    messageInput.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+
+    await waitFor(() => processCalled, 4000);
+
+    await waitFor(() => {
+      const assistant = document.querySelector<HTMLLIElement>("#message-list .message.assistant:last-child");
+      if (!assistant) {
+        return false;
+      }
+      const noticeCount = assistant.querySelectorAll(".tool-call-entry").length;
+      const summary = assistant.querySelector<HTMLElement>(".tool-call-summary")?.textContent ?? "";
+      return (
+        noticeCount === 1 &&
+        summary.includes("已浏览 1 个文件") &&
+        !summary.includes(`查看（${viewedPath}）`)
+      );
     }, 4000);
   });
 
@@ -1708,7 +2709,7 @@ describe("web e2e: /shell command sends biz_params.tool", () => {
   });
 
   it("工作区文本文件应按原文编辑并以 content 字段保存", async () => {
-    const filePath = "docs/AI/AGENTS.md";
+    const filePath = "prompts/AGENTS.md";
     const rawContent = [
       "# AI Tool Guide",
       "你可以通过 POST /agent/process 触发工具调用。",
@@ -1794,8 +2795,273 @@ describe("web e2e: /shell command sends biz_params.tool", () => {
     expect(savedContent).toBe(newContent);
   });
 
+  it("工作区应新增 codex 提示词卡片并支持文件夹层层展开", async () => {
+    const codexFilePaths = [
+      "prompts/codex/codex-rs/core/prompt.md",
+      "prompts/codex/codex-rs/core/templates/collaboration_mode/default.md",
+      "prompts/codex/user-codex/prompts/check-fix.md",
+    ];
+    const openFilePath = codexFilePaths[0];
+    let codexFileLoaded = false;
+
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const rawURL = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      const url = new URL(rawURL);
+      const method = (init?.method ?? "GET").toUpperCase();
+
+      if (url.pathname === "/models/catalog" && method === "GET") {
+        return jsonResponse({
+          providers: [],
+          provider_types: [],
+          defaults: {},
+          active_llm: {
+            provider_id: "",
+            model: "",
+          },
+        });
+      }
+
+      if (url.pathname === "/chats" && method === "GET") {
+        return jsonResponse([]);
+      }
+
+      if (url.pathname === "/workspace/files" && method === "GET") {
+        return jsonResponse({
+          files: codexFilePaths.map((path) => ({ path, kind: "config", size: path.length })),
+        });
+      }
+
+      if (url.pathname === `/workspace/files/${encodeURIComponent(openFilePath)}` && method === "GET") {
+        codexFileLoaded = true;
+        return jsonResponse({ content: "# codex prompt file" });
+      }
+
+      if (url.pathname.startsWith("/workspace/files/") && method === "GET") {
+        return jsonResponse({ content: "" });
+      }
+
+      throw new Error(`unexpected request: ${method} ${url.pathname}`);
+    }) as typeof globalThis.fetch;
+
+    await import("../../src/main.ts");
+
+    const settingsToggleButton = document.getElementById("settings-toggle") as HTMLButtonElement | null;
+    expect(settingsToggleButton).not.toBeNull();
+    settingsToggleButton?.click();
+
+    const workspaceSectionButton = document.querySelector<HTMLButtonElement>('button[data-settings-section="workspace"]');
+    expect(workspaceSectionButton).not.toBeNull();
+    workspaceSectionButton?.click();
+
+    await waitFor(() => {
+      const button = document.querySelector<HTMLButtonElement>('button[data-workspace-action="open-codex"]');
+      return Boolean(button && (button.textContent ?? "").includes("3"));
+    }, 4000);
+    const openCodexButton = document.querySelector<HTMLButtonElement>('button[data-workspace-action="open-codex"]');
+    expect(openCodexButton).not.toBeNull();
+    expect(openCodexButton?.textContent ?? "").toContain("3");
+    openCodexButton?.click();
+
+    await waitFor(() => document.getElementById("workspace-level2-codex-view")?.hasAttribute("hidden") === false, 4000);
+    await waitFor(() => document.querySelector('button[data-workspace-folder-toggle="codex-rs"]') !== null, 4000);
+
+    const rootFolderToggle = document.querySelector<HTMLButtonElement>('button[data-workspace-folder-toggle="codex-rs"]');
+    expect(rootFolderToggle).not.toBeNull();
+    expect(rootFolderToggle?.getAttribute("aria-expanded")).toBe("true");
+
+    const coreFolderToggle = document.querySelector<HTMLButtonElement>('button[data-workspace-folder-toggle="codex-rs/core"]');
+    expect(coreFolderToggle).not.toBeNull();
+    expect(coreFolderToggle?.getAttribute("aria-expanded")).toBe("false");
+    coreFolderToggle?.click();
+
+    await waitFor(
+      () => document.querySelector<HTMLButtonElement>('button[data-workspace-folder-toggle="codex-rs/core/templates"]') !== null,
+      4000,
+    );
+    const templatesFolderToggle = document.querySelector<HTMLButtonElement>('button[data-workspace-folder-toggle="codex-rs/core/templates"]');
+    expect(templatesFolderToggle).not.toBeNull();
+    expect(templatesFolderToggle?.getAttribute("aria-expanded")).toBe("false");
+
+    const openFileButton = document.querySelector<HTMLButtonElement>(`button[data-workspace-open="${openFilePath}"]`);
+    expect(openFileButton).not.toBeNull();
+    openFileButton?.click();
+    await waitFor(() => codexFileLoaded, 4000);
+  });
+
+  it("工作区应新增 claude code 提示词卡片并支持打开文件", async () => {
+    const claudeFilePaths = [
+      "prompts/claude/main.md",
+      "prompts/claude/tool-usage-policy.md",
+    ];
+    const openFilePath = claudeFilePaths[0];
+    let claudeFileLoaded = false;
+
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const rawURL = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      const url = new URL(rawURL);
+      const method = (init?.method ?? "GET").toUpperCase();
+
+      if (url.pathname === "/models/catalog" && method === "GET") {
+        return jsonResponse({
+          providers: [],
+          provider_types: [],
+          defaults: {},
+          active_llm: {
+            provider_id: "",
+            model: "",
+          },
+        });
+      }
+
+      if (url.pathname === "/chats" && method === "GET") {
+        return jsonResponse([]);
+      }
+
+      if (url.pathname === "/workspace/files" && method === "GET") {
+        return jsonResponse({
+          files: claudeFilePaths.map((path) => ({ path, kind: "config", size: path.length })),
+        });
+      }
+
+      if (url.pathname === `/workspace/files/${encodeURIComponent(openFilePath)}` && method === "GET") {
+        claudeFileLoaded = true;
+        return jsonResponse({ content: "# claude code prompt" });
+      }
+
+      if (url.pathname.startsWith("/workspace/files/") && method === "GET") {
+        return jsonResponse({ content: "" });
+      }
+
+      throw new Error(`unexpected request: ${method} ${url.pathname}`);
+    }) as typeof globalThis.fetch;
+
+    await import("../../src/main.ts");
+
+    const settingsToggleButton = document.getElementById("settings-toggle") as HTMLButtonElement | null;
+    expect(settingsToggleButton).not.toBeNull();
+    settingsToggleButton?.click();
+
+    const workspaceSectionButton = document.querySelector<HTMLButtonElement>('button[data-settings-section="workspace"]');
+    expect(workspaceSectionButton).not.toBeNull();
+    workspaceSectionButton?.click();
+
+    await waitFor(() => {
+      const button = document.querySelector<HTMLButtonElement>('button[data-workspace-action="open-claude"]');
+      return Boolean(button && (button.textContent ?? "").includes("2"));
+    }, 4000);
+    const openClaudeButton = document.querySelector<HTMLButtonElement>('button[data-workspace-action="open-claude"]');
+    expect(openClaudeButton).not.toBeNull();
+    expect(openClaudeButton?.textContent ?? "").toContain("2");
+    openClaudeButton?.click();
+
+    await waitFor(() => document.getElementById("workspace-level2-claude-view")?.hasAttribute("hidden") === false, 4000);
+
+    const openFileButton = document.querySelector<HTMLButtonElement>(`button[data-workspace-open="${openFilePath}"]`);
+    expect(openFileButton).not.toBeNull();
+    openFileButton?.click();
+    await waitFor(() => claudeFileLoaded, 4000);
+  });
+
+  it("工作区卡片应支持启用和禁用", async () => {
+    const configPath = "config/channels.json";
+    const promptPath = "prompts/ai-tools.md";
+    const codexPath = "prompts/codex/user-codex/prompts/check-fix.md";
+
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const rawURL = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      const url = new URL(rawURL);
+      const method = (init?.method ?? "GET").toUpperCase();
+
+      if (url.pathname === "/models/catalog" && method === "GET") {
+        return jsonResponse({
+          providers: [],
+          provider_types: [],
+          defaults: {},
+          active_llm: {
+            provider_id: "",
+            model: "",
+          },
+        });
+      }
+
+      if (url.pathname === "/chats" && method === "GET") {
+        return jsonResponse([]);
+      }
+
+      if (url.pathname === "/workspace/files" && method === "GET") {
+        return jsonResponse({
+          files: [
+            { path: configPath, kind: "config", size: 128 },
+            { path: promptPath, kind: "config", size: 256 },
+            { path: codexPath, kind: "config", size: 512 },
+          ],
+        });
+      }
+
+      throw new Error(`unexpected request: ${method} ${url.pathname}`);
+    }) as typeof globalThis.fetch;
+
+    await import("../../src/main.ts");
+
+    const settingsToggleButton = document.getElementById("settings-toggle") as HTMLButtonElement | null;
+    expect(settingsToggleButton).not.toBeNull();
+    settingsToggleButton?.click();
+
+    const workspaceSectionButton = document.querySelector<HTMLButtonElement>('button[data-settings-section="workspace"]');
+    expect(workspaceSectionButton).not.toBeNull();
+    workspaceSectionButton?.click();
+
+    await waitFor(() => document.querySelector<HTMLButtonElement>('button[data-workspace-action="open-config"]') !== null, 4000);
+
+    const disableButton = document.querySelector<HTMLButtonElement>('button[data-workspace-toggle-card="config"]');
+    expect(disableButton).not.toBeNull();
+    expect(disableButton?.textContent ?? "").toContain("禁用");
+    disableButton?.click();
+
+    await waitFor(() => {
+      const openConfigButton = document.querySelector<HTMLButtonElement>('button[data-workspace-action="open-config"]');
+      return openConfigButton?.disabled === true;
+    }, 4000);
+    await waitFor(() => (document.getElementById("status-line")?.textContent ?? "").includes("已禁用卡片"), 4000);
+
+    const persistedAfterDisable = window.localStorage.getItem("nextai.web.chat.settings");
+    expect(persistedAfterDisable).not.toBeNull();
+    const parsedAfterDisable = JSON.parse(String(persistedAfterDisable)) as {
+      workspaceCardEnabled?: { config?: boolean };
+    };
+    expect(parsedAfterDisable.workspaceCardEnabled?.config).toBe(false);
+
+    const disabledOpenConfigButton = document.querySelector<HTMLButtonElement>('button[data-workspace-action="open-config"]');
+    disabledOpenConfigButton?.click();
+    expect(document.getElementById("workspace-level2-config-view")?.hasAttribute("hidden")).toBe(true);
+
+    const enableButton = document.querySelector<HTMLButtonElement>('button[data-workspace-toggle-card="config"]');
+    expect(enableButton).not.toBeNull();
+    expect(enableButton?.textContent ?? "").toContain("启用");
+    enableButton?.click();
+
+    await waitFor(() => {
+      const openConfigButton = document.querySelector<HTMLButtonElement>('button[data-workspace-action="open-config"]');
+      return openConfigButton?.disabled === false;
+    }, 4000);
+    await waitFor(() => {
+      const disableAgainButton = document.querySelector<HTMLButtonElement>('button[data-workspace-toggle-card="config"]');
+      return (disableAgainButton?.textContent ?? "").includes("禁用");
+    }, 4000);
+    const persistedAfterEnable = window.localStorage.getItem("nextai.web.chat.settings");
+    expect(persistedAfterEnable).not.toBeNull();
+    const parsedAfterEnable = JSON.parse(String(persistedAfterEnable)) as {
+      workspaceCardEnabled?: { config?: boolean };
+    };
+    expect(parsedAfterEnable.workspaceCardEnabled?.config).toBe(true);
+
+    const enabledOpenConfigButton = document.querySelector<HTMLButtonElement>('button[data-workspace-action="open-config"]');
+    enabledOpenConfigButton?.click();
+    await waitFor(() => document.getElementById("workspace-level2-config-view")?.hasAttribute("hidden") === false, 4000);
+  });
+
   it("keeps settings popover open when closing workspace editor modal", async () => {
-    const filePath = "docs/AI/AGENTS.md";
+    const filePath = "prompts/AGENTS.md";
     const rawContent = "# AI Tool Guide";
     let workspaceFileLoaded = false;
 

@@ -1,14 +1,18 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -20,6 +24,7 @@ import (
 	"nextai/apps/gateway/internal/plugin"
 	"nextai/apps/gateway/internal/provider"
 	"nextai/apps/gateway/internal/repo"
+	codexpromptservice "nextai/apps/gateway/internal/service/codexprompt"
 )
 
 func newTestServer(t *testing.T) *Server {
@@ -73,6 +78,21 @@ func newDocsAITestPath(t *testing.T, prefix string) (string, string) {
 	return rel, abs
 }
 
+func newPromptTemplateTestPath(t *testing.T, prefix string) (string, string) {
+	t.Helper()
+	repoRoot, err := findRepoRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rel := filepath.ToSlash(filepath.Join("prompts", fmt.Sprintf("%s-%d.md", prefix, time.Now().UnixNano())))
+	abs := filepath.Join(repoRoot, filepath.FromSlash(rel))
+	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Remove(abs) })
+	return rel, abs
+}
+
 func writeWebFixture(t *testing.T, baseDir string) string {
 	t.Helper()
 	webDir := filepath.Join(baseDir, "web")
@@ -88,6 +108,83 @@ func writeWebFixture(t *testing.T, baseDir string) string {
 		t.Fatal(err)
 	}
 	return webDir
+}
+
+type stubToolPlugin struct {
+	name   string
+	invoke func(input map[string]interface{}) (map[string]interface{}, error)
+}
+
+func (p *stubToolPlugin) Name() string {
+	return p.name
+}
+
+func (p *stubToolPlugin) Invoke(input map[string]interface{}) (map[string]interface{}, error) {
+	if p.invoke == nil {
+		return map[string]interface{}{"ok": true}, nil
+	}
+	return p.invoke(input)
+}
+
+type stubCodexInstructionResolver struct {
+	resolve func(modelSlug string, personality string) (string, codexpromptservice.ResolveMeta, error)
+}
+
+func (r *stubCodexInstructionResolver) Resolve(modelSlug string, personality string) (string, codexpromptservice.ResolveMeta, error) {
+	if r == nil || r.resolve == nil {
+		return "", codexpromptservice.ResolveMeta{}, errors.New("resolve not implemented")
+	}
+	return r.resolve(modelSlug, personality)
+}
+
+func collectSystemMessagesFromModelRequest(t *testing.T, requestBody map[string]interface{}) []string {
+	t.Helper()
+	rawMessages, ok := requestBody["messages"].([]interface{})
+	if !ok {
+		t.Fatalf("model request missing messages: %#v", requestBody["messages"])
+	}
+	out := make([]string, 0, len(rawMessages))
+	for _, item := range rawMessages {
+		message, _ := item.(map[string]interface{})
+		role, _ := message["role"].(string)
+		content, _ := message["content"].(string)
+		if role == "system" {
+			out = append(out, content)
+		}
+	}
+	return out
+}
+
+func configureOpenAIProviderForTest(t *testing.T, srv *Server, baseURL string) {
+	t.Helper()
+
+	configProvider := `{"api_key":"sk-test","base_url":"` + baseURL + `"}`
+	w1 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w1, httptest.NewRequest(http.MethodPut, "/models/openai/config", strings.NewReader(configProvider)))
+	if w1.Code != http.StatusOK {
+		t.Fatalf("config provider status=%d body=%s", w1.Code, w1.Body.String())
+	}
+	setActive := `{"provider_id":"openai","model":"gpt-4o-mini"}`
+	w2 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w2, httptest.NewRequest(http.MethodPut, "/models/active", strings.NewReader(setActive)))
+	if w2.Code != http.StatusOK {
+		t.Fatalf("set active status=%d body=%s", w2.Code, w2.Body.String())
+	}
+}
+
+func intFromAny(raw interface{}) (int, bool) {
+	switch value := raw.(type) {
+	case int:
+		return value, true
+	case int32:
+		return int(value), true
+	case int64:
+		return int(value), true
+	case float64:
+		return int(value), true
+	default:
+		return 0, false
+	}
 }
 
 func TestFindRepoRootFallsBackToCurrentWorkingDirectoryWithoutGit(t *testing.T) {
@@ -251,6 +348,99 @@ func TestHealthz(t *testing.T) {
 	srv.Handler().ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
 		t.Fatalf("unexpected status: %d", w.Code)
+	}
+}
+
+func TestRuntimeConfigEndpointReflectsFeatureFlags(t *testing.T) {
+	t.Setenv("NEXTAI_DISABLE_QQ_INBOUND_SUPERVISOR", "true")
+	dir := t.TempDir()
+	srv, err := NewServer(config.Config{
+		Host:                          "127.0.0.1",
+		Port:                          "0",
+		DataDir:                       dir,
+		EnablePromptTemplates:         true,
+		EnablePromptContextIntrospect: false,
+		EnableCodexModeV2:             true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { srv.Close() })
+
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/runtime-config", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("runtime config status=%d body=%s", w.Code, w.Body.String())
+	}
+
+	var resp struct {
+		Features struct {
+			PromptTemplates         bool `json:"prompt_templates"`
+			PromptContextIntrospect bool `json:"prompt_context_introspect"`
+			CodexModeV2             bool `json:"codex_mode_v2"`
+		} `json:"features"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode runtime config failed: %v body=%s", err, w.Body.String())
+	}
+	if !resp.Features.PromptTemplates {
+		t.Fatalf("expected prompt_templates=true, body=%s", w.Body.String())
+	}
+	if resp.Features.PromptContextIntrospect {
+		t.Fatalf("expected prompt_context_introspect=false, body=%s", w.Body.String())
+	}
+	if !resp.Features.CodexModeV2 {
+		t.Fatalf("expected codex_mode_v2=true, body=%s", w.Body.String())
+	}
+}
+
+func TestRuntimeConfigEndpointBypassesAPIKeyAuth(t *testing.T) {
+	t.Setenv("NEXTAI_DISABLE_QQ_INBOUND_SUPERVISOR", "true")
+	dir := t.TempDir()
+	srv, err := NewServer(config.Config{
+		Host:                          "127.0.0.1",
+		Port:                          "0",
+		DataDir:                       dir,
+		APIKey:                        "secret-token",
+		EnablePromptTemplates:         false,
+		EnablePromptContextIntrospect: true,
+		EnableCodexModeV2:             false,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { srv.Close() })
+
+	runtimeConfigW := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(runtimeConfigW, httptest.NewRequest(http.MethodGet, "/runtime-config", nil))
+	if runtimeConfigW.Code != http.StatusOK {
+		t.Fatalf("runtime config should bypass auth, got=%d body=%s", runtimeConfigW.Code, runtimeConfigW.Body.String())
+	}
+
+	var resp struct {
+		Features struct {
+			PromptTemplates         bool `json:"prompt_templates"`
+			PromptContextIntrospect bool `json:"prompt_context_introspect"`
+			CodexModeV2             bool `json:"codex_mode_v2"`
+		} `json:"features"`
+	}
+	if err := json.Unmarshal(runtimeConfigW.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode runtime config failed: %v body=%s", err, runtimeConfigW.Body.String())
+	}
+	if resp.Features.PromptTemplates {
+		t.Fatalf("expected prompt_templates=false, body=%s", runtimeConfigW.Body.String())
+	}
+	if !resp.Features.PromptContextIntrospect {
+		t.Fatalf("expected prompt_context_introspect=true, body=%s", runtimeConfigW.Body.String())
+	}
+	if resp.Features.CodexModeV2 {
+		t.Fatalf("expected codex_mode_v2=false, body=%s", runtimeConfigW.Body.String())
+	}
+
+	chatsW := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(chatsW, httptest.NewRequest(http.MethodGet, "/chats", nil))
+	if chatsW.Code != http.StatusUnauthorized {
+		t.Fatalf("chats without key should still require auth, got=%d body=%s", chatsW.Code, chatsW.Body.String())
 	}
 }
 
@@ -574,7 +764,7 @@ func TestProcessAgentPersistsToolCallNoticesInHistory(t *testing.T) {
 	}
 	first, _ := rawNotices[0].(map[string]interface{})
 	raw, _ := first["raw"].(string)
-	if !strings.Contains(raw, `"type":"tool_call"`) || !strings.Contains(raw, `"name":"view"`) {
+	if !strings.Contains(raw, `"type":"tool_result"`) || !strings.Contains(raw, `"name":"view"`) || !strings.Contains(raw, `line-1`) {
 		t.Fatalf("unexpected persisted tool notice raw: %q", raw)
 	}
 	toolOrder, ok := assistant.Metadata["tool_order"].(float64)
@@ -1264,11 +1454,1011 @@ func TestProcessAgentRejectsShellToolWithoutCommand(t *testing.T) {
 	}
 }
 
+func TestProcessAgentAcceptsBizParamsShellInputCommandForBackwardCompatibility(t *testing.T) {
+	srv := newTestServer(t)
+
+	procReq := `{
+		"input":[{"role":"user","type":"message","content":[{"type":"text","text":"/shell compat"}]}],
+		"session_id":"s-shell-biz-compat",
+		"user_id":"u-shell-biz-compat",
+		"channel":"console",
+		"stream":false,
+		"biz_params":{"tool":{"name":"shell","input":{"command":"printf compat"}}}
+	}`
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/agent/process", strings.NewReader(procReq)))
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got=%d body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"reply":"$ printf compat`) {
+		t.Fatalf("unexpected body: %s", w.Body.String())
+	}
+}
+
+func TestPrependSystemLayersPreservesOrder(t *testing.T) {
+	input := []domain.AgentInputMessage{
+		{
+			Role: "user",
+			Type: "message",
+			Content: []domain.RuntimeContent{
+				{Type: "text", Text: "hello"},
+			},
+		},
+	}
+
+	layers := []systemPromptLayer{
+		{Name: "base_system", Role: "system", Content: "base"},
+		{Name: "tool_guide_system", Role: "system", Content: "tool"},
+		{Name: "workspace_policy_system", Role: "system", Content: ""},
+		{Name: "session_policy_system", Role: "system", Content: "session"},
+	}
+
+	out := prependSystemLayers(input, layers)
+	if len(out) != 4 {
+		t.Fatalf("expected 4 messages, got=%d", len(out))
+	}
+	if got := out[0].Content[0].Text; got != "base" {
+		t.Fatalf("first layer mismatch: %q", got)
+	}
+	if got := out[1].Content[0].Text; got != "tool" {
+		t.Fatalf("second layer mismatch: %q", got)
+	}
+	if got := out[2].Content[0].Text; got != "session" {
+		t.Fatalf("third layer mismatch: %q", got)
+	}
+	if got := out[3].Role; got != "user" {
+		t.Fatalf("last message should be user, got=%q", got)
+	}
+}
+
+func TestBuildSystemLayersOrder(t *testing.T) {
+	srv := newTestServer(t)
+
+	layers, err := srv.buildSystemLayers()
+	if err != nil {
+		t.Fatalf("buildSystemLayers failed: %v", err)
+	}
+	if len(layers) < 2 {
+		t.Fatalf("expected at least 2 layers, got=%d", len(layers))
+	}
+	if layers[0].Name != "base_system" {
+		t.Fatalf("first layer should be base_system, got=%q", layers[0].Name)
+	}
+	if layers[1].Name != "tool_guide_system" {
+		t.Fatalf("second layer should be tool_guide_system, got=%q", layers[1].Name)
+	}
+}
+
+func TestBuildSystemLayersForCodexModeUsesSingleLayerWhenPromptTemplatesDisabled(t *testing.T) {
+	srv := newTestServer(t)
+
+	layers, err := srv.buildSystemLayersForMode(promptModeCodex)
+	if err != nil {
+		t.Fatalf("buildSystemLayersForMode(codex) failed: %v", err)
+	}
+	if len(layers) != 1 {
+		t.Fatalf("expected exactly 1 layer, got=%d", len(layers))
+	}
+	layer := layers[0]
+	if layer.Name != "codex_base_system" {
+		t.Fatalf("expected layer name codex_base_system, got=%q", layer.Name)
+	}
+	if layer.Source != codexBasePromptRelativePath {
+		t.Fatalf("expected source=%q, got=%q", codexBasePromptRelativePath, layer.Source)
+	}
+	if !strings.Contains(layer.Content, "## "+codexBasePromptRelativePath) {
+		t.Fatalf("unexpected codex layer content header: %q", layer.Content)
+	}
+}
+
+func TestBuildSystemLayersForCodexModeIncludesTemplateLayersWhenFeatureEnabled(t *testing.T) {
+	t.Setenv("NEXTAI_DISABLE_QQ_INBOUND_SUPERVISOR", "true")
+	srv, err := NewServer(config.Config{
+		Host:                  "127.0.0.1",
+		Port:                  "0",
+		DataDir:               t.TempDir(),
+		EnablePromptTemplates: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { srv.Close() })
+
+	layers, err := srv.buildSystemLayersForMode(promptModeCodex)
+	if err != nil {
+		t.Fatalf("buildSystemLayersForMode(codex) failed: %v", err)
+	}
+	if len(layers) < 5 {
+		t.Fatalf("expected at least 5 codex layers with templates enabled, got=%d", len(layers))
+	}
+	if layers[0].Name != "codex_base_system" {
+		t.Fatalf("expected first codex layer to be codex_base_system, got=%q", layers[0].Name)
+	}
+
+	byName := map[string]systemPromptLayer{}
+	for _, layer := range layers {
+		byName[layer.Name] = layer
+	}
+
+	orchestrator, ok := byName["codex_orchestrator_system"]
+	if !ok {
+		t.Fatalf("missing codex_orchestrator_system layer: %#v", layers)
+	}
+	if orchestrator.Source != codexOrchestratorRelativePath {
+		t.Fatalf("expected orchestrator source=%q, got=%q", codexOrchestratorRelativePath, orchestrator.Source)
+	}
+
+	modelLayer, ok := byName["codex_model_instructions_system"]
+	if !ok {
+		t.Fatalf("missing codex_model_instructions_system layer: %#v", layers)
+	}
+	if modelLayer.Source != codexModelTemplateRelativePath {
+		t.Fatalf("expected model template source=%q, got=%q", codexModelTemplateRelativePath, modelLayer.Source)
+	}
+	if strings.Contains(modelLayer.Content, "{{ personality }}") {
+		t.Fatalf("expected personality placeholder to be rendered, got=%q", modelLayer.Content)
+	}
+
+	collabLayer, ok := byName["codex_collaboration_default_system"]
+	if !ok {
+		t.Fatalf("missing codex_collaboration_default_system layer: %#v", layers)
+	}
+	if collabLayer.Source != codexCollabDefaultRelativePath {
+		t.Fatalf("expected collab default source=%q, got=%q", codexCollabDefaultRelativePath, collabLayer.Source)
+	}
+	if strings.Contains(collabLayer.Content, "{{KNOWN_MODE_NAMES}}") || strings.Contains(collabLayer.Content, "{{REQUEST_USER_INPUT_AVAILABILITY}}") {
+		t.Fatalf("expected collaboration placeholders to be rendered, got=%q", collabLayer.Content)
+	}
+	if _, exists := byName["codex_local_policy_system"]; exists {
+		t.Fatalf("expected codex_local_policy_system to stay disabled in v1 path")
+	}
+	if _, exists := byName["codex_tool_guide_system"]; exists {
+		t.Fatalf("expected codex_tool_guide_system to stay disabled in v1 path")
+	}
+}
+
+func TestBuildSystemLayersForCodexModeUsesCatalogModelInstructionsWhenSourceCatalog(t *testing.T) {
+	t.Setenv("NEXTAI_DISABLE_QQ_INBOUND_SUPERVISOR", "true")
+	srv, err := NewServer(config.Config{
+		Host:                  "127.0.0.1",
+		Port:                  "0",
+		DataDir:               t.TempDir(),
+		EnablePromptTemplates: true,
+		CodexPromptSource:     codexPromptSourceCatalog,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { srv.Close() })
+
+	layers, err := srv.buildSystemLayersForMode(promptModeCodex)
+	if err != nil {
+		t.Fatalf("buildSystemLayersForMode(codex) failed: %v", err)
+	}
+
+	byName := map[string]systemPromptLayer{}
+	for _, layer := range layers {
+		byName[layer.Name] = layer
+	}
+	modelLayer, ok := byName["codex_model_instructions_system"]
+	if !ok {
+		t.Fatalf("missing codex_model_instructions_system layer: %#v", layers)
+	}
+	if !strings.HasPrefix(modelLayer.Source, codexRuntimeCatalogRelativePath+"#") {
+		t.Fatalf("expected catalog source prefix=%q, got=%q", codexRuntimeCatalogRelativePath+"#", modelLayer.Source)
+	}
+	if strings.Contains(modelLayer.Content, "{{ personality }}") {
+		t.Fatalf("expected personality placeholder rendered in catalog mode, got=%q", modelLayer.Content)
+	}
+}
+
+func TestBuildSystemLayersForCodexModeV2IncludesLocalPolicyAndToolGuide(t *testing.T) {
+	t.Setenv("NEXTAI_DISABLE_QQ_INBOUND_SUPERVISOR", "true")
+	srv, err := NewServer(config.Config{
+		Host:              "127.0.0.1",
+		Port:              "0",
+		DataDir:           t.TempDir(),
+		EnableCodexModeV2: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { srv.Close() })
+
+	layers, err := srv.buildSystemLayersForMode(promptModeCodex)
+	if err != nil {
+		t.Fatalf("buildSystemLayersForMode(codex) failed: %v", err)
+	}
+	if len(layers) < 7 {
+		t.Fatalf("expected codex v2 layers with local policy and tool guide, got=%d", len(layers))
+	}
+
+	indexByName := map[string]int{}
+	byName := map[string]systemPromptLayer{}
+	for index, layer := range layers {
+		indexByName[layer.Name] = index
+		byName[layer.Name] = layer
+	}
+
+	requiredNames := []string{
+		"codex_base_system",
+		"codex_orchestrator_system",
+		"codex_model_instructions_system",
+		"codex_collaboration_default_system",
+		"codex_experimental_collab_system",
+		"codex_local_policy_system",
+		"codex_tool_guide_system",
+	}
+	for _, name := range requiredNames {
+		if _, ok := indexByName[name]; !ok {
+			t.Fatalf("missing required codex v2 layer %q: %#v", name, layers)
+		}
+	}
+	if !(indexByName["codex_base_system"] < indexByName["codex_orchestrator_system"] &&
+		indexByName["codex_orchestrator_system"] < indexByName["codex_model_instructions_system"] &&
+		indexByName["codex_model_instructions_system"] < indexByName["codex_collaboration_default_system"] &&
+		indexByName["codex_collaboration_default_system"] < indexByName["codex_experimental_collab_system"] &&
+		indexByName["codex_experimental_collab_system"] < indexByName["codex_local_policy_system"] &&
+		indexByName["codex_local_policy_system"] < indexByName["codex_tool_guide_system"]) {
+		t.Fatalf("unexpected codex v2 order: %#v", layers)
+	}
+
+	modelLayer := byName["codex_model_instructions_system"]
+	if strings.Contains(modelLayer.Content, "{{ personality }}") {
+		t.Fatalf("expected personality placeholder rendered, got=%q", modelLayer.Content)
+	}
+
+	collabLayer := byName["codex_collaboration_default_system"]
+	if strings.Contains(collabLayer.Content, "{{KNOWN_MODE_NAMES}}") || strings.Contains(collabLayer.Content, "{{REQUEST_USER_INPUT_AVAILABILITY}}") {
+		t.Fatalf("expected collaboration placeholders rendered, got=%q", collabLayer.Content)
+	}
+	expectedKnownModesSentence := fmt.Sprintf("Known mode names are %s.", knownCollaborationModeNames())
+	if !strings.Contains(collabLayer.Content, expectedKnownModesSentence) {
+		t.Fatalf("expected known mode names to be rendered from supported list, got=%q", collabLayer.Content)
+	}
+	if !strings.Contains(collabLayer.Content, "request_user_input` tool is unavailable in Default mode") {
+		t.Fatalf("expected request_user_input availability to be rendered, got=%q", collabLayer.Content)
+	}
+
+	localLayer := byName["codex_local_policy_system"]
+	if localLayer.Source != codexLocalPolicyRelativePath {
+		t.Fatalf("expected local policy source=%q, got=%q", codexLocalPolicyRelativePath, localLayer.Source)
+	}
+	toolLayer := byName["codex_tool_guide_system"]
+	if toolLayer.Source != codexToolGuideRelativePath {
+		t.Fatalf("expected tool guide source=%q, got=%q", codexToolGuideRelativePath, toolLayer.Source)
+	}
+}
+
+func TestBuildSystemLayersForCodexModeV2CatalogSourceKeepsLayerOrderAndLocalPolicy(t *testing.T) {
+	t.Setenv("NEXTAI_DISABLE_QQ_INBOUND_SUPERVISOR", "true")
+	srv, err := NewServer(config.Config{
+		Host:              "127.0.0.1",
+		Port:              "0",
+		DataDir:           t.TempDir(),
+		EnableCodexModeV2: true,
+		CodexPromptSource: codexPromptSourceCatalog,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { srv.Close() })
+
+	layers, err := srv.buildSystemLayersForMode(promptModeCodex)
+	if err != nil {
+		t.Fatalf("buildSystemLayersForMode(codex) failed: %v", err)
+	}
+
+	indexByName := map[string]int{}
+	byName := map[string]systemPromptLayer{}
+	for index, layer := range layers {
+		indexByName[layer.Name] = index
+		byName[layer.Name] = layer
+	}
+	requiredNames := []string{
+		"codex_base_system",
+		"codex_orchestrator_system",
+		"codex_model_instructions_system",
+		"codex_collaboration_default_system",
+		"codex_experimental_collab_system",
+		"codex_local_policy_system",
+		"codex_tool_guide_system",
+	}
+	for _, name := range requiredNames {
+		if _, ok := indexByName[name]; !ok {
+			t.Fatalf("missing required codex v2 layer %q: %#v", name, layers)
+		}
+	}
+	if !(indexByName["codex_base_system"] < indexByName["codex_orchestrator_system"] &&
+		indexByName["codex_orchestrator_system"] < indexByName["codex_model_instructions_system"] &&
+		indexByName["codex_model_instructions_system"] < indexByName["codex_collaboration_default_system"] &&
+		indexByName["codex_collaboration_default_system"] < indexByName["codex_experimental_collab_system"] &&
+		indexByName["codex_experimental_collab_system"] < indexByName["codex_local_policy_system"] &&
+		indexByName["codex_local_policy_system"] < indexByName["codex_tool_guide_system"]) {
+		t.Fatalf("unexpected codex v2 order: %#v", layers)
+	}
+	modelLayer := byName["codex_model_instructions_system"]
+	if !strings.HasPrefix(modelLayer.Source, codexRuntimeCatalogRelativePath+"#") {
+		t.Fatalf("expected model layer from catalog source, got=%q", modelLayer.Source)
+	}
+	if _, ok := byName["codex_local_policy_system"]; !ok {
+		t.Fatalf("expected codex_local_policy_system in v2 catalog mode")
+	}
+	if _, ok := byName["codex_tool_guide_system"]; !ok {
+		t.Fatalf("expected codex_tool_guide_system in v2 catalog mode")
+	}
+}
+
+func TestBuildSystemLayersForCodexModeShadowCompareLogsDiffWithoutChangingLayerContent(t *testing.T) {
+	t.Setenv("NEXTAI_DISABLE_QQ_INBOUND_SUPERVISOR", "true")
+	srv, err := NewServer(config.Config{
+		Host:                           "127.0.0.1",
+		Port:                           "0",
+		DataDir:                        t.TempDir(),
+		EnablePromptTemplates:          true,
+		CodexPromptSource:              codexPromptSourceFile,
+		EnableCodexPromptShadowCompare: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { srv.Close() })
+
+	srv.codexPromptResolver = &stubCodexInstructionResolver{
+		resolve: func(modelSlug string, personality string) (string, codexpromptservice.ResolveMeta, error) {
+			return "catalog-diff-content", codexpromptservice.ResolveMeta{
+				SourceSlug: defaultCodexModelSlug,
+			}, nil
+		},
+	}
+
+	originalWriter := log.Writer()
+	originalFlags := log.Flags()
+	originalPrefix := log.Prefix()
+	var logBuffer bytes.Buffer
+	log.SetOutput(&logBuffer)
+	log.SetFlags(0)
+	log.SetPrefix("")
+	t.Cleanup(func() {
+		log.SetOutput(originalWriter)
+		log.SetFlags(originalFlags)
+		log.SetPrefix(originalPrefix)
+	})
+
+	layers, err := srv.buildSystemLayersForModeWithOptions(promptModeCodex, codexLayerBuildOptions{
+		SessionID: "s-shadow",
+		ModelSlug: defaultCodexModelSlug,
+	})
+	if err != nil {
+		t.Fatalf("buildSystemLayersForModeWithOptions failed: %v", err)
+	}
+
+	byName := map[string]systemPromptLayer{}
+	for _, layer := range layers {
+		byName[layer.Name] = layer
+	}
+	modelLayer, ok := byName["codex_model_instructions_system"]
+	if !ok {
+		t.Fatalf("missing codex_model_instructions_system layer: %#v", layers)
+	}
+	if modelLayer.Source != codexModelTemplateRelativePath {
+		t.Fatalf("shadow compare should not change response source, got=%q", modelLayer.Source)
+	}
+	logs := logBuffer.String()
+	if !strings.Contains(logs, "codex_prompt_shadow_diff") {
+		t.Fatalf("expected codex_prompt_shadow_diff log, got=%q", logs)
+	}
+	if !strings.Contains(logs, "session_id=s-shadow") {
+		t.Fatalf("expected session_id in shadow diff log, got=%q", logs)
+	}
+	if !strings.Contains(logs, "model_slug="+defaultCodexModelSlug) {
+		t.Fatalf("expected model_slug in shadow diff log, got=%q", logs)
+	}
+}
+
+func TestBuildSystemLayersForCodexModeV2ToolGuideUsesItemsSchemaExamples(t *testing.T) {
+	t.Setenv("NEXTAI_DISABLE_QQ_INBOUND_SUPERVISOR", "true")
+	srv, err := NewServer(config.Config{
+		Host:              "127.0.0.1",
+		Port:              "0",
+		DataDir:           t.TempDir(),
+		EnableCodexModeV2: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { srv.Close() })
+
+	layers, err := srv.buildSystemLayersForMode(promptModeCodex)
+	if err != nil {
+		t.Fatalf("buildSystemLayersForMode(codex) failed: %v", err)
+	}
+
+	toolGuideContent := ""
+	for _, layer := range layers {
+		if layer.Name != "codex_tool_guide_system" {
+			continue
+		}
+		toolGuideContent = layer.Content
+		break
+	}
+	if strings.TrimSpace(toolGuideContent) == "" {
+		t.Fatalf("expected codex_tool_guide_system layer in codex v2, got=%#v", layers)
+	}
+
+	if !strings.Contains(toolGuideContent, `"items": [`) {
+		t.Fatalf("expected tool guide to include items schema examples, got=%q", toolGuideContent)
+	}
+
+	legacyPatterns := []string{
+		`"shell": [`,
+		`"view": [`,
+		`"edit": [`,
+		`"browser": [`,
+		`"search": [`,
+	}
+	for _, pattern := range legacyPatterns {
+		if strings.Contains(toolGuideContent, pattern) {
+			t.Fatalf("expected tool guide to avoid legacy top-level shortcut pattern %q, got=%q", pattern, toolGuideContent)
+		}
+	}
+}
+
+func TestBuildSystemLayersForCodexModeV2SkipsMissingOptionalToolGuideLayer(t *testing.T) {
+	repoRoot, err := findRepoRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	hideOptionalFile := func(relativePath string) {
+		absPath := filepath.Join(repoRoot, filepath.FromSlash(relativePath))
+		if _, statErr := os.Stat(absPath); statErr != nil {
+			if errors.Is(statErr, os.ErrNotExist) {
+				return
+			}
+			t.Fatalf("stat %s failed: %v", relativePath, statErr)
+		}
+		backupPath := fmt.Sprintf("%s.bak-%d", absPath, time.Now().UnixNano())
+		if err := os.Rename(absPath, backupPath); err != nil {
+			t.Fatalf("rename %s failed: %v", relativePath, err)
+		}
+		t.Cleanup(func() {
+			_ = os.Rename(backupPath, absPath)
+		})
+	}
+	hideOptionalFile(codexToolGuideRelativePath)
+	hideOptionalFile(aiToolsGuideLegacyV1RelativePath)
+	hideOptionalFile(aiToolsGuideLegacyV2RelativePath)
+
+	t.Setenv("NEXTAI_DISABLE_QQ_INBOUND_SUPERVISOR", "true")
+	srv, err := NewServer(config.Config{
+		Host:              "127.0.0.1",
+		Port:              "0",
+		DataDir:           t.TempDir(),
+		EnableCodexModeV2: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { srv.Close() })
+
+	layers, err := srv.buildSystemLayersForMode(promptModeCodex)
+	if err != nil {
+		t.Fatalf("buildSystemLayersForMode(codex v2) failed: %v", err)
+	}
+	for _, layer := range layers {
+		if layer.Name == "codex_tool_guide_system" {
+			t.Fatalf("expected missing optional tool guide layer to be skipped, got=%#v", layers)
+		}
+	}
+}
+
+func TestBuildSystemLayersForCodexModeV2DedupesDuplicatePolicyAndToolLayers(t *testing.T) {
+	repoRoot, err := findRepoRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	codexBasePath := filepath.Join(repoRoot, filepath.FromSlash(codexBasePromptRelativePath))
+	duplicatedContent, err := os.ReadFile(codexBasePath)
+	if err != nil {
+		t.Fatalf("read codex base prompt failed: %v", err)
+	}
+
+	replaceFileWithContent := func(relativePath string, content []byte) {
+		absPath := filepath.Join(repoRoot, filepath.FromSlash(relativePath))
+		originalContent, readErr := os.ReadFile(absPath)
+		if readErr != nil {
+			t.Fatalf("read %s failed: %v", relativePath, readErr)
+		}
+		t.Cleanup(func() {
+			_ = os.WriteFile(absPath, originalContent, 0o644)
+		})
+		if err := os.WriteFile(absPath, content, 0o644); err != nil {
+			t.Fatalf("write %s failed: %v", relativePath, err)
+		}
+	}
+	replaceFileWithContent(codexLocalPolicyRelativePath, duplicatedContent)
+	replaceFileWithContent(codexToolGuideRelativePath, duplicatedContent)
+
+	t.Setenv("NEXTAI_DISABLE_QQ_INBOUND_SUPERVISOR", "true")
+	srv, err := NewServer(config.Config{
+		Host:              "127.0.0.1",
+		Port:              "0",
+		DataDir:           t.TempDir(),
+		EnableCodexModeV2: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { srv.Close() })
+
+	layers, err := srv.buildSystemLayersForMode(promptModeCodex)
+	if err != nil {
+		t.Fatalf("buildSystemLayersForMode(codex v2) failed: %v", err)
+	}
+
+	byName := map[string]struct{}{}
+	for _, layer := range layers {
+		byName[layer.Name] = struct{}{}
+	}
+	if _, ok := byName["codex_base_system"]; !ok {
+		t.Fatalf("expected codex_base_system to remain after dedupe")
+	}
+	if _, ok := byName["codex_local_policy_system"]; ok {
+		t.Fatalf("expected codex_local_policy_system to be deduped out, got=%#v", layers)
+	}
+	if _, ok := byName["codex_tool_guide_system"]; ok {
+		t.Fatalf("expected codex_tool_guide_system to be deduped out, got=%#v", layers)
+	}
+}
+
+func TestBuildSystemLayersMissingRequiredFileFails(t *testing.T) {
+	repoRoot, err := findRepoRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	agentsPath := filepath.Join(repoRoot, filepath.FromSlash(aiToolsGuideRelativePath))
+	backupPath := fmt.Sprintf("%s.bak-%d", agentsPath, time.Now().UnixNano())
+	if err := os.Rename(agentsPath, backupPath); err != nil {
+		t.Fatalf("rename agents file failed: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = os.Rename(backupPath, agentsPath)
+	})
+
+	srv := newTestServer(t)
+	if _, err := srv.buildSystemLayers(); err == nil {
+		t.Fatal("expected buildSystemLayers to fail when AGENTS file is missing")
+	}
+}
+
+func TestBuildSystemLayersFallsBackToLegacyToolGuidePath(t *testing.T) {
+	repoRoot, err := findRepoRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	primaryPath := filepath.Join(repoRoot, filepath.FromSlash(aiToolsGuideLegacyRelativePath))
+	primaryBackup := fmt.Sprintf("%s.bak-%d", primaryPath, time.Now().UnixNano())
+	if err := os.Rename(primaryPath, primaryBackup); err != nil {
+		t.Fatalf("rename primary tool guide failed: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = os.Rename(primaryBackup, primaryPath)
+	})
+
+	legacyPath := filepath.Join(repoRoot, filepath.FromSlash(aiToolsGuideLegacyV0RelativePath))
+	legacyOriginal, legacyReadErr := os.ReadFile(legacyPath)
+	legacyExisted := legacyReadErr == nil
+	if legacyReadErr != nil && !errors.Is(legacyReadErr, os.ErrNotExist) {
+		t.Fatalf("read legacy tool guide failed: %v", legacyReadErr)
+	}
+	if err := os.MkdirAll(filepath.Dir(legacyPath), 0o755); err != nil {
+		t.Fatalf("create legacy dir failed: %v", err)
+	}
+	const fallbackContent = "# fallback legacy tool guide"
+	if err := os.WriteFile(legacyPath, []byte(fallbackContent), 0o644); err != nil {
+		t.Fatalf("write legacy tool guide failed: %v", err)
+	}
+	t.Cleanup(func() {
+		if legacyExisted {
+			_ = os.WriteFile(legacyPath, legacyOriginal, 0o644)
+			return
+		}
+		_ = os.Remove(legacyPath)
+	})
+
+	srv := newTestServer(t)
+	layers, err := srv.buildSystemLayers()
+	if err != nil {
+		t.Fatalf("buildSystemLayers failed: %v", err)
+	}
+	if len(layers) < 2 {
+		t.Fatalf("expected at least 2 layers, got=%d", len(layers))
+	}
+	toolLayer := layers[1]
+	if toolLayer.Source != aiToolsGuideLegacyV0RelativePath {
+		t.Fatalf("expected fallback source=%q, got=%q", aiToolsGuideLegacyV0RelativePath, toolLayer.Source)
+	}
+	if !strings.Contains(toolLayer.Content, fallbackContent) {
+		t.Fatalf("fallback content not used, layer=%q", toolLayer.Content)
+	}
+}
+
+func TestGetAgentSystemLayersFeatureDisabled(t *testing.T) {
+	srv := newTestServer(t)
+
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/agent/system-layers", nil))
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got=%d body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"code":"feature_disabled"`) {
+		t.Fatalf("unexpected body: %s", w.Body.String())
+	}
+}
+
+func TestGetAgentSystemLayersReturnsLayersAndTokenEstimate(t *testing.T) {
+	t.Setenv("NEXTAI_DISABLE_QQ_INBOUND_SUPERVISOR", "true")
+	dir, err := os.MkdirTemp("", "nextai-gateway-system-layers-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	srv, err := NewServer(config.Config{
+		Host:                          "127.0.0.1",
+		Port:                          "0",
+		DataDir:                       dir,
+		EnablePromptContextIntrospect: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { srv.Close() })
+
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/agent/system-layers", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got=%d body=%s", w.Code, w.Body.String())
+	}
+
+	var body agentSystemLayersResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode response failed: %v", err)
+	}
+	if body.Version != "v1" {
+		t.Fatalf("unexpected version: %q", body.Version)
+	}
+	if body.ModeVariant != promptModeVariantDefault {
+		t.Fatalf("expected mode_variant=%q, got=%q", promptModeVariantDefault, body.ModeVariant)
+	}
+	if len(body.Layers) < 3 {
+		t.Fatalf("expected at least 3 layers, got=%d", len(body.Layers))
+	}
+	if body.Layers[0].Name != "base_system" || body.Layers[1].Name != "tool_guide_system" {
+		t.Fatalf("unexpected first layers: %#v", body.Layers[:2])
+	}
+	foundEnvironment := false
+	for _, layer := range body.Layers {
+		if layer.Name == "environment_context_system" {
+			foundEnvironment = true
+			break
+		}
+	}
+	if !foundEnvironment {
+		t.Fatalf("environment_context_system layer missing: %#v", body.Layers)
+	}
+	sumTokens := 0
+	for _, layer := range body.Layers {
+		if strings.TrimSpace(layer.LayerHash) == "" {
+			t.Fatalf("expected non-empty layer_hash for layer %q", layer.Name)
+		}
+		sumTokens += layer.EstimatedTokens
+	}
+	if body.EstimatedTokensTotal <= 0 {
+		t.Fatalf("estimated_tokens_total should be positive, got=%d", body.EstimatedTokensTotal)
+	}
+	if sumTokens != body.EstimatedTokensTotal {
+		t.Fatalf("expected estimated_tokens_total=%d, got=%d", sumTokens, body.EstimatedTokensTotal)
+	}
+}
+
+func TestGetAgentSystemLayersSupportsCodexModeQuery(t *testing.T) {
+	t.Setenv("NEXTAI_DISABLE_QQ_INBOUND_SUPERVISOR", "true")
+	srv, err := NewServer(config.Config{
+		Host:                          "127.0.0.1",
+		Port:                          "0",
+		DataDir:                       t.TempDir(),
+		EnablePromptTemplates:         true,
+		EnablePromptContextIntrospect: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { srv.Close() })
+
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/agent/system-layers?prompt_mode=codex", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got=%d body=%s", w.Code, w.Body.String())
+	}
+
+	var body agentSystemLayersResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode response failed: %v body=%s", err, w.Body.String())
+	}
+	if len(body.Layers) < 5 {
+		t.Fatalf("expected codex template layers in introspection, got=%d", len(body.Layers))
+	}
+	if body.ModeVariant != promptModeVariantCodexV1 {
+		t.Fatalf("expected mode_variant=%q, got=%q", promptModeVariantCodexV1, body.ModeVariant)
+	}
+	if body.Layers[0].Name != "codex_base_system" {
+		t.Fatalf("expected first layer codex_base_system, got=%q", body.Layers[0].Name)
+	}
+	foundCollab := false
+	for _, layer := range body.Layers {
+		if layer.Name == "codex_collaboration_default_system" {
+			foundCollab = true
+			break
+		}
+	}
+	if !foundCollab {
+		t.Fatalf("expected codex_collaboration_default_system in response, got=%#v", body.Layers)
+	}
+	sumTokens := 0
+	for _, layer := range body.Layers {
+		if strings.TrimSpace(layer.LayerHash) == "" {
+			t.Fatalf("expected non-empty layer_hash for layer %q", layer.Name)
+		}
+		sumTokens += layer.EstimatedTokens
+	}
+	if sumTokens != body.EstimatedTokensTotal {
+		t.Fatalf("expected estimated_tokens_total=%d, got=%d", sumTokens, body.EstimatedTokensTotal)
+	}
+}
+
+func TestGetAgentSystemLayersSupportsCodexTaskCommandQuery(t *testing.T) {
+	t.Setenv("NEXTAI_DISABLE_QQ_INBOUND_SUPERVISOR", "true")
+	srv, err := NewServer(config.Config{
+		Host:                          "127.0.0.1",
+		Port:                          "0",
+		DataDir:                       t.TempDir(),
+		EnablePromptTemplates:         true,
+		EnablePromptContextIntrospect: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { srv.Close() })
+
+	reviewW := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(reviewW, httptest.NewRequest(http.MethodGet, "/agent/system-layers?prompt_mode=codex&task_command=review", nil))
+	if reviewW.Code != http.StatusOK {
+		t.Fatalf("expected 200, got=%d body=%s", reviewW.Code, reviewW.Body.String())
+	}
+	var reviewBody agentSystemLayersResponse
+	if err := json.Unmarshal(reviewW.Body.Bytes(), &reviewBody); err != nil {
+		t.Fatalf("decode review response failed: %v body=%s", err, reviewW.Body.String())
+	}
+	foundReviewLayer := false
+	for _, layer := range reviewBody.Layers {
+		if layer.Name == "codex_review_system" {
+			foundReviewLayer = true
+			break
+		}
+	}
+	if !foundReviewLayer {
+		t.Fatalf("expected codex_review_system in review task response, got=%#v", reviewBody.Layers)
+	}
+
+	planW := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(planW, httptest.NewRequest(http.MethodGet, "/agent/system-layers?prompt_mode=codex&task_command=/plan", nil))
+	if planW.Code != http.StatusOK {
+		t.Fatalf("expected 200, got=%d body=%s", planW.Code, planW.Body.String())
+	}
+	var planBody agentSystemLayersResponse
+	if err := json.Unmarshal(planW.Body.Bytes(), &planBody); err != nil {
+		t.Fatalf("decode plan response failed: %v body=%s", err, planW.Body.String())
+	}
+	foundPlanLayer := false
+	for _, layer := range planBody.Layers {
+		if layer.Name == "codex_collaboration_plan_system" {
+			foundPlanLayer = true
+			break
+		}
+	}
+	if !foundPlanLayer {
+		t.Fatalf("expected codex_collaboration_plan_system in plan task response, got=%#v", planBody.Layers)
+	}
+
+	executeW := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(executeW, httptest.NewRequest(http.MethodGet, "/agent/system-layers?prompt_mode=codex&task_command=execute", nil))
+	if executeW.Code != http.StatusOK {
+		t.Fatalf("expected 200, got=%d body=%s", executeW.Code, executeW.Body.String())
+	}
+	var executeBody agentSystemLayersResponse
+	if err := json.Unmarshal(executeW.Body.Bytes(), &executeBody); err != nil {
+		t.Fatalf("decode execute response failed: %v body=%s", err, executeW.Body.String())
+	}
+	foundExecuteLayer := false
+	for _, layer := range executeBody.Layers {
+		if layer.Name == "codex_collaboration_execute_system" {
+			foundExecuteLayer = true
+			break
+		}
+	}
+	if !foundExecuteLayer {
+		t.Fatalf("expected codex_collaboration_execute_system in execute task response, got=%#v", executeBody.Layers)
+	}
+
+	pairW := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(pairW, httptest.NewRequest(http.MethodGet, "/agent/system-layers?prompt_mode=codex&task_command=/pair_programming", nil))
+	if pairW.Code != http.StatusOK {
+		t.Fatalf("expected 200, got=%d body=%s", pairW.Code, pairW.Body.String())
+	}
+	var pairBody agentSystemLayersResponse
+	if err := json.Unmarshal(pairW.Body.Bytes(), &pairBody); err != nil {
+		t.Fatalf("decode pair_programming response failed: %v body=%s", err, pairW.Body.String())
+	}
+	foundPairLayer := false
+	for _, layer := range pairBody.Layers {
+		if layer.Name == "codex_collaboration_pair_programming_system" {
+			foundPairLayer = true
+			break
+		}
+	}
+	if !foundPairLayer {
+		t.Fatalf("expected codex_collaboration_pair_programming_system in pair task response, got=%#v", pairBody.Layers)
+	}
+}
+
+func TestGetAgentSystemLayersSupportsClaudeModeQuery(t *testing.T) {
+	t.Setenv("NEXTAI_DISABLE_QQ_INBOUND_SUPERVISOR", "true")
+	srv, err := NewServer(config.Config{
+		Host:                          "127.0.0.1",
+		Port:                          "0",
+		DataDir:                       t.TempDir(),
+		EnablePromptContextIntrospect: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { srv.Close() })
+
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/agent/system-layers?prompt_mode=claude", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got=%d body=%s", w.Code, w.Body.String())
+	}
+
+	var body agentSystemLayersResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode response failed: %v body=%s", err, w.Body.String())
+	}
+	if body.ModeVariant != promptModeVariantClaudeV1 {
+		t.Fatalf("expected mode_variant=%q, got=%q", promptModeVariantClaudeV1, body.ModeVariant)
+	}
+	if len(body.Layers) < 1 {
+		t.Fatalf("expected at least 1 layer, got=%d", len(body.Layers))
+	}
+	if body.Layers[0].Name != "claude_base_system" {
+		t.Fatalf("expected first layer claude_base_system, got=%q", body.Layers[0].Name)
+	}
+	sumTokens := 0
+	for _, layer := range body.Layers {
+		if strings.TrimSpace(layer.LayerHash) == "" {
+			t.Fatalf("expected non-empty layer_hash for layer %q", layer.Name)
+		}
+		sumTokens += layer.EstimatedTokens
+	}
+	if sumTokens != body.EstimatedTokensTotal {
+		t.Fatalf("expected estimated_tokens_total=%d, got=%d", sumTokens, body.EstimatedTokensTotal)
+	}
+}
+
+func TestGetAgentSystemLayersSupportsCodexModeQueryV2(t *testing.T) {
+	t.Setenv("NEXTAI_DISABLE_QQ_INBOUND_SUPERVISOR", "true")
+	srv, err := NewServer(config.Config{
+		Host:                          "127.0.0.1",
+		Port:                          "0",
+		DataDir:                       t.TempDir(),
+		EnablePromptContextIntrospect: true,
+		EnableCodexModeV2:             true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { srv.Close() })
+
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/agent/system-layers?prompt_mode=codex", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got=%d body=%s", w.Code, w.Body.String())
+	}
+
+	var body agentSystemLayersResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode response failed: %v body=%s", err, w.Body.String())
+	}
+	if body.ModeVariant != promptModeVariantCodexV2 {
+		t.Fatalf("expected mode_variant=%q, got=%q", promptModeVariantCodexV2, body.ModeVariant)
+	}
+	indexByName := map[string]int{}
+	sumTokens := 0
+	for index, layer := range body.Layers {
+		indexByName[layer.Name] = index
+		if strings.TrimSpace(layer.LayerHash) == "" {
+			t.Fatalf("expected non-empty layer_hash for layer %q", layer.Name)
+		}
+		sumTokens += layer.EstimatedTokens
+	}
+	if sumTokens != body.EstimatedTokensTotal {
+		t.Fatalf("expected estimated_tokens_total=%d, got=%d", sumTokens, body.EstimatedTokensTotal)
+	}
+	if _, ok := indexByName["codex_local_policy_system"]; !ok {
+		t.Fatalf("expected codex_local_policy_system in codex v2 response, got=%#v", body.Layers)
+	}
+	if _, ok := indexByName["codex_tool_guide_system"]; !ok {
+		t.Fatalf("expected codex_tool_guide_system in codex v2 response, got=%#v", body.Layers)
+	}
+}
+
+func TestGetAgentSystemLayersRejectsInvalidPromptModeQuery(t *testing.T) {
+	t.Setenv("NEXTAI_DISABLE_QQ_INBOUND_SUPERVISOR", "true")
+	srv, err := NewServer(config.Config{
+		Host:                          "127.0.0.1",
+		Port:                          "0",
+		DataDir:                       t.TempDir(),
+		EnablePromptContextIntrospect: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { srv.Close() })
+
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/agent/system-layers?prompt_mode=abc", nil))
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got=%d body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"code":"invalid_request"`) || !strings.Contains(w.Body.String(), "invalid prompt_mode") {
+		t.Fatalf("unexpected body: %s", w.Body.String())
+	}
+}
+
+func TestGetAgentSystemLayersRejectsInvalidTaskCommandQuery(t *testing.T) {
+	t.Setenv("NEXTAI_DISABLE_QQ_INBOUND_SUPERVISOR", "true")
+	srv, err := NewServer(config.Config{
+		Host:                          "127.0.0.1",
+		Port:                          "0",
+		DataDir:                       t.TempDir(),
+		EnablePromptContextIntrospect: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { srv.Close() })
+
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/agent/system-layers?prompt_mode=codex&task_command=oops", nil))
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got=%d body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"code":"invalid_request"`) || !strings.Contains(w.Body.String(), "invalid task_command") {
+		t.Fatalf("unexpected body: %s", w.Body.String())
+	}
+}
+
 func TestWorkspaceFilesListIncludesConfigAndSkillFiles(t *testing.T) {
 	srv := newTestServer(t)
 	docsPath, docsAbsPath := newDocsAITestPath(t, "workspace-list")
 	if err := os.WriteFile(docsAbsPath, []byte("# workspace list test\n"), 0o644); err != nil {
 		t.Fatalf("seed docs/AI file failed: %v", err)
+	}
+	promptPath, promptAbsPath := newPromptTemplateTestPath(t, "workspace-list-prompt")
+	if err := os.WriteFile(promptAbsPath, []byte("prompt body"), 0o644); err != nil {
+		t.Fatalf("seed prompts file failed: %v", err)
 	}
 
 	createSkill := `{"name":"demo-skill","content":"## skill content"}`
@@ -1306,6 +2496,9 @@ func TestWorkspaceFilesListIncludesConfigAndSkillFiles(t *testing.T) {
 	if got := paths[docsPath]; got != "config" {
 		t.Fatalf("expected %s to be config, got=%q", docsPath, got)
 	}
+	if got := paths[promptPath]; got != "config" {
+		t.Fatalf("expected %s to be config, got=%q", promptPath, got)
+	}
 }
 
 func TestWorkspaceFileConfigAndSkillCRUD(t *testing.T) {
@@ -1313,6 +2506,10 @@ func TestWorkspaceFileConfigAndSkillCRUD(t *testing.T) {
 	docsPath, docsAbsPath := newDocsAITestPath(t, "workspace-crud")
 	if err := os.WriteFile(docsAbsPath, []byte("# before update\n"), 0o644); err != nil {
 		t.Fatalf("seed docs/AI file failed: %v", err)
+	}
+	promptPath, promptAbsPath := newPromptTemplateTestPath(t, "workspace-crud-prompt")
+	if err := os.WriteFile(promptAbsPath, []byte("hello $NAME"), 0o644); err != nil {
+		t.Fatalf("seed prompts file failed: %v", err)
 	}
 
 	envBody := `{"OPENAI_API_KEY":"sk-test"}`
@@ -1370,6 +2567,29 @@ func TestWorkspaceFileConfigAndSkillCRUD(t *testing.T) {
 		t.Fatalf("unexpected docs/AI file content: %s", string(updatedDocsRaw))
 	}
 
+	getPromptW := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(getPromptW, httptest.NewRequest(http.MethodGet, "/workspace/files/"+promptPath, nil))
+	if getPromptW.Code != http.StatusOK {
+		t.Fatalf("get prompts file status=%d body=%s", getPromptW.Code, getPromptW.Body.String())
+	}
+	if !strings.Contains(getPromptW.Body.String(), "hello $NAME") {
+		t.Fatalf("prompts file should return text content: %s", getPromptW.Body.String())
+	}
+
+	putPromptBody := `{"content":"updated $NAME"}`
+	putPromptW := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(putPromptW, httptest.NewRequest(http.MethodPut, "/workspace/files/"+promptPath, strings.NewReader(putPromptBody)))
+	if putPromptW.Code != http.StatusOK {
+		t.Fatalf("put prompts file status=%d body=%s", putPromptW.Code, putPromptW.Body.String())
+	}
+	updatedPromptRaw, err := os.ReadFile(promptAbsPath)
+	if err != nil {
+		t.Fatalf("read updated prompts file failed: %v", err)
+	}
+	if strings.TrimSpace(string(updatedPromptRaw)) != "updated $NAME" {
+		t.Fatalf("unexpected prompts file content: %s", string(updatedPromptRaw))
+	}
+
 	delSkillW := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(delSkillW, httptest.NewRequest(http.MethodDelete, "/workspace/files/skills/hello.json", nil))
 	if delSkillW.Code != http.StatusOK {
@@ -1386,6 +2606,75 @@ func TestWorkspaceFileConfigAndSkillCRUD(t *testing.T) {
 	srv.Handler().ServeHTTP(delDocsW, httptest.NewRequest(http.MethodDelete, "/workspace/files/"+docsPath, nil))
 	if delDocsW.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("delete docs/AI file status=%d body=%s", delDocsW.Code, delDocsW.Body.String())
+	}
+}
+
+func TestWorkspaceUploadFileStoresContentAndReturnsAbsolutePath(t *testing.T) {
+	srv := newTestServer(t)
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	part, err := writer.CreateFormFile("file", "demo notes.txt")
+	if err != nil {
+		t.Fatalf("create multipart file failed: %v", err)
+	}
+	if _, err := part.Write([]byte("hello upload")); err != nil {
+		t.Fatalf("write multipart content failed: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close multipart writer failed: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/workspace/uploads", &body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("upload status=%d body=%s", w.Code, w.Body.String())
+	}
+
+	var out struct {
+		Uploaded bool   `json:"uploaded"`
+		Path     string `json:"path"`
+		Name     string `json:"name"`
+		Size     int64  `json:"size"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode upload response failed: %v body=%s", err, w.Body.String())
+	}
+	if !out.Uploaded {
+		t.Fatalf("expected uploaded=true, got=%+v", out)
+	}
+	if !filepath.IsAbs(out.Path) {
+		t.Fatalf("expected absolute upload path, got=%q", out.Path)
+	}
+	if strings.Contains(out.Name, " ") {
+		t.Fatalf("expected sanitized upload name without spaces, got=%q", out.Name)
+	}
+	if out.Size != int64(len("hello upload")) {
+		t.Fatalf("expected size=%d, got=%d", len("hello upload"), out.Size)
+	}
+	raw, err := os.ReadFile(out.Path)
+	if err != nil {
+		t.Fatalf("read uploaded file failed: %v", err)
+	}
+	if string(raw) != "hello upload" {
+		t.Fatalf("unexpected uploaded content: %s", string(raw))
+	}
+}
+
+func TestWorkspaceUploadFileRequiresMultipartFileField(t *testing.T) {
+	srv := newTestServer(t)
+
+	req := httptest.NewRequest(http.MethodPost, "/workspace/uploads", strings.NewReader(`{"x":1}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got=%d body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"code":"invalid_multipart"`) {
+		t.Fatalf("unexpected error body: %s", w.Body.String())
 	}
 }
 
@@ -1481,6 +2770,1256 @@ func TestProcessAgentOpenAIConfigured(t *testing.T) {
 	}
 	if !strings.Contains(w3.Body.String(), `"provider reply"`) {
 		t.Fatalf("unexpected body: %s", w3.Body.String())
+	}
+}
+
+func TestProcessAgentUsesDefaultPromptModeWhenPromptModeIsOmitted(t *testing.T) {
+	var requestBody map[string]interface{}
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/chat/completions" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		defer r.Body.Close()
+		if err := json.NewDecoder(r.Body).Decode(&requestBody); err != nil {
+			t.Fatalf("decode provider request failed: %v", err)
+		}
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"provider reply"}}]}`))
+	}))
+	defer mock.Close()
+
+	srv := newTestServer(t)
+
+	configProvider := `{"api_key":"sk-test","base_url":"` + mock.URL + `"}`
+	w1 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w1, httptest.NewRequest(http.MethodPut, "/models/openai/config", strings.NewReader(configProvider)))
+	if w1.Code != http.StatusOK {
+		t.Fatalf("config provider status=%d body=%s", w1.Code, w1.Body.String())
+	}
+
+	setActive := `{"provider_id":"openai","model":"gpt-4o-mini"}`
+	w2 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w2, httptest.NewRequest(http.MethodPut, "/models/active", strings.NewReader(setActive)))
+	if w2.Code != http.StatusOK {
+		t.Fatalf("set active status=%d body=%s", w2.Code, w2.Body.String())
+	}
+
+	procReq := `{"input":[{"role":"user","type":"message","content":[{"type":"text","text":"hello"}]}],"session_id":"s-default-prompt-mode","user_id":"u-default-prompt-mode","channel":"console","stream":false}`
+	w3 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w3, httptest.NewRequest(http.MethodPost, "/agent/process", strings.NewReader(procReq)))
+	if w3.Code != http.StatusOK {
+		t.Fatalf("process status=%d body=%s", w3.Code, w3.Body.String())
+	}
+
+	systemMessages := collectSystemMessagesFromModelRequest(t, requestBody)
+	if len(systemMessages) < 2 {
+		t.Fatalf("expected at least 2 system messages, got=%d", len(systemMessages))
+	}
+	if !strings.Contains(systemMessages[0], "## "+aiToolsGuideRelativePath) {
+		t.Fatalf("expected first system message from AGENTS, got=%q", systemMessages[0])
+	}
+	if !strings.Contains(systemMessages[1], "ai-tools.md") {
+		t.Fatalf("expected second system message from ai-tools guide, got=%q", systemMessages[1])
+	}
+}
+
+func TestProcessAgentCompletedEventIncludesModelRequestMeta(t *testing.T) {
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/chat/completions" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"provider reply"}}]}`))
+	}))
+	defer mock.Close()
+
+	srv := newTestServer(t)
+
+	configProvider := `{"api_key":"sk-test","base_url":"` + mock.URL + `"}`
+	w1 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w1, httptest.NewRequest(http.MethodPut, "/models/openai/config", strings.NewReader(configProvider)))
+	if w1.Code != http.StatusOK {
+		t.Fatalf("config provider status=%d body=%s", w1.Code, w1.Body.String())
+	}
+
+	setActive := `{"provider_id":"openai","model":"gpt-4o-mini"}`
+	w2 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w2, httptest.NewRequest(http.MethodPut, "/models/active", strings.NewReader(setActive)))
+	if w2.Code != http.StatusOK {
+		t.Fatalf("set active status=%d body=%s", w2.Code, w2.Body.String())
+	}
+
+	traceText := "trace meta hello"
+	procReq := fmt.Sprintf(`{"input":[{"role":"user","type":"message","content":[{"type":"text","text":%q}]}],"session_id":"s-trace-meta","user_id":"u-trace-meta","channel":"console","stream":false}`, traceText)
+	w3 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w3, httptest.NewRequest(http.MethodPost, "/agent/process", strings.NewReader(procReq)))
+	if w3.Code != http.StatusOK {
+		t.Fatalf("process status=%d body=%s", w3.Code, w3.Body.String())
+	}
+
+	var out domain.AgentProcessResponse
+	if err := json.Unmarshal(w3.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode response failed: %v body=%s", err, w3.Body.String())
+	}
+
+	var completed *domain.AgentEvent
+	for idx := range out.Events {
+		if out.Events[idx].Type == "completed" {
+			completed = &out.Events[idx]
+			break
+		}
+	}
+	if completed == nil {
+		t.Fatalf("completed event missing, events=%+v", out.Events)
+	}
+	if len(completed.Meta) == 0 {
+		t.Fatalf("expected completed meta, events=%+v", out.Events)
+	}
+	modelRequest, ok := completed.Meta["model_request"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected completed.meta.model_request, got=%#v", completed.Meta["model_request"])
+	}
+	if modelRequest["prompt_mode"] != promptModeDefault {
+		t.Fatalf("expected prompt_mode=%q, got=%#v", promptModeDefault, modelRequest["prompt_mode"])
+	}
+	if modelRequest["provider_id"] != "openai" {
+		t.Fatalf("expected provider_id=openai, got=%#v", modelRequest["provider_id"])
+	}
+	if modelRequest["model"] != "gpt-4o-mini" {
+		t.Fatalf("expected model=gpt-4o-mini, got=%#v", modelRequest["model"])
+	}
+
+	rawLayers, ok := modelRequest["system_layers"].([]interface{})
+	if !ok || len(rawLayers) == 0 {
+		t.Fatalf("expected non-empty system_layers, got=%#v", modelRequest["system_layers"])
+	}
+
+	rawInput, ok := modelRequest["input"].([]interface{})
+	if !ok || len(rawInput) == 0 {
+		t.Fatalf("expected non-empty input, got=%#v", modelRequest["input"])
+	}
+	hasSystem := false
+	hasUserTrace := false
+	for _, item := range rawInput {
+		message, _ := item.(map[string]interface{})
+		role, _ := message["role"].(string)
+		switch role {
+		case "system":
+			hasSystem = true
+		case "user":
+			contentList, _ := message["content"].([]interface{})
+			for _, contentItem := range contentList {
+				contentMap, _ := contentItem.(map[string]interface{})
+				text, _ := contentMap["text"].(string)
+				if strings.Contains(text, traceText) {
+					hasUserTrace = true
+					break
+				}
+			}
+		}
+	}
+	if !hasSystem {
+		t.Fatalf("expected system content in model_request.input, got=%#v", rawInput)
+	}
+	if !hasUserTrace {
+		t.Fatalf("expected user content in model_request.input, got=%#v", rawInput)
+	}
+}
+
+func TestProcessAgentStreamCompletedEventIncludesModelRequestMeta(t *testing.T) {
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/chat/completions" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"provider stream reply\"}}]}\n\n")
+		_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer mock.Close()
+
+	srv := newTestServer(t)
+
+	configProvider := `{"api_key":"sk-test","base_url":"` + mock.URL + `"}`
+	w1 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w1, httptest.NewRequest(http.MethodPut, "/models/openai/config", strings.NewReader(configProvider)))
+	if w1.Code != http.StatusOK {
+		t.Fatalf("config provider status=%d body=%s", w1.Code, w1.Body.String())
+	}
+
+	setActive := `{"provider_id":"openai","model":"gpt-4o-mini"}`
+	w2 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w2, httptest.NewRequest(http.MethodPut, "/models/active", strings.NewReader(setActive)))
+	if w2.Code != http.StatusOK {
+		t.Fatalf("set active status=%d body=%s", w2.Code, w2.Body.String())
+	}
+
+	traceText := "stream trace meta hello"
+	procReq := fmt.Sprintf(`{"input":[{"role":"user","type":"message","content":[{"type":"text","text":%q}]}],"session_id":"s-stream-trace","user_id":"u-stream-trace","channel":"console","stream":true}`, traceText)
+	w3 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w3, httptest.NewRequest(http.MethodPost, "/agent/process", strings.NewReader(procReq)))
+	if w3.Code != http.StatusOK {
+		t.Fatalf("process status=%d body=%s", w3.Code, w3.Body.String())
+	}
+	body := w3.Body.String()
+	if !strings.Contains(body, `"type":"completed"`) {
+		t.Fatalf("expected completed event, body=%s", body)
+	}
+	if !strings.Contains(body, `"model_request"`) {
+		t.Fatalf("expected completed event to include model_request meta, body=%s", body)
+	}
+	if !strings.Contains(body, `"prompt_mode":"default"`) {
+		t.Fatalf("expected prompt_mode in model_request meta, body=%s", body)
+	}
+	if !strings.Contains(body, traceText) {
+		t.Fatalf("expected user trace text in model_request meta, body=%s", body)
+	}
+	if !strings.Contains(body, `"system_layers"`) {
+		t.Fatalf("expected system_layers in model_request meta, body=%s", body)
+	}
+}
+
+func TestProcessAgentCodexCompatibleUsesPromptCacheAndPreviousResponseID(t *testing.T) {
+	requests := make([]map[string]interface{}, 0, 2)
+	responseIDs := []string{"resp_1", "resp_2"}
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/responses" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		var req map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request failed: %v", err)
+		}
+		requests = append(requests, req)
+		currentIdx := len(requests) - 1
+		responseID := responseIDs[currentIdx]
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprintf(w, "data: {\"type\":\"response.created\",\"response\":{\"id\":%q}}\n\n", responseID)
+		_, _ = fmt.Fprintf(w, "data: {\"type\":\"response.output_text.delta\",\"delta\":%q}\n\n", "reply "+strconv.Itoa(currentIdx+1))
+		_, _ = fmt.Fprintf(w, "data: {\"type\":\"response.completed\",\"response\":{\"id\":%q}}\n\n", responseID)
+	}))
+	defer mock.Close()
+
+	srv := newTestServer(t)
+
+	configProvider := `{"api_key":"sk-test","base_url":"` + mock.URL + `","store":true}`
+	w1 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w1, httptest.NewRequest(http.MethodPut, "/models/codex-compatible/config", strings.NewReader(configProvider)))
+	if w1.Code != http.StatusOK {
+		t.Fatalf("config provider status=%d body=%s", w1.Code, w1.Body.String())
+	}
+
+	setActive := `{"provider_id":"codex-compatible","model":"gpt-5-codex"}`
+	w2 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w2, httptest.NewRequest(http.MethodPut, "/models/active", strings.NewReader(setActive)))
+	if w2.Code != http.StatusOK {
+		t.Fatalf("set active status=%d body=%s", w2.Code, w2.Body.String())
+	}
+
+	req1 := `{"input":[{"role":"user","type":"message","content":[{"type":"text","text":"first"}]}],"session_id":"s-cache","user_id":"u-cache","channel":"console","stream":false}`
+	w3 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w3, httptest.NewRequest(http.MethodPost, "/agent/process", strings.NewReader(req1)))
+	if w3.Code != http.StatusOK {
+		t.Fatalf("first process status=%d body=%s", w3.Code, w3.Body.String())
+	}
+
+	req2 := `{"input":[{"role":"user","type":"message","content":[{"type":"text","text":"second"}]}],"session_id":"s-cache","user_id":"u-cache","channel":"console","stream":false}`
+	w4 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w4, httptest.NewRequest(http.MethodPost, "/agent/process", strings.NewReader(req2)))
+	if w4.Code != http.StatusOK {
+		t.Fatalf("second process status=%d body=%s", w4.Code, w4.Body.String())
+	}
+
+	if len(requests) != 2 {
+		t.Fatalf("expected 2 provider requests, got=%d", len(requests))
+	}
+
+	first := requests[0]
+	if first["prompt_cache_key"] != "s-cache" {
+		t.Fatalf("first prompt_cache_key=%#v", first["prompt_cache_key"])
+	}
+	if firstStore, _ := first["store"].(bool); !firstStore {
+		t.Fatalf("expected first request store=true, got=%#v", first["store"])
+	}
+	if _, ok := first["previous_response_id"]; ok {
+		t.Fatalf("first request should not carry previous_response_id, got=%#v", first["previous_response_id"])
+	}
+
+	second := requests[1]
+	if second["prompt_cache_key"] != "s-cache" {
+		t.Fatalf("second prompt_cache_key=%#v", second["prompt_cache_key"])
+	}
+	if secondStore, _ := second["store"].(bool); !secondStore {
+		t.Fatalf("expected second request store=true, got=%#v", second["store"])
+	}
+	if second["previous_response_id"] != "resp_1" {
+		t.Fatalf("second previous_response_id=%#v", second["previous_response_id"])
+	}
+
+	var latestAssistant domain.RuntimeMessage
+	srv.store.Read(func(st *repo.State) {
+		for _, chat := range st.Chats {
+			if chat.SessionID != "s-cache" || chat.UserID != "u-cache" || chat.Channel != "console" {
+				continue
+			}
+			history := st.Histories[chat.ID]
+			for idx := len(history) - 1; idx >= 0; idx-- {
+				if history[idx].Role == "assistant" {
+					latestAssistant = history[idx]
+					return
+				}
+			}
+		}
+	})
+	if latestAssistant.ID == "" {
+		t.Fatalf("expected persisted assistant message")
+	}
+	if latestAssistant.Metadata == nil || latestAssistant.Metadata["provider_response_id"] != "resp_2" {
+		t.Fatalf("expected assistant metadata provider_response_id=resp_2, got=%#v", latestAssistant.Metadata)
+	}
+}
+
+func TestProcessAgentCodexReviewCommandAddsReviewPromptLayer(t *testing.T) {
+	requests := make([]map[string]interface{}, 0, 1)
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/chat/completions" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		defer r.Body.Close()
+		body := map[string]interface{}{}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode provider request failed: %v", err)
+		}
+		requests = append(requests, body)
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"review ack"}}]}`))
+	}))
+	defer mock.Close()
+
+	srv := newTestServer(t)
+	configureOpenAIProviderForTest(t, srv, mock.URL)
+
+	procReq := `{"input":[{"role":"user","type":"message","content":[{"type":"text","text":"/review 检查潜在风险"}]}],"session_id":"s-codex-review-layer","user_id":"u-codex-review-layer","channel":"console","stream":false,"biz_params":{"prompt_mode":"codex"}}`
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/agent/process", strings.NewReader(procReq)))
+	if w.Code != http.StatusOK {
+		t.Fatalf("process status=%d body=%s", w.Code, w.Body.String())
+	}
+	if len(requests) == 0 {
+		t.Fatalf("expected at least 1 model request")
+	}
+
+	systemMessages := collectSystemMessagesFromModelRequest(t, requests[0])
+	foundReviewLayer := false
+	for _, message := range systemMessages {
+		if strings.Contains(message, "## "+codexReviewPromptRelativePath) {
+			foundReviewLayer = true
+			break
+		}
+	}
+	if !foundReviewLayer {
+		t.Fatalf("expected codex review prompt layer when /review is requested, got=%#v", systemMessages)
+	}
+}
+
+func TestProcessAgentDefaultModeReviewCommandDoesNotAddReviewPromptLayer(t *testing.T) {
+	requests := make([]map[string]interface{}, 0, 1)
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/chat/completions" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		defer r.Body.Close()
+		body := map[string]interface{}{}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode provider request failed: %v", err)
+		}
+		requests = append(requests, body)
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"default ack"}}]}`))
+	}))
+	defer mock.Close()
+
+	srv := newTestServer(t)
+	configureOpenAIProviderForTest(t, srv, mock.URL)
+
+	procReq := `{"input":[{"role":"user","type":"message","content":[{"type":"text","text":"/review 检查潜在风险"}]}],"session_id":"s-default-review-layer","user_id":"u-default-review-layer","channel":"console","stream":false}`
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/agent/process", strings.NewReader(procReq)))
+	if w.Code != http.StatusOK {
+		t.Fatalf("process status=%d body=%s", w.Code, w.Body.String())
+	}
+	if len(requests) == 0 {
+		t.Fatalf("expected at least 1 model request")
+	}
+
+	systemMessages := collectSystemMessagesFromModelRequest(t, requests[0])
+	for _, message := range systemMessages {
+		if strings.Contains(message, "## "+codexReviewPromptRelativePath) {
+			t.Fatalf("review prompt layer should only be injected in codex mode, got=%#v", systemMessages)
+		}
+	}
+}
+
+func TestProcessAgentCodexReviewCommandWithPromptTemplatesAddsReviewHistoryLayers(t *testing.T) {
+	requests := make([]map[string]interface{}, 0, 1)
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/chat/completions" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		defer r.Body.Close()
+		body := map[string]interface{}{}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode provider request failed: %v", err)
+		}
+		requests = append(requests, body)
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"review ack"}}]}`))
+	}))
+	defer mock.Close()
+
+	t.Setenv("NEXTAI_DISABLE_QQ_INBOUND_SUPERVISOR", "true")
+	srv, err := NewServer(config.Config{
+		Host:                  "127.0.0.1",
+		Port:                  "0",
+		DataDir:               t.TempDir(),
+		EnablePromptTemplates: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { srv.Close() })
+	configureOpenAIProviderForTest(t, srv, mock.URL)
+
+	procReq := `{"input":[{"role":"user","type":"message","content":[{"type":"text","text":"/review 检查潜在风险"}]}],"session_id":"s-codex-review-history-layer","user_id":"u-codex-review-history-layer","channel":"console","stream":false,"biz_params":{"prompt_mode":"codex"}}`
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/agent/process", strings.NewReader(procReq)))
+	if w.Code != http.StatusOK {
+		t.Fatalf("process status=%d body=%s", w.Code, w.Body.String())
+	}
+	if len(requests) == 0 {
+		t.Fatalf("expected at least 1 model request")
+	}
+
+	systemMessages := collectSystemMessagesFromModelRequest(t, requests[0])
+	foundReviewHistoryCompletedLayer := false
+	foundReviewHistoryInterruptedLayer := false
+	for _, message := range systemMessages {
+		if strings.Contains(message, "## "+codexReviewHistoryCompletedPath) {
+			foundReviewHistoryCompletedLayer = true
+			continue
+		}
+		if strings.Contains(message, "## "+codexReviewHistoryInterruptedPath) {
+			foundReviewHistoryInterruptedLayer = true
+		}
+	}
+	if !foundReviewHistoryCompletedLayer || !foundReviewHistoryInterruptedLayer {
+		t.Fatalf("expected codex review history template layers when /review is requested, got=%#v", systemMessages)
+	}
+}
+
+func TestProcessAgentCodexPlanCommandAddsPlanCollaborationLayer(t *testing.T) {
+	requests := make([]map[string]interface{}, 0, 1)
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/chat/completions" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		defer r.Body.Close()
+		body := map[string]interface{}{}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode provider request failed: %v", err)
+		}
+		requests = append(requests, body)
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"plan ack"}}]}`))
+	}))
+	defer mock.Close()
+
+	t.Setenv("NEXTAI_DISABLE_QQ_INBOUND_SUPERVISOR", "true")
+	srv, err := NewServer(config.Config{
+		Host:                  "127.0.0.1",
+		Port:                  "0",
+		DataDir:               t.TempDir(),
+		EnablePromptTemplates: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { srv.Close() })
+	configureOpenAIProviderForTest(t, srv, mock.URL)
+
+	procReq := `{"input":[{"role":"user","type":"message","content":[{"type":"text","text":"/plan 先拆计划"}]}],"session_id":"s-codex-plan-layer","user_id":"u-codex-plan-layer","channel":"console","stream":false,"biz_params":{"prompt_mode":"codex"}}`
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/agent/process", strings.NewReader(procReq)))
+	if w.Code != http.StatusOK {
+		t.Fatalf("process status=%d body=%s", w.Code, w.Body.String())
+	}
+	if len(requests) == 0 {
+		t.Fatalf("expected at least 1 model request")
+	}
+
+	systemMessages := collectSystemMessagesFromModelRequest(t, requests[0])
+	foundPlanLayer := false
+	for _, message := range systemMessages {
+		if strings.Contains(message, "## "+codexCollabPlanRelativePath) {
+			foundPlanLayer = true
+			continue
+		}
+		if strings.Contains(message, "## "+codexCollabDefaultRelativePath) {
+			t.Fatalf("expected /plan to replace default collaboration layer, got=%#v", systemMessages)
+		}
+	}
+	if !foundPlanLayer {
+		t.Fatalf("expected codex plan collaboration layer when /plan is requested, got=%#v", systemMessages)
+	}
+}
+
+func TestProcessAgentDefaultModePlanCommandDoesNotAddPlanCollaborationLayer(t *testing.T) {
+	requests := make([]map[string]interface{}, 0, 1)
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/chat/completions" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		defer r.Body.Close()
+		body := map[string]interface{}{}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode provider request failed: %v", err)
+		}
+		requests = append(requests, body)
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"default ack"}}]}`))
+	}))
+	defer mock.Close()
+
+	t.Setenv("NEXTAI_DISABLE_QQ_INBOUND_SUPERVISOR", "true")
+	srv, err := NewServer(config.Config{
+		Host:                  "127.0.0.1",
+		Port:                  "0",
+		DataDir:               t.TempDir(),
+		EnablePromptTemplates: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { srv.Close() })
+	configureOpenAIProviderForTest(t, srv, mock.URL)
+
+	procReq := `{"input":[{"role":"user","type":"message","content":[{"type":"text","text":"/plan 先拆计划"}]}],"session_id":"s-default-plan-layer","user_id":"u-default-plan-layer","channel":"console","stream":false}`
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/agent/process", strings.NewReader(procReq)))
+	if w.Code != http.StatusOK {
+		t.Fatalf("process status=%d body=%s", w.Code, w.Body.String())
+	}
+	if len(requests) == 0 {
+		t.Fatalf("expected at least 1 model request")
+	}
+
+	systemMessages := collectSystemMessagesFromModelRequest(t, requests[0])
+	for _, message := range systemMessages {
+		if strings.Contains(message, "## "+codexCollabPlanRelativePath) {
+			t.Fatalf("plan collaboration layer should only be injected in codex mode, got=%#v", systemMessages)
+		}
+	}
+}
+
+func TestProcessAgentCodexExecuteCommandAddsExecuteCollaborationLayer(t *testing.T) {
+	requests := make([]map[string]interface{}, 0, 1)
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/chat/completions" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		defer r.Body.Close()
+		body := map[string]interface{}{}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode provider request failed: %v", err)
+		}
+		requests = append(requests, body)
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"execute ack"}}]}`))
+	}))
+	defer mock.Close()
+
+	t.Setenv("NEXTAI_DISABLE_QQ_INBOUND_SUPERVISOR", "true")
+	srv, err := NewServer(config.Config{
+		Host:                  "127.0.0.1",
+		Port:                  "0",
+		DataDir:               t.TempDir(),
+		EnablePromptTemplates: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { srv.Close() })
+	configureOpenAIProviderForTest(t, srv, mock.URL)
+
+	procReq := `{"input":[{"role":"user","type":"message","content":[{"type":"text","text":"/execute 直接开干"}]}],"session_id":"s-codex-execute-layer","user_id":"u-codex-execute-layer","channel":"console","stream":false,"biz_params":{"prompt_mode":"codex"}}`
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/agent/process", strings.NewReader(procReq)))
+	if w.Code != http.StatusOK {
+		t.Fatalf("process status=%d body=%s", w.Code, w.Body.String())
+	}
+	if len(requests) == 0 {
+		t.Fatalf("expected at least 1 model request")
+	}
+
+	systemMessages := collectSystemMessagesFromModelRequest(t, requests[0])
+	foundExecuteLayer := false
+	for _, message := range systemMessages {
+		if strings.Contains(message, "## "+codexCollabExecuteRelativePath) {
+			foundExecuteLayer = true
+			continue
+		}
+		if strings.Contains(message, "## "+codexCollabDefaultRelativePath) {
+			t.Fatalf("expected /execute to replace default collaboration layer, got=%#v", systemMessages)
+		}
+	}
+	if !foundExecuteLayer {
+		t.Fatalf("expected codex execute collaboration layer when /execute is requested, got=%#v", systemMessages)
+	}
+}
+
+func TestProcessAgentCodexPairProgrammingCommandAddsPairProgrammingCollaborationLayer(t *testing.T) {
+	requests := make([]map[string]interface{}, 0, 1)
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/chat/completions" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		defer r.Body.Close()
+		body := map[string]interface{}{}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode provider request failed: %v", err)
+		}
+		requests = append(requests, body)
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"pair ack"}}]}`))
+	}))
+	defer mock.Close()
+
+	t.Setenv("NEXTAI_DISABLE_QQ_INBOUND_SUPERVISOR", "true")
+	srv, err := NewServer(config.Config{
+		Host:                  "127.0.0.1",
+		Port:                  "0",
+		DataDir:               t.TempDir(),
+		EnablePromptTemplates: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { srv.Close() })
+	configureOpenAIProviderForTest(t, srv, mock.URL)
+
+	procReq := `{"input":[{"role":"user","type":"message","content":[{"type":"text","text":"/pair_programming 一起敲"}]}],"session_id":"s-codex-pair-layer","user_id":"u-codex-pair-layer","channel":"console","stream":false,"biz_params":{"prompt_mode":"codex"}}`
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/agent/process", strings.NewReader(procReq)))
+	if w.Code != http.StatusOK {
+		t.Fatalf("process status=%d body=%s", w.Code, w.Body.String())
+	}
+	if len(requests) == 0 {
+		t.Fatalf("expected at least 1 model request")
+	}
+
+	systemMessages := collectSystemMessagesFromModelRequest(t, requests[0])
+	foundPairLayer := false
+	for _, message := range systemMessages {
+		if strings.Contains(message, "## "+codexCollabPairProgrammingPath) {
+			foundPairLayer = true
+			continue
+		}
+		if strings.Contains(message, "## "+codexCollabDefaultRelativePath) {
+			t.Fatalf("expected /pair_programming to replace default collaboration layer, got=%#v", systemMessages)
+		}
+	}
+	if !foundPairLayer {
+		t.Fatalf("expected codex pair_programming collaboration layer when /pair_programming is requested, got=%#v", systemMessages)
+	}
+}
+
+func TestProcessAgentDefaultModeExecuteAndPairCommandsDoNotAddCodexCollaborationLayers(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		command string
+	}{
+		{name: "execute", command: "/execute 直接开干"},
+		{name: "pair_programming", command: "/pair_programming 一起敲"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			requests := make([]map[string]interface{}, 0, 1)
+			mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodPost || r.URL.Path != "/chat/completions" {
+					w.WriteHeader(http.StatusNotFound)
+					return
+				}
+				defer r.Body.Close()
+				body := map[string]interface{}{}
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					t.Fatalf("decode provider request failed: %v", err)
+				}
+				requests = append(requests, body)
+				_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"default ack"}}]}`))
+			}))
+			defer mock.Close()
+
+			t.Setenv("NEXTAI_DISABLE_QQ_INBOUND_SUPERVISOR", "true")
+			srv, err := NewServer(config.Config{
+				Host:                  "127.0.0.1",
+				Port:                  "0",
+				DataDir:               t.TempDir(),
+				EnablePromptTemplates: true,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { srv.Close() })
+			configureOpenAIProviderForTest(t, srv, mock.URL)
+
+			procReq := fmt.Sprintf(`{"input":[{"role":"user","type":"message","content":[{"type":"text","text":%q}]}],"session_id":"s-default-collab-layer","user_id":"u-default-collab-layer","channel":"console","stream":false}`, tc.command)
+			w := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/agent/process", strings.NewReader(procReq)))
+			if w.Code != http.StatusOK {
+				t.Fatalf("process status=%d body=%s", w.Code, w.Body.String())
+			}
+			if len(requests) == 0 {
+				t.Fatalf("expected at least 1 model request")
+			}
+
+			systemMessages := collectSystemMessagesFromModelRequest(t, requests[0])
+			for _, message := range systemMessages {
+				if strings.Contains(message, "## "+codexCollabExecuteRelativePath) ||
+					strings.Contains(message, "## "+codexCollabPairProgrammingPath) {
+					t.Fatalf("codex collaboration layer should only be injected in codex mode, got=%#v", systemMessages)
+				}
+			}
+		})
+	}
+}
+
+func TestProcessAgentCodexCompactCommandAddsCompactTemplateLayers(t *testing.T) {
+	requests := make([]map[string]interface{}, 0, 1)
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/chat/completions" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		defer r.Body.Close()
+		body := map[string]interface{}{}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode provider request failed: %v", err)
+		}
+		requests = append(requests, body)
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"compact ack"}}]}`))
+	}))
+	defer mock.Close()
+
+	t.Setenv("NEXTAI_DISABLE_QQ_INBOUND_SUPERVISOR", "true")
+	srv, err := NewServer(config.Config{
+		Host:                  "127.0.0.1",
+		Port:                  "0",
+		DataDir:               t.TempDir(),
+		EnablePromptTemplates: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { srv.Close() })
+	configureOpenAIProviderForTest(t, srv, mock.URL)
+
+	procReq := `{"input":[{"role":"user","type":"message","content":[{"type":"text","text":"/compact 生成上下文检查点"}]}],"session_id":"s-codex-compact-layer","user_id":"u-codex-compact-layer","channel":"console","stream":false,"biz_params":{"prompt_mode":"codex"}}`
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/agent/process", strings.NewReader(procReq)))
+	if w.Code != http.StatusOK {
+		t.Fatalf("process status=%d body=%s", w.Code, w.Body.String())
+	}
+	if len(requests) == 0 {
+		t.Fatalf("expected at least 1 model request")
+	}
+
+	systemMessages := collectSystemMessagesFromModelRequest(t, requests[0])
+	foundCompactPromptLayer := false
+	foundCompactSummaryPrefixLayer := false
+	for _, message := range systemMessages {
+		if strings.Contains(message, "## "+codexCompactPromptRelativePath) {
+			foundCompactPromptLayer = true
+			continue
+		}
+		if strings.Contains(message, "## "+codexCompactSummaryPrefixPath) {
+			foundCompactSummaryPrefixLayer = true
+		}
+	}
+	if !foundCompactPromptLayer || !foundCompactSummaryPrefixLayer {
+		t.Fatalf("expected codex compact template layers when /compact is requested, got=%#v", systemMessages)
+	}
+}
+
+func TestProcessAgentCodexMemoryCommandAddsMemoryTemplateLayers(t *testing.T) {
+	requests := make([]map[string]interface{}, 0, 1)
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/chat/completions" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		defer r.Body.Close()
+		body := map[string]interface{}{}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode provider request failed: %v", err)
+		}
+		requests = append(requests, body)
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"memory ack"}}]}`))
+	}))
+	defer mock.Close()
+
+	t.Setenv("NEXTAI_DISABLE_QQ_INBOUND_SUPERVISOR", "true")
+	srv, err := NewServer(config.Config{
+		Host:                  "127.0.0.1",
+		Port:                  "0",
+		DataDir:               t.TempDir(),
+		EnablePromptTemplates: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { srv.Close() })
+	configureOpenAIProviderForTest(t, srv, mock.URL)
+
+	procReq := `{"input":[{"role":"user","type":"message","content":[{"type":"text","text":"/memory 生成记忆模板"}]}],"session_id":"s-codex-memory-layer","user_id":"u-codex-memory-layer","channel":"console","stream":false,"biz_params":{"prompt_mode":"codex"}}`
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/agent/process", strings.NewReader(procReq)))
+	if w.Code != http.StatusOK {
+		t.Fatalf("process status=%d body=%s", w.Code, w.Body.String())
+	}
+	if len(requests) == 0 {
+		t.Fatalf("expected at least 1 model request")
+	}
+
+	systemMessages := collectSystemMessagesFromModelRequest(t, requests[0])
+	requiredSources := []string{
+		codexMemoriesReadPathPath,
+		codexMemoriesStageOneSystemPath,
+		codexMemoriesStageOneInputPath,
+		codexMemoriesConsolidationPath,
+	}
+	for _, source := range requiredSources {
+		found := false
+		for _, message := range systemMessages {
+			if strings.Contains(message, "## "+source) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("expected memory template layer source=%q when /memory is requested, got=%#v", source, systemMessages)
+		}
+	}
+
+	for _, message := range systemMessages {
+		if strings.Contains(message, "<rollout_path>") || strings.Contains(message, "<rollout_cwd>") || strings.Contains(message, "<rollout_contents>") {
+			t.Fatalf("expected rendered memory template vars without placeholder sentinels, got=%#v", systemMessages)
+		}
+	}
+}
+
+func TestProcessAgentCodexMemoryCommandTriggersPhasePipelineArtifacts(t *testing.T) {
+	var (
+		mainCalls     atomic.Int32
+		stageOneCalls atomic.Int32
+		stageTwoCalls atomic.Int32
+	)
+
+	extractLastUserMessage := func(requestBody map[string]interface{}) string {
+		rawMessages, ok := requestBody["messages"].([]interface{})
+		if !ok {
+			return ""
+		}
+		last := ""
+		for _, item := range rawMessages {
+			message, _ := item.(map[string]interface{})
+			role, _ := message["role"].(string)
+			content, _ := message["content"].(string)
+			if role == "user" {
+				last = strings.TrimSpace(content)
+			}
+		}
+		return last
+	}
+
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/chat/completions" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		defer r.Body.Close()
+		body := map[string]interface{}{}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode provider request failed: %v", err)
+		}
+
+		lastUser := extractLastUserMessage(body)
+		reply := "memory ack"
+		switch {
+		case strings.Contains(lastUser, "Run memory phase 2 consolidation in offline mode"):
+			stageTwoCalls.Add(1)
+			reply = `{"memory_md":"# MEMORY\n\n## Task Group: gateway-memory\n\n### Task 1: memory-pipeline-smoke\n- Captured memory pipeline from /memory command.","memory_summary_md":"# Memory Summary\n\n## What's in Memory\n- gateway-memory pipeline smoke"}`
+		case strings.Contains(lastUser, "Analyze this rollout and produce JSON"):
+			stageOneCalls.Add(1)
+			reply = `{"rollout_summary":"### Task 1: memory pipeline smoke","rollout_slug":"memory-pipeline-smoke","raw_memory":"- Captured memory pipeline from /memory command."}`
+		case strings.Contains(lastUser, "/memory"):
+			mainCalls.Add(1)
+		}
+
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"choices": []map[string]interface{}{
+				{
+					"message": map[string]interface{}{
+						"content": reply,
+					},
+				},
+			},
+		})
+	}))
+	defer mock.Close()
+
+	memoryRoot := filepath.Join(t.TempDir(), "memories")
+	t.Setenv(codexMemoryRootOverrideEnv, memoryRoot)
+	t.Setenv("NEXTAI_DISABLE_QQ_INBOUND_SUPERVISOR", "true")
+	srv, err := NewServer(config.Config{
+		Host:                  "127.0.0.1",
+		Port:                  "0",
+		DataDir:               t.TempDir(),
+		EnablePromptTemplates: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { srv.Close() })
+	configureOpenAIProviderForTest(t, srv, mock.URL)
+
+	procReq := `{"input":[{"role":"user","type":"message","content":[{"type":"text","text":"/memory 执行记忆流水线"}]}],"session_id":"s-codex-memory-pipeline","user_id":"u-codex-memory-pipeline","channel":"console","stream":false,"biz_params":{"prompt_mode":"codex"}}`
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/agent/process", strings.NewReader(procReq)))
+	if w.Code != http.StatusOK {
+		t.Fatalf("process status=%d body=%s", w.Code, w.Body.String())
+	}
+
+	rawMemoriesPath := filepath.Join(memoryRoot, codexMemoryRawMemoriesFileName)
+	memoryRegistryPath := filepath.Join(memoryRoot, codexMemoryRegistryFileName)
+	memorySummaryPath := filepath.Join(memoryRoot, codexMemorySummaryFileName)
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(rawMemoriesPath); err != nil {
+			time.Sleep(40 * time.Millisecond)
+			continue
+		}
+		if _, err := os.Stat(memoryRegistryPath); err != nil {
+			time.Sleep(40 * time.Millisecond)
+			continue
+		}
+		if _, err := os.Stat(memorySummaryPath); err != nil {
+			time.Sleep(40 * time.Millisecond)
+			continue
+		}
+		break
+	}
+
+	rawMemories, err := os.ReadFile(rawMemoriesPath)
+	if err != nil {
+		t.Fatalf("read raw memories failed: %v", err)
+	}
+	registryContent, err := os.ReadFile(memoryRegistryPath)
+	if err != nil {
+		t.Fatalf("read MEMORY.md failed: %v", err)
+	}
+	summaryContent, err := os.ReadFile(memorySummaryPath)
+	if err != nil {
+		t.Fatalf("read memory_summary.md failed: %v", err)
+	}
+
+	if !strings.Contains(string(rawMemories), "Captured memory pipeline from /memory command.") {
+		t.Fatalf("raw_memories.md missing phase-1 content: %s", string(rawMemories))
+	}
+	if !strings.Contains(string(rawMemories), "rollout_summary_file: ") {
+		t.Fatalf("raw_memories.md missing rollout summary file index: %s", string(rawMemories))
+	}
+	if !strings.Contains(string(registryContent), "Task Group: gateway-memory") {
+		t.Fatalf("MEMORY.md missing phase-2 output: %s", string(registryContent))
+	}
+	if !strings.Contains(string(summaryContent), "What's in Memory") {
+		t.Fatalf("memory_summary.md missing phase-2 output: %s", string(summaryContent))
+	}
+
+	if mainCalls.Load() < 1 {
+		t.Fatalf("expected at least 1 main /memory model call")
+	}
+	if stageOneCalls.Load() < 1 {
+		t.Fatalf("expected memory phase-1 model call")
+	}
+	if stageTwoCalls.Load() < 1 {
+		t.Fatalf("expected memory phase-2 model call")
+	}
+}
+
+func TestProcessAgentCodexPromptModePersistsAndIsReused(t *testing.T) {
+	requests := make([]map[string]interface{}, 0, 2)
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/chat/completions" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		defer r.Body.Close()
+		body := map[string]interface{}{}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode provider request failed: %v", err)
+		}
+		requests = append(requests, body)
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"provider reply"}}]}`))
+	}))
+	defer mock.Close()
+
+	srv := newTestServer(t)
+
+	configProvider := `{"api_key":"sk-test","base_url":"` + mock.URL + `"}`
+	w1 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w1, httptest.NewRequest(http.MethodPut, "/models/openai/config", strings.NewReader(configProvider)))
+	if w1.Code != http.StatusOK {
+		t.Fatalf("config provider status=%d body=%s", w1.Code, w1.Body.String())
+	}
+	setActive := `{"provider_id":"openai","model":"gpt-4o-mini"}`
+	w2 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w2, httptest.NewRequest(http.MethodPut, "/models/active", strings.NewReader(setActive)))
+	if w2.Code != http.StatusOK {
+		t.Fatalf("set active status=%d body=%s", w2.Code, w2.Body.String())
+	}
+
+	firstReq := `{"input":[{"role":"user","type":"message","content":[{"type":"text","text":"hello codex"}]}],"session_id":"s-codex-prompt-mode","user_id":"u-codex-prompt-mode","channel":"console","stream":false,"biz_params":{"prompt_mode":"codex"}}`
+	firstW := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(firstW, httptest.NewRequest(http.MethodPost, "/agent/process", strings.NewReader(firstReq)))
+	if firstW.Code != http.StatusOK {
+		t.Fatalf("first process status=%d body=%s", firstW.Code, firstW.Body.String())
+	}
+
+	secondReq := `{"input":[{"role":"user","type":"message","content":[{"type":"text","text":"hello again"}]}],"session_id":"s-codex-prompt-mode","user_id":"u-codex-prompt-mode","channel":"console","stream":false}`
+	secondW := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(secondW, httptest.NewRequest(http.MethodPost, "/agent/process", strings.NewReader(secondReq)))
+	if secondW.Code != http.StatusOK {
+		t.Fatalf("second process status=%d body=%s", secondW.Code, secondW.Body.String())
+	}
+
+	if len(requests) < 2 {
+		t.Fatalf("expected at least 2 model requests, got=%d", len(requests))
+	}
+	for idx, reqBody := range requests[:2] {
+		systemMessages := collectSystemMessagesFromModelRequest(t, reqBody)
+		if len(systemMessages) != 1 {
+			t.Fatalf("request %d expected exactly 1 system message in codex mode, got=%d", idx+1, len(systemMessages))
+		}
+		if !strings.Contains(systemMessages[0], "## "+codexBasePromptRelativePath) {
+			t.Fatalf("request %d should use codex prompt layer, got=%q", idx+1, systemMessages[0])
+		}
+		if strings.Contains(systemMessages[0], aiToolsGuideRelativePath) || strings.Contains(systemMessages[0], "ai-tools.md") {
+			t.Fatalf("request %d should not include default prompt layers in codex mode, got=%q", idx+1, systemMessages[0])
+		}
+	}
+
+	chatsW := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(chatsW, httptest.NewRequest(http.MethodGet, "/chats?user_id=u-codex-prompt-mode&channel=console", nil))
+	if chatsW.Code != http.StatusOK {
+		t.Fatalf("list chats status=%d body=%s", chatsW.Code, chatsW.Body.String())
+	}
+	var chats []domain.ChatSpec
+	if err := json.Unmarshal(chatsW.Body.Bytes(), &chats); err != nil {
+		t.Fatalf("decode chats failed: %v body=%s", err, chatsW.Body.String())
+	}
+	if len(chats) == 0 {
+		t.Fatalf("expected chat record for codex prompt mode")
+	}
+	mode, _ := chats[0].Meta[chatMetaPromptModeKey].(string)
+	if mode != promptModeCodex {
+		t.Fatalf("expected chat meta prompt_mode=%q, got=%v", promptModeCodex, chats[0].Meta[chatMetaPromptModeKey])
+	}
+}
+
+func TestProcessAgentClaudePromptModePersistsAndIsReused(t *testing.T) {
+	requests := make([]map[string]interface{}, 0, 2)
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/chat/completions" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		defer r.Body.Close()
+		body := map[string]interface{}{}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode provider request failed: %v", err)
+		}
+		requests = append(requests, body)
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"provider reply"}}]}`))
+	}))
+	defer mock.Close()
+
+	srv := newTestServer(t)
+
+	configProvider := `{"api_key":"sk-test","base_url":"` + mock.URL + `"}`
+	w1 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w1, httptest.NewRequest(http.MethodPut, "/models/openai/config", strings.NewReader(configProvider)))
+	if w1.Code != http.StatusOK {
+		t.Fatalf("config provider status=%d body=%s", w1.Code, w1.Body.String())
+	}
+	setActive := `{"provider_id":"openai","model":"gpt-4o-mini"}`
+	w2 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w2, httptest.NewRequest(http.MethodPut, "/models/active", strings.NewReader(setActive)))
+	if w2.Code != http.StatusOK {
+		t.Fatalf("set active status=%d body=%s", w2.Code, w2.Body.String())
+	}
+
+	firstReq := `{"input":[{"role":"user","type":"message","content":[{"type":"text","text":"hello claude"}]}],"session_id":"s-claude-prompt-mode","user_id":"u-claude-prompt-mode","channel":"console","stream":false,"biz_params":{"prompt_mode":"claude"}}`
+	firstW := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(firstW, httptest.NewRequest(http.MethodPost, "/agent/process", strings.NewReader(firstReq)))
+	if firstW.Code != http.StatusOK {
+		t.Fatalf("first process status=%d body=%s", firstW.Code, firstW.Body.String())
+	}
+
+	secondReq := `{"input":[{"role":"user","type":"message","content":[{"type":"text","text":"hello again"}]}],"session_id":"s-claude-prompt-mode","user_id":"u-claude-prompt-mode","channel":"console","stream":false}`
+	secondW := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(secondW, httptest.NewRequest(http.MethodPost, "/agent/process", strings.NewReader(secondReq)))
+	if secondW.Code != http.StatusOK {
+		t.Fatalf("second process status=%d body=%s", secondW.Code, secondW.Body.String())
+	}
+
+	if len(requests) < 2 {
+		t.Fatalf("expected at least 2 model requests, got=%d", len(requests))
+	}
+	for idx, reqBody := range requests[:2] {
+		systemMessages := collectSystemMessagesFromModelRequest(t, reqBody)
+		if len(systemMessages) < 1 {
+			t.Fatalf("request %d expected at least 1 system message in claude mode, got=%d", idx+1, len(systemMessages))
+		}
+		if !strings.Contains(systemMessages[0], "## "+claudeBasePromptRelativePath) {
+			t.Fatalf("request %d should start with claude prompt layer, got=%q", idx+1, systemMessages[0])
+		}
+		if strings.Contains(systemMessages[0], codexBasePromptRelativePath) {
+			t.Fatalf("request %d should not include codex base layer in first message, got=%q", idx+1, systemMessages[0])
+		}
+	}
+
+	chatsW := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(chatsW, httptest.NewRequest(http.MethodGet, "/chats?user_id=u-claude-prompt-mode&channel=console", nil))
+	if chatsW.Code != http.StatusOK {
+		t.Fatalf("list chats status=%d body=%s", chatsW.Code, chatsW.Body.String())
+	}
+	var chats []domain.ChatSpec
+	if err := json.Unmarshal(chatsW.Body.Bytes(), &chats); err != nil {
+		t.Fatalf("decode chats failed: %v body=%s", err, chatsW.Body.String())
+	}
+	if len(chats) == 0 {
+		t.Fatalf("expected chat record for claude prompt mode")
+	}
+	mode, _ := chats[0].Meta[chatMetaPromptModeKey].(string)
+	if mode != promptModeClaude {
+		t.Fatalf("expected chat meta prompt_mode=%q, got=%v", promptModeClaude, chats[0].Meta[chatMetaPromptModeKey])
+	}
+}
+
+func TestProcessAgentRejectsInvalidPromptMode(t *testing.T) {
+	srv := newTestServer(t)
+
+	procReq := `{"input":[{"role":"user","type":"message","content":[{"type":"text","text":"hello"}]}],"session_id":"s-invalid-prompt-mode","user_id":"u-invalid-prompt-mode","channel":"console","stream":false,"biz_params":{"prompt_mode":"abc"}}`
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/agent/process", strings.NewReader(procReq)))
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got=%d body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"code":"invalid_request"`) {
+		t.Fatalf("unexpected body: %s", w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "invalid prompt_mode") {
+		t.Fatalf("unexpected body: %s", w.Body.String())
+	}
+}
+
+func TestProcessAgentReturnsCodexPromptUnavailableWhenPromptMissing(t *testing.T) {
+	repoRoot, err := findRepoRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	codexPath := filepath.Join(repoRoot, filepath.FromSlash(codexBasePromptRelativePath))
+	backupPath := fmt.Sprintf("%s.bak-%d", codexPath, time.Now().UnixNano())
+	if err := os.Rename(codexPath, backupPath); err != nil {
+		t.Fatalf("rename codex prompt failed: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = os.Rename(backupPath, codexPath)
+	})
+
+	srv := newTestServer(t)
+	procReq := `{"input":[{"role":"user","type":"message","content":[{"type":"text","text":"hello"}]}],"session_id":"s-codex-missing","user_id":"u-codex-missing","channel":"console","stream":false,"biz_params":{"prompt_mode":"codex"}}`
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/agent/process", strings.NewReader(procReq)))
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got=%d body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"code":"codex_prompt_unavailable"`) {
+		t.Fatalf("unexpected body: %s", w.Body.String())
+	}
+}
+
+func TestProcessAgentReturnsCodexPromptUnavailableWhenPromptMissingInV2(t *testing.T) {
+	repoRoot, err := findRepoRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	codexPath := filepath.Join(repoRoot, filepath.FromSlash(codexBasePromptRelativePath))
+	backupPath := fmt.Sprintf("%s.bak-%d", codexPath, time.Now().UnixNano())
+	if err := os.Rename(codexPath, backupPath); err != nil {
+		t.Fatalf("rename codex prompt failed: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = os.Rename(backupPath, codexPath)
+	})
+
+	t.Setenv("NEXTAI_DISABLE_QQ_INBOUND_SUPERVISOR", "true")
+	srv, err := NewServer(config.Config{
+		Host:              "127.0.0.1",
+		Port:              "0",
+		DataDir:           t.TempDir(),
+		EnableCodexModeV2: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { srv.Close() })
+
+	procReq := `{"input":[{"role":"user","type":"message","content":[{"type":"text","text":"hello"}]}],"session_id":"s-codex-missing-v2","user_id":"u-codex-missing-v2","channel":"console","stream":false,"biz_params":{"prompt_mode":"codex"}}`
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/agent/process", strings.NewReader(procReq)))
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got=%d body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"code":"codex_prompt_unavailable"`) {
+		t.Fatalf("unexpected body: %s", w.Body.String())
+	}
+}
+
+func TestProcessAgentReturnsClaudePromptUnavailableWhenPromptMissing(t *testing.T) {
+	repoRoot, err := findRepoRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	claudePath := filepath.Join(repoRoot, filepath.FromSlash(claudeBasePromptRelativePath))
+	backupPath := fmt.Sprintf("%s.bak-%d", claudePath, time.Now().UnixNano())
+	if err := os.Rename(claudePath, backupPath); err != nil {
+		t.Fatalf("rename claude prompt failed: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = os.Rename(backupPath, claudePath)
+	})
+
+	srv := newTestServer(t)
+	procReq := `{"input":[{"role":"user","type":"message","content":[{"type":"text","text":"hello"}]}],"session_id":"s-claude-missing","user_id":"u-claude-missing","channel":"console","stream":false,"biz_params":{"prompt_mode":"claude"}}`
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/agent/process", strings.NewReader(procReq)))
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got=%d body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"code":"claude_prompt_unavailable"`) {
+		t.Fatalf("unexpected body: %s", w.Body.String())
 	}
 }
 
@@ -1780,23 +4319,26 @@ func TestProcessAgentRejectsSingleViewObjectInput(t *testing.T) {
 	}
 }
 
-func TestProcessAgentRejectsSingleShellObjectInput(t *testing.T) {
+func TestProcessAgentAcceptsSingleShellObjectInputForBackwardCompatibility(t *testing.T) {
 	srv := newTestServer(t)
 	procReq := `{
-		"input":[{"role":"user","type":"message","content":[{"type":"text","text":"shell object invalid"}]}],
-		"session_id":"s-shell-object-invalid",
-		"user_id":"u-shell-object-invalid",
+		"input":[{"role":"user","type":"message","content":[{"type":"text","text":"shell object compat"}]}],
+		"session_id":"s-shell-object-compat",
+		"user_id":"u-shell-object-compat",
 		"channel":"console",
 		"stream":false,
 		"shell":{"input":{"command":"printf hi"}}
 	}`
 	w := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/agent/process", strings.NewReader(procReq)))
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("expected 400, got=%d body=%s", w.Code, w.Body.String())
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got=%d body=%s", w.Code, w.Body.String())
 	}
-	if !strings.Contains(w.Body.String(), `"code":"invalid_tool_input"`) {
+	if !strings.Contains(w.Body.String(), `"reply":"$ printf hi`) {
 		t.Fatalf("unexpected body: %s", w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"type":"tool_call"`) || !strings.Contains(w.Body.String(), `"type":"tool_result"`) {
+		t.Fatalf("expected tool_call/tool_result events, body=%s", w.Body.String())
 	}
 }
 
@@ -2302,6 +4844,584 @@ func TestProcessAgentStillSupportsLegacyBizParamsToolFormat(t *testing.T) {
 	}
 }
 
+func TestProcessAgentRejectsLegacyBizParamsToolInputObjectWithoutItems(t *testing.T) {
+	srv := newTestServer(t)
+	_, absPath := newToolTestPath(t, "legacy-view-input-object")
+	if err := os.WriteFile(absPath, []byte("line-1\nline-2\n"), 0o644); err != nil {
+		t.Fatalf("seed tool test file failed: %v", err)
+	}
+
+	procReq := fmt.Sprintf(`{
+		"input":[{"role":"user","type":"message","content":[{"type":"text","text":"legacy view input object"}]}],
+		"session_id":"s-legacy-view-input-object",
+		"user_id":"u-legacy-view-input-object",
+		"channel":"console",
+		"stream":false,
+		"biz_params":{"tool":{"name":"view","input":{"path":%q,"start":1,"end":1}}}
+	}`, absPath)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/agent/process", strings.NewReader(procReq)))
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got=%d body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"code":"invalid_tool_input"`) {
+		t.Fatalf("unexpected body: %s", w.Body.String())
+	}
+}
+
+func TestProcessAgentSupportsLegacyProviderViewArgumentsObjectInCodexMode(t *testing.T) {
+	_, absPath := newToolTestPath(t, "legacy-provider-view-object")
+	if err := os.WriteFile(absPath, []byte("line-1\nline-2\n"), 0o644); err != nil {
+		t.Fatalf("seed tool test file failed: %v", err)
+	}
+	toolArgs, err := json.Marshal(map[string]interface{}{
+		"path":  absPath,
+		"start": 1,
+		"end":   1,
+	})
+	if err != nil {
+		t.Fatalf("marshal tool args failed: %v", err)
+	}
+
+	var calls int
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if r.Method != http.MethodPost || r.URL.Path != "/chat/completions" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		if calls == 1 {
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"choices": []map[string]interface{}{
+					{
+						"message": map[string]interface{}{
+							"content": "",
+							"tool_calls": []map[string]interface{}{
+								{
+									"id":   "call_view_legacy",
+									"type": "function",
+									"function": map[string]interface{}{
+										"name":      "view",
+										"arguments": string(toolArgs),
+									},
+								},
+							},
+						},
+					},
+				},
+			})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"choices": []map[string]interface{}{
+				{
+					"message": map[string]interface{}{
+						"content": "legacy provider args recovered",
+					},
+				},
+			},
+		})
+	}))
+	defer mock.Close()
+
+	srv := newTestServer(t)
+	configProvider := `{"api_key":"sk-test","base_url":"` + mock.URL + `"}`
+	w1 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w1, httptest.NewRequest(http.MethodPut, "/models/openai/config", strings.NewReader(configProvider)))
+	if w1.Code != http.StatusOK {
+		t.Fatalf("config provider status=%d body=%s", w1.Code, w1.Body.String())
+	}
+	setActive := `{"provider_id":"openai","model":"gpt-4o-mini"}`
+	w2 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w2, httptest.NewRequest(http.MethodPut, "/models/active", strings.NewReader(setActive)))
+	if w2.Code != http.StatusOK {
+		t.Fatalf("set active status=%d body=%s", w2.Code, w2.Body.String())
+	}
+
+	procReq := `{"input":[{"role":"user","type":"message","content":[{"type":"text","text":"legacy provider args"}]}],"session_id":"s-legacy-provider-view-object","user_id":"u-legacy-provider-view-object","channel":"console","stream":false,"biz_params":{"prompt_mode":"codex"}}`
+	w3 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w3, httptest.NewRequest(http.MethodPost, "/agent/process", strings.NewReader(procReq)))
+	if w3.Code != http.StatusOK {
+		t.Fatalf("process status=%d body=%s", w3.Code, w3.Body.String())
+	}
+	if calls < 2 {
+		t.Fatalf("expected at least 2 model calls, got=%d", calls)
+	}
+
+	var out domain.AgentProcessResponse
+	if err := json.Unmarshal(w3.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode response failed: %v body=%s", err, w3.Body.String())
+	}
+	if out.Reply != "legacy provider args recovered" {
+		t.Fatalf("unexpected final reply: %q", out.Reply)
+	}
+	hasToolResult := false
+	for _, evt := range out.Events {
+		if evt.Type == "tool_result" && evt.ToolResult != nil && evt.ToolResult.Name == "view" && evt.ToolResult.OK {
+			hasToolResult = true
+		}
+	}
+	if !hasToolResult {
+		t.Fatalf("expected successful view tool_result event, got=%+v", out.Events)
+	}
+}
+
+func TestProcessAgentDefaultModeAlsoSupportsLegacyProviderViewArgumentsObject(t *testing.T) {
+	_, absPath := newToolTestPath(t, "legacy-provider-view-object-default")
+	if err := os.WriteFile(absPath, []byte("line-1\nline-2\n"), 0o644); err != nil {
+		t.Fatalf("seed tool test file failed: %v", err)
+	}
+	toolArgs, err := json.Marshal(map[string]interface{}{
+		"path":  absPath,
+		"start": 1,
+		"end":   1,
+	})
+	if err != nil {
+		t.Fatalf("marshal tool args failed: %v", err)
+	}
+
+	var calls int
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if r.Method != http.MethodPost || r.URL.Path != "/chat/completions" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		if calls == 1 {
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"choices": []map[string]interface{}{
+					{
+						"message": map[string]interface{}{
+							"content": "",
+							"tool_calls": []map[string]interface{}{
+								{
+									"id":   "call_view_legacy_default",
+									"type": "function",
+									"function": map[string]interface{}{
+										"name":      "view",
+										"arguments": string(toolArgs),
+									},
+								},
+							},
+						},
+					},
+				},
+			})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"choices": []map[string]interface{}{
+				{
+					"message": map[string]interface{}{"content": "default mode done"},
+				},
+			},
+		})
+	}))
+	defer mock.Close()
+
+	srv := newTestServer(t)
+	configureOpenAIProviderForTest(t, srv, mock.URL)
+
+	procReq := `{"input":[{"role":"user","type":"message","content":[{"type":"text","text":"legacy provider args default"}]}],"session_id":"s-legacy-provider-view-object-default","user_id":"u-legacy-provider-view-object-default","channel":"console","stream":false}`
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/agent/process", strings.NewReader(procReq)))
+	if w.Code != http.StatusOK {
+		t.Fatalf("process status=%d body=%s", w.Code, w.Body.String())
+	}
+	if calls < 2 {
+		t.Fatalf("expected at least 2 model calls, got=%d", calls)
+	}
+
+	var out domain.AgentProcessResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode response failed: %v body=%s", err, w.Body.String())
+	}
+	if out.Reply != "default mode done" {
+		t.Fatalf("unexpected final reply: %q", out.Reply)
+	}
+	hasToolResult := false
+	for _, evt := range out.Events {
+		if evt.Type == "tool_result" && evt.ToolResult != nil && evt.ToolResult.Name == "view" && evt.ToolResult.OK {
+			hasToolResult = true
+		}
+	}
+	if !hasToolResult {
+		t.Fatalf("expected successful view tool_result in default mode, got=%+v", out.Events)
+	}
+}
+
+func TestProcessAgentCodexModeNormalizesExecCommandAlias(t *testing.T) {
+	var calls int
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if r.Method != http.MethodPost || r.URL.Path != "/chat/completions" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		if calls == 1 {
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"choices": []map[string]interface{}{
+					{
+						"message": map[string]interface{}{
+							"content": "",
+							"tool_calls": []map[string]interface{}{
+								{
+									"id":   "call_exec",
+									"type": "function",
+									"function": map[string]interface{}{
+										"name":      "exec_command",
+										"arguments": `{"cmd":"pwd","workdir":"/tmp","yield_time_ms":1501}`,
+									},
+								},
+							},
+						},
+					},
+				},
+			})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"choices": []map[string]interface{}{
+				{
+					"message": map[string]interface{}{"content": "exec alias ok"},
+				},
+			},
+		})
+	}))
+	defer mock.Close()
+
+	srv := newTestServer(t)
+	var captured map[string]interface{}
+	srv.tools["shell"] = &stubToolPlugin{
+		name: "shell",
+		invoke: func(input map[string]interface{}) (map[string]interface{}, error) {
+			captured = safeMap(input)
+			return map[string]interface{}{"ok": true, "text": "shell stub ok"}, nil
+		},
+	}
+	configureOpenAIProviderForTest(t, srv, mock.URL)
+
+	procReq := `{"input":[{"role":"user","type":"message","content":[{"type":"text","text":"run exec_command"}]}],"session_id":"s-codex-exec-alias","user_id":"u-codex-exec-alias","channel":"console","stream":false,"biz_params":{"prompt_mode":"codex"}}`
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/agent/process", strings.NewReader(procReq)))
+	if w.Code != http.StatusOK {
+		t.Fatalf("process status=%d body=%s", w.Code, w.Body.String())
+	}
+	if calls < 2 {
+		t.Fatalf("expected at least 2 model calls, got=%d", calls)
+	}
+	if captured == nil {
+		t.Fatalf("shell plugin not invoked")
+	}
+	items, ok := captured["items"].([]interface{})
+	if !ok || len(items) != 1 {
+		t.Fatalf("items invalid: %#v", captured)
+	}
+	item, ok := items[0].(map[string]interface{})
+	if !ok {
+		t.Fatalf("item invalid: %#v", items[0])
+	}
+	if got, _ := item["command"].(string); got != "pwd" {
+		t.Fatalf("command=%q want=pwd", got)
+	}
+	if got, _ := item["cwd"].(string); got != "/tmp" {
+		t.Fatalf("cwd=%q want=/tmp", got)
+	}
+	timeout, ok := intFromAny(item["timeout_seconds"])
+	if !ok || timeout != 2 {
+		t.Fatalf("timeout_seconds=%v want=2", item["timeout_seconds"])
+	}
+}
+
+func TestProcessAgentCodexModeRoutesOpenLocalPathToView(t *testing.T) {
+	_, absPath := newToolTestPath(t, "codex-open-local")
+	if err := os.WriteFile(absPath, []byte("line-1\nline-2\nline-3\n"), 0o644); err != nil {
+		t.Fatalf("seed tool test file failed: %v", err)
+	}
+
+	var calls int
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if r.Method != http.MethodPost || r.URL.Path != "/chat/completions" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		if calls == 1 {
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"choices": []map[string]interface{}{
+					{
+						"message": map[string]interface{}{
+							"content": "",
+							"tool_calls": []map[string]interface{}{
+								{
+									"id":   "call_open_local",
+									"type": "function",
+									"function": map[string]interface{}{
+										"name":      "open",
+										"arguments": fmt.Sprintf(`{"path":%q,"lineno":2}`, absPath),
+									},
+								},
+							},
+						},
+					},
+				},
+			})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"choices": []map[string]interface{}{
+				{
+					"message": map[string]interface{}{"content": "open local ok"},
+				},
+			},
+		})
+	}))
+	defer mock.Close()
+
+	srv := newTestServer(t)
+	configureOpenAIProviderForTest(t, srv, mock.URL)
+
+	procReq := `{"input":[{"role":"user","type":"message","content":[{"type":"text","text":"open local file"}]}],"session_id":"s-codex-open-local","user_id":"u-codex-open-local","channel":"console","stream":false,"biz_params":{"prompt_mode":"codex"}}`
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/agent/process", strings.NewReader(procReq)))
+	if w.Code != http.StatusOK {
+		t.Fatalf("process status=%d body=%s", w.Code, w.Body.String())
+	}
+	if calls < 2 {
+		t.Fatalf("expected at least 2 model calls, got=%d", calls)
+	}
+	if !strings.Contains(w.Body.String(), "2: line-2") {
+		t.Fatalf("expected open local routed to view output, body=%s", w.Body.String())
+	}
+}
+
+func TestProcessAgentCodexModeRoutesOpenURLToBrowser(t *testing.T) {
+	var calls int
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if r.Method != http.MethodPost || r.URL.Path != "/chat/completions" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		if calls == 1 {
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"choices": []map[string]interface{}{
+					{
+						"message": map[string]interface{}{
+							"content": "",
+							"tool_calls": []map[string]interface{}{
+								{
+									"id":   "call_open_url",
+									"type": "function",
+									"function": map[string]interface{}{
+										"name":      "open",
+										"arguments": `{"arguments":{"path":"https://example.com/docs"}}`,
+									},
+								},
+							},
+						},
+					},
+				},
+			})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"choices": []map[string]interface{}{
+				{
+					"message": map[string]interface{}{"content": "open url ok"},
+				},
+			},
+		})
+	}))
+	defer mock.Close()
+
+	srv := newTestServer(t)
+	var browserInput map[string]interface{}
+	srv.tools["browser"] = &stubToolPlugin{
+		name: "browser",
+		invoke: func(input map[string]interface{}) (map[string]interface{}, error) {
+			browserInput = safeMap(input)
+			return map[string]interface{}{
+				"ok":   true,
+				"text": "browser summary from stub",
+			}, nil
+		},
+	}
+	configureOpenAIProviderForTest(t, srv, mock.URL)
+
+	procReq := `{"input":[{"role":"user","type":"message","content":[{"type":"text","text":"open url"}]}],"session_id":"s-codex-open-url","user_id":"u-codex-open-url","channel":"console","stream":false,"biz_params":{"prompt_mode":"codex"}}`
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/agent/process", strings.NewReader(procReq)))
+	if w.Code != http.StatusOK {
+		t.Fatalf("process status=%d body=%s", w.Code, w.Body.String())
+	}
+	if calls < 2 {
+		t.Fatalf("expected at least 2 model calls, got=%d", calls)
+	}
+	items, ok := browserInput["items"].([]interface{})
+	if !ok || len(items) != 1 {
+		t.Fatalf("browser items invalid: %#v", browserInput)
+	}
+	item, ok := items[0].(map[string]interface{})
+	if !ok {
+		t.Fatalf("browser item invalid: %#v", items[0])
+	}
+	task, _ := item["task"].(string)
+	if !strings.Contains(task, "https://example.com/docs") {
+		t.Fatalf("browser task should include url, task=%q", task)
+	}
+	if !strings.Contains(w.Body.String(), "browser summary from stub") {
+		t.Fatalf("expected browser summary in response body=%s", w.Body.String())
+	}
+}
+
+func TestProcessAgentCodexModeRoutesClickScreenshotAsApprox(t *testing.T) {
+	var calls int
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if r.Method != http.MethodPost || r.URL.Path != "/chat/completions" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		if calls == 1 {
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"choices": []map[string]interface{}{
+					{
+						"message": map[string]interface{}{
+							"content": "",
+							"tool_calls": []map[string]interface{}{
+								{
+									"id":   "call_click",
+									"type": "function",
+									"function": map[string]interface{}{
+										"name":      "click",
+										"arguments": `{"ref_id":"https://example.com","selector":"#login"}`,
+									},
+								},
+								{
+									"id":   "call_shot",
+									"type": "function",
+									"function": map[string]interface{}{
+										"name":      "screenshot",
+										"arguments": `{"url":"https://example.com/dashboard"}`,
+									},
+								},
+							},
+						},
+					},
+				},
+			})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"choices": []map[string]interface{}{
+				{
+					"message": map[string]interface{}{"content": "approx done"},
+				},
+			},
+		})
+	}))
+	defer mock.Close()
+
+	srv := newTestServer(t)
+	var invoked int
+	srv.tools["browser"] = &stubToolPlugin{
+		name: "browser",
+		invoke: func(input map[string]interface{}) (map[string]interface{}, error) {
+			invoked++
+			return map[string]interface{}{
+				"ok":   true,
+				"text": "browser action ok",
+			}, nil
+		},
+	}
+	configureOpenAIProviderForTest(t, srv, mock.URL)
+
+	procReq := `{"input":[{"role":"user","type":"message","content":[{"type":"text","text":"click and screenshot"}]}],"session_id":"s-codex-click-shot","user_id":"u-codex-click-shot","channel":"console","stream":false,"biz_params":{"prompt_mode":"codex"}}`
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/agent/process", strings.NewReader(procReq)))
+	if w.Code != http.StatusOK {
+		t.Fatalf("process status=%d body=%s", w.Code, w.Body.String())
+	}
+	if calls < 2 {
+		t.Fatalf("expected at least 2 model calls, got=%d", calls)
+	}
+	if invoked != 2 {
+		t.Fatalf("browser invoked=%d want=2", invoked)
+	}
+	if !strings.Contains(w.Body.String(), "mode=approx action=click") {
+		t.Fatalf("expected click approx marker, body=%s", w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "mode=approx action=screenshot") {
+		t.Fatalf("expected screenshot approx marker, body=%s", w.Body.String())
+	}
+}
+
+func TestProcessAgentCodexModeSupportsFindToolCall(t *testing.T) {
+	_, absPath := newToolTestPath(t, "codex-find")
+	if err := os.WriteFile(absPath, []byte("alpha\nneedle line\nbeta\n"), 0o644); err != nil {
+		t.Fatalf("seed tool test file failed: %v", err)
+	}
+
+	var calls int
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if r.Method != http.MethodPost || r.URL.Path != "/chat/completions" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		if calls == 1 {
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"choices": []map[string]interface{}{
+					{
+						"message": map[string]interface{}{
+							"content": "",
+							"tool_calls": []map[string]interface{}{
+								{
+									"id":   "call_find",
+									"type": "function",
+									"function": map[string]interface{}{
+										"name":      "find",
+										"arguments": fmt.Sprintf(`{"path":%q,"pattern":"needle"}`, absPath),
+									},
+								},
+							},
+						},
+					},
+				},
+			})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"choices": []map[string]interface{}{
+				{
+					"message": map[string]interface{}{"content": "find done"},
+				},
+			},
+		})
+	}))
+	defer mock.Close()
+
+	srv := newTestServer(t)
+	configureOpenAIProviderForTest(t, srv, mock.URL)
+
+	procReq := `{"input":[{"role":"user","type":"message","content":[{"type":"text","text":"find in file"}]}],"session_id":"s-codex-find","user_id":"u-codex-find","channel":"console","stream":false,"biz_params":{"prompt_mode":"codex"}}`
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/agent/process", strings.NewReader(procReq)))
+	if w.Code != http.StatusOK {
+		t.Fatalf("process status=%d body=%s", w.Code, w.Body.String())
+	}
+	if calls < 2 {
+		t.Fatalf("expected at least 2 model calls, got=%d", calls)
+	}
+	if !strings.Contains(w.Body.String(), `"name":"find"`) {
+		t.Fatalf("expected find tool event, body=%s", w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `matched 1 line`) {
+		t.Fatalf("expected find summary, body=%s", w.Body.String())
+	}
+}
+
 func TestProcessAgentAllowsAbsolutePathOutsideRepositoryForViewTool(t *testing.T) {
 	srv := newTestServer(t)
 	outside := filepath.Join(t.TempDir(), "outside-view.txt")
@@ -2530,6 +5650,9 @@ func TestModelsCatalogReflectsStateProviders(t *testing.T) {
 	}
 	if typesByID[provider.AdapterOpenAICompatible].ID == "" {
 		t.Fatalf("expected provider_type %q", provider.AdapterOpenAICompatible)
+	}
+	if typesByID[provider.AdapterCodexCompatible].ID == "" {
+		t.Fatalf("expected provider_type %q", provider.AdapterCodexCompatible)
 	}
 }
 

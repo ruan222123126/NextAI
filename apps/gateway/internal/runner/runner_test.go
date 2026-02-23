@@ -166,6 +166,118 @@ func TestGenerateReplyCustomProviderWithAdapter(t *testing.T) {
 	}
 }
 
+func TestGenerateReplyCodexCompatibleSuccess(t *testing.T) {
+	t.Parallel()
+	var auth string
+	var model string
+	var stream bool
+	var store bool
+	var promptCacheKey string
+	var previousResponseID string
+
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		auth = r.Header.Get("Authorization")
+		if r.Method != http.MethodPost || r.URL.Path != "/responses" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		var req map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		model, _ = req["model"].(string)
+		stream, _ = req["stream"].(bool)
+		store, _ = req["store"].(bool)
+		promptCacheKey, _ = req["prompt_cache_key"].(string)
+		previousResponseID, _ = req["previous_response_id"].(string)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprint(w, "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\"}}\n\n")
+		_, _ = fmt.Fprint(w, "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hello \"}\n\n")
+		_, _ = fmt.Fprint(w, "data: {\"type\":\"response.output_text.delta\",\"delta\":\"from codex\"}\n\n")
+		_, _ = fmt.Fprint(w, "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\"}}\n\n")
+	}))
+	defer mock.Close()
+
+	r := NewWithHTTPClient(mock.Client())
+	got, err := r.GenerateReply(context.Background(), domain.AgentProcessRequest{
+		Input: []domain.AgentInputMessage{{
+			Role:    "user",
+			Type:    "message",
+			Content: []domain.RuntimeContent{{Type: "text", Text: "hello"}},
+		}},
+	}, GenerateConfig{
+		ProviderID:         ProviderCodex,
+		Model:              "gpt-5-codex",
+		APIKey:             "sk-test",
+		BaseURL:            mock.URL,
+		Store:              true,
+		PromptCacheKey:     "session-1",
+		PreviousResponseID: "resp_prev",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "hello from codex" {
+		t.Fatalf("unexpected reply: %s", got)
+	}
+	if auth != "Bearer sk-test" {
+		t.Fatalf("unexpected auth header: %s", auth)
+	}
+	if model != "gpt-5-codex" {
+		t.Fatalf("unexpected model: %s", model)
+	}
+	if !stream {
+		t.Fatalf("expected stream=true for codex-compatible request")
+	}
+	if !store {
+		t.Fatalf("expected store=true for codex-compatible request")
+	}
+	if promptCacheKey != "session-1" {
+		t.Fatalf("unexpected prompt_cache_key: %q", promptCacheKey)
+	}
+	if previousResponseID != "resp_prev" {
+		t.Fatalf("unexpected previous_response_id: %q", previousResponseID)
+	}
+}
+
+func TestGenerateTurnCodexCompatibleCapturesResponseID(t *testing.T) {
+	t.Parallel()
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/responses" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprint(w, "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_2\"}}\n\n")
+		_, _ = fmt.Fprint(w, "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n\n")
+		_, _ = fmt.Fprint(w, "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_2\"}}\n\n")
+	}))
+	defer mock.Close()
+
+	r := NewWithHTTPClient(mock.Client())
+	turn, err := r.GenerateTurn(context.Background(), domain.AgentProcessRequest{
+		Input: []domain.AgentInputMessage{{
+			Role:    "user",
+			Type:    "message",
+			Content: []domain.RuntimeContent{{Type: "text", Text: "hello"}},
+		}},
+	}, GenerateConfig{
+		ProviderID: ProviderCodex,
+		Model:      "gpt-5-codex",
+		APIKey:     "sk-test",
+		BaseURL:    mock.URL,
+	}, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if turn.ResponseID != "resp_2" {
+		t.Fatalf("expected response id resp_2, got=%q", turn.ResponseID)
+	}
+	if strings.TrimSpace(turn.Text) != "hello" {
+		t.Fatalf("unexpected text: %q", turn.Text)
+	}
+}
+
 func TestGenerateTurnOpenAIToolCalls(t *testing.T) {
 	t.Parallel()
 	var requestBody map[string]interface{}
@@ -230,6 +342,75 @@ func TestGenerateTurnOpenAIToolCalls(t *testing.T) {
 	rawTools, ok := requestBody["tools"].([]interface{})
 	if !ok || len(rawTools) != 1 {
 		t.Fatalf("expected one tool definition in request, got=%#v", requestBody["tools"])
+	}
+}
+
+func TestGenerateTurnCodexCompatibleParsesFunctionCalls(t *testing.T) {
+	t.Parallel()
+	var requestBody map[string]interface{}
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/responses" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		if err := json.NewDecoder(r.Body).Decode(&requestBody); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprint(w, "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"function_call\",\"call_id\":\"call_1\",\"name\":\"view\",\"arguments\":\"{\\\"path\\\":\\\"docs/contracts.md\\\",\\\"start\\\":1}\"}}\n\n")
+		_, _ = fmt.Fprint(w, "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\"}}\n\n")
+	}))
+	defer mock.Close()
+
+	r := NewWithHTTPClient(mock.Client())
+	turn, err := r.GenerateTurn(context.Background(), domain.AgentProcessRequest{
+		Input: []domain.AgentInputMessage{{
+			Role:    "user",
+			Type:    "message",
+			Content: []domain.RuntimeContent{{Type: "text", Text: "view docs/contracts.md"}},
+		}},
+	}, GenerateConfig{
+		ProviderID: ProviderCodex,
+		Model:      "gpt-5-codex",
+		APIKey:     "sk-test",
+		BaseURL:    mock.URL,
+	}, []ToolDefinition{
+		{
+			Name: "view",
+			Parameters: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"path": map[string]interface{}{"type": "string"},
+					"start": map[string]interface{}{
+						"type": "integer",
+					},
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(turn.ToolCalls) != 1 {
+		t.Fatalf("expected 1 tool call, got=%d", len(turn.ToolCalls))
+	}
+	if turn.ToolCalls[0].Name != "view" {
+		t.Fatalf("unexpected tool name: %q", turn.ToolCalls[0].Name)
+	}
+	if got := turn.ToolCalls[0].Arguments["path"]; got != "docs/contracts.md" {
+		t.Fatalf("unexpected tool argument path: %#v", got)
+	}
+	if got := turn.ToolCalls[0].Arguments["start"]; got != float64(1) {
+		t.Fatalf("unexpected tool argument start: %#v", got)
+	}
+
+	rawTools, ok := requestBody["tools"].([]interface{})
+	if !ok || len(rawTools) != 1 {
+		t.Fatalf("expected one tool definition in request, got=%#v", requestBody["tools"])
+	}
+	firstTool, _ := rawTools[0].(map[string]interface{})
+	if firstTool["name"] != "view" {
+		t.Fatalf("expected codex tool name=view, got=%#v", firstTool["name"])
 	}
 }
 
@@ -447,6 +628,49 @@ func TestGenerateTurnStreamOpenAIAggregatesToolCalls(t *testing.T) {
 	}
 	if got := turn.ToolCalls[0].Arguments["command"]; got != "echo hi" {
 		t.Fatalf("unexpected tool argument command: %#v", got)
+	}
+}
+
+func TestGenerateTurnStreamCodexCompatibleFallsBackToMessageOutputItem(t *testing.T) {
+	t.Parallel()
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/responses" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprint(w, "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"hello from done item\"}]}}\n\n")
+		_, _ = fmt.Fprint(w, "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\"}}\n\n")
+	}))
+	defer mock.Close()
+
+	r := NewWithHTTPClient(mock.Client())
+	var streamed []string
+	turn, err := r.GenerateTurnStream(context.Background(), domain.AgentProcessRequest{
+		Input: []domain.AgentInputMessage{{
+			Role:    "user",
+			Type:    "message",
+			Content: []domain.RuntimeContent{{Type: "text", Text: "hello"}},
+		}},
+	}, GenerateConfig{
+		ProviderID: ProviderCodex,
+		Model:      "gpt-5-codex",
+		APIKey:     "sk-test",
+		BaseURL:    mock.URL,
+	}, nil, func(delta string) {
+		streamed = append(streamed, delta)
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if turn.Text != "hello from done item" {
+		t.Fatalf("unexpected turn text: %q", turn.Text)
+	}
+	if got := strings.Join(streamed, ""); got != "hello from done item" {
+		t.Fatalf("unexpected streamed deltas: %q", got)
+	}
+	if len(turn.ToolCalls) != 0 {
+		t.Fatalf("expected no tool calls, got=%d", len(turn.ToolCalls))
 	}
 }
 

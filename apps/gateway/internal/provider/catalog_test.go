@@ -40,13 +40,28 @@ func TestResolveModelIDUsesCustomAliasTargetForCustomProvider(t *testing.T) {
 
 func TestListProviderTypes(t *testing.T) {
 	types := ListProviderTypes()
-	if len(types) < 2 {
-		t.Fatalf("expected at least 2 provider types, got=%d", len(types))
+	if len(types) < 3 {
+		t.Fatalf("expected at least 3 provider types, got=%d", len(types))
 	}
 	if types[0].ID != "openai" || types[0].DisplayName != "openai" {
 		t.Fatalf("unexpected first provider type: %+v", types[0])
 	}
 	if types[1].ID != AdapterOpenAICompatible || types[1].DisplayName != "openai Compatible" {
 		t.Fatalf("unexpected second provider type: %+v", types[1])
+	}
+	if types[2].ID != AdapterCodexCompatible || types[2].DisplayName != "codex Compatible" {
+		t.Fatalf("unexpected third provider type: %+v", types[2])
+	}
+}
+
+func TestResolveAdapterUsesCodexForCodexCompatibleProviderIDs(t *testing.T) {
+	if got := ResolveAdapter("codex-compatible"); got != AdapterCodexCompatible {
+		t.Fatalf("expected codex adapter for codex-compatible, got=%q", got)
+	}
+	if got := ResolveAdapter("codex-compatible-2"); got != AdapterCodexCompatible {
+		t.Fatalf("expected codex adapter for codex-compatible-2, got=%q", got)
+	}
+	if got := ResolveAdapter("custom-openai"); got != AdapterOpenAICompatible {
+		t.Fatalf("expected openai-compatible adapter for custom-openai, got=%q", got)
 	}
 }

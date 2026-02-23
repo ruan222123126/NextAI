@@ -12,6 +12,37 @@
 pnpm install --recursive
 ```
 
+## 30 分钟首轮对话（新人最短路径）
+
+1. 启动 Gateway：
+
+```bash
+cd apps/gateway
+go run ./cmd/gateway
+```
+
+2. 健康检查：
+
+```bash
+curl -sS http://127.0.0.1:8088/healthz
+```
+
+3. 发起首轮对话（无 API Key 场景）：
+
+```bash
+curl -sS -X POST http://127.0.0.1:8088/agent/process \\
+  -H 'Content-Type: application/json' \\
+  -d '{
+    "input":[{"role":"user","type":"message","content":[{"type":"text","text":"你好，做个自我介绍"}]}],
+    "session_id":"quickstart-s1",
+    "user_id":"quickstart-u1",
+    "channel":"console",
+    "stream":false
+  }'
+```
+
+看到返回里的 `reply` 字段，即表示首轮链路跑通。
+
 ## Gateway / CLI / Web / TUI 并行开发
 
 1. 启动 Gateway
@@ -89,7 +120,7 @@ cd tests/contract && pnpm test
 cd tests/smoke && pnpm test
 
 # 全仓回归
-cd /mnt/Files/nextai && pnpm -r test
+cd /mnt/Files/NextAI && pnpm run test:all
 ```
 
 ## 开发约束

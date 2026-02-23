@@ -781,6 +781,7 @@ components:
         models:
           type: array
           items: { $ref: '#/components/schemas/ModelInfo' }
+        store: { type: boolean }
         allow_custom_base_url: { type: boolean }
         enabled: { type: boolean }
         has_api_key: { type: boolean }
@@ -808,6 +809,7 @@ components:
         base_url: { type: string }
         display_name: { type: string }
         enabled: { type: boolean }
+        store: { type: boolean }
         headers:
           type: object
           additionalProperties: { type: string }
