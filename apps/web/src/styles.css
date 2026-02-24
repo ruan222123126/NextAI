@@ -1341,6 +1341,102 @@ body.workspace-import-open {
   text-underline-offset: 2px;
 }
 
+.message-text.message-markdown .math-inline,
+.message-text.message-markdown .math-display {
+  font-family: "STIX Two Math", "Cambria Math", "Times New Roman", serif;
+}
+
+.message-text.message-markdown .math-inline {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.08em;
+  white-space: nowrap;
+}
+
+.message-text.message-markdown .math-display {
+  display: block;
+  margin: 8px 0;
+  overflow-x: auto;
+  white-space: nowrap;
+}
+
+.message-text.message-markdown .math-script {
+  display: inline-flex;
+  align-items: flex-start;
+  gap: 0.04em;
+}
+
+.message-text.message-markdown .math-script > sub,
+.message-text.message-markdown .math-script > sup {
+  font-size: 0.72em;
+  line-height: 1;
+}
+
+.message-text.message-markdown .math-script > sub {
+  align-self: flex-end;
+}
+
+.message-text.message-markdown .math-script > sup {
+  align-self: flex-start;
+}
+
+.message-text.message-markdown .math-frac {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  line-height: 1.05;
+  vertical-align: middle;
+}
+
+.message-text.message-markdown .math-frac-num {
+  padding: 0 0.2em;
+}
+
+.message-text.message-markdown .math-frac-den {
+  border-top: 1px solid rgba(28, 26, 23, 0.7);
+  margin-top: 0.06em;
+  padding: 0.02em 0.2em 0;
+}
+
+.message-text.message-markdown .math-sqrt {
+  display: inline-flex;
+  align-items: flex-start;
+}
+
+.message-text.message-markdown .math-root {
+  margin-right: 0.1em;
+  font-size: 0.66em;
+  line-height: 1;
+}
+
+.message-text.message-markdown .math-sqrt-sign {
+  margin-right: 0.08em;
+  line-height: 1;
+}
+
+.message-text.message-markdown .math-sqrt-body {
+  border-top: 1px solid rgba(28, 26, 23, 0.7);
+  padding: 0 0.06em;
+}
+
+.message-text.message-markdown .math-boxed {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid rgba(28, 26, 23, 0.62);
+  border-radius: 0.18em;
+  padding: 0.04em 0.22em;
+}
+
+.message-text.message-markdown .math-text {
+  font-style: normal;
+}
+
+.message-text.message-markdown .math-decoration {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.06em;
+}
+
 .message.user {
   align-self: flex-end;
   color: #fffefb;
@@ -1503,6 +1599,14 @@ body.workspace-import-open {
   gap: 1px;
   max-height: 272px;
   overflow: auto;
+  scrollbar-gutter: auto;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.composer-slash-list::-webkit-scrollbar {
+  width: 0;
+  height: 0;
 }
 
 .composer-slash-group {

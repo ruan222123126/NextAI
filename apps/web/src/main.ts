@@ -98,6 +98,7 @@ interface ProviderInfo {
   openai_compatible?: boolean;
   api_key_prefix?: string;
   models: ModelInfo[];
+  reasoning_effort?: string;
   store?: boolean;
   headers?: Record<string, string>;
   timeout_ms?: number;
@@ -173,8 +174,13 @@ interface WorkspaceFileCatalog {
   codexFiles: WorkspaceFileInfo[];
   claudeFiles: WorkspaceFileInfo[];
   codexTree: WorkspaceCodexTreeNode[];
+  codexRootFiles: WorkspaceFileInfo[];
   codexFolderPaths: Set<string>;
   codexTopLevelFolderPaths: Set<string>;
+  claudeTree: WorkspaceCodexTreeNode[];
+  claudeRootFiles: WorkspaceFileInfo[];
+  claudeFolderPaths: Set<string>;
+  claudeTopLevelFolderPaths: Set<string>;
 }
 
 interface WorkspaceTextPayload {
@@ -458,6 +464,15 @@ const COMPOSER_SLASH_COMMANDS: ComposerSlashCommandConfig[] = [
     keywords: ["prompts", "refactor", "cleanup", "重构", "整理"],
   },
   {
+    id: "prompts-human-readable",
+    command: "/prompts:human-readable",
+    insertText: "/prompts:human-readable ",
+    titleKey: "chat.slashHumanReadableTitle",
+    descriptionKey: "chat.slashHumanReadableDesc",
+    group: "template",
+    keywords: ["prompts", "human", "readable", "rewrite", "转译", "人话", "易读"],
+  },
+  {
     id: "new-session",
     command: "/new",
     insertText: "/new",
@@ -606,6 +621,8 @@ const modelsProviderAPIKeyVisibilityButton = mustElement<HTMLButtonElement>("mod
 const modelsProviderBaseURLInput = mustElement<HTMLInputElement>("models-provider-base-url-input");
 const modelsProviderBaseURLPreview = mustElement<HTMLElement>("models-provider-base-url-preview");
 const modelsProviderTimeoutMSInput = mustElement<HTMLInputElement>("models-provider-timeout-ms-input");
+const modelsProviderReasoningEffortField = mustElement<HTMLElement>("models-provider-reasoning-effort-field");
+const modelsProviderReasoningEffortSelect = mustElement<HTMLSelectElement>("models-provider-reasoning-effort-select");
 const modelsProviderEnabledInput = mustElement<HTMLInputElement>("models-provider-enabled-input");
 const modelsProviderStoreField = mustElement<HTMLElement>("models-provider-store-field");
 const modelsProviderStoreInput = mustElement<HTMLInputElement>("models-provider-store-input");
@@ -777,10 +794,16 @@ const state = {
     codexFiles: [] as WorkspaceFileInfo[],
     claudeFiles: [] as WorkspaceFileInfo[],
     codexTree: [] as WorkspaceCodexTreeNode[],
+    codexRootFiles: [] as WorkspaceFileInfo[],
     codexFolderPaths: new Set<string>(),
     codexTopLevelFolderPaths: new Set<string>(),
+    claudeTree: [] as WorkspaceCodexTreeNode[],
+    claudeRootFiles: [] as WorkspaceFileInfo[],
+    claudeFolderPaths: new Set<string>(),
+    claudeTopLevelFolderPaths: new Set<string>(),
   },
   workspaceCodexExpandedFolders: new Set<string>(),
+  workspaceClaudeExpandedFolders: new Set<string>(),
   qqChannelConfig: {
     enabled: false,
     app_id: "",
@@ -955,6 +978,7 @@ const {
   isWorkspaceSkillPath,
   normalizeWorkspaceInputPath,
   toggleWorkspaceCodexFolder,
+  toggleWorkspaceClaudeFolder,
   requestWorkspaceFile,
 } = workspaceDomain;
 
@@ -1011,6 +1035,8 @@ const modelDomain = createModelDomain({
   modelsProviderTypeSelect,
   modelsProviderNameInput,
   modelsProviderTimeoutMSInput,
+  modelsProviderReasoningEffortField,
+  modelsProviderReasoningEffortSelect,
   modelsProviderEnabledInput,
   modelsProviderStoreField,
   modelsProviderStoreInput,
@@ -2063,6 +2089,17 @@ function bindWorkspaceFileListEvents(): void {
     void handleWorkspaceFileListClick(event);
   });
   workspaceClaudeBody.addEventListener("click", (event) => {
+    const target = event.target;
+    if (target instanceof Element) {
+      const folderToggle = target.closest<HTMLButtonElement>("button[data-workspace-claude-folder-toggle]");
+      if (folderToggle) {
+        const folderPath = folderToggle.dataset.workspaceClaudeFolderToggle ?? "";
+        if (folderPath !== "") {
+          toggleWorkspaceClaudeFolder(folderPath);
+        }
+        return;
+      }
+    }
     void handleWorkspaceFileListClick(event);
   });
   workspaceCodexTreeBody.addEventListener("click", (event) => {
@@ -2451,6 +2488,7 @@ function normalizeProviders(providers: ProviderInfo[]): ProviderInfo[] {
     display_name: provider.display_name?.trim() || provider.name?.trim() || provider.id,
     openai_compatible: provider.openai_compatible ?? false,
     models: Array.isArray(provider.models) ? provider.models : [],
+    reasoning_effort: normalizeProviderReasoningEffort(provider.reasoning_effort),
     headers: normalizeProviderHeadersMap(provider.headers),
     timeout_ms: normalizeProviderTimeoutMS(provider.timeout_ms),
     model_aliases: normalizeProviderAliasMap(provider.model_aliases),
@@ -2486,6 +2524,17 @@ function normalizeProviderTimeoutMS(raw: unknown): number | undefined {
     return undefined;
   }
   return Math.trunc(raw);
+}
+
+function normalizeProviderReasoningEffort(raw: unknown): string | undefined {
+  if (typeof raw !== "string") {
+    return undefined;
+  }
+  const value = raw.trim().toLowerCase();
+  if (value === "minimal" || value === "low" || value === "medium" || value === "high") {
+    return value;
+  }
+  return undefined;
 }
 
 function normalizeProviderAliasMap(raw: unknown): Record<string, string> | undefined {

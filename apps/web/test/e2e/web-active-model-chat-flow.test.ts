@@ -427,6 +427,7 @@ describe("web e2e: auto activate model then send chat", () => {
     expect(optionTexts.some((text) => text.includes("/shell"))).toBe(true);
     expect(optionTexts.some((text) => text.includes("/compact"))).toBe(true);
     expect(optionTexts.some((text) => text.includes("/memory"))).toBe(true);
+    expect(optionTexts.some((text) => text.includes("/prompts:human-readable"))).toBe(true);
     expect(optionTexts.some((text) => text.includes("/execute"))).toBe(true);
     expect(optionTexts.some((text) => text.includes("/pair_programming"))).toBe(true);
 
@@ -1574,6 +1575,7 @@ describe("web e2e: auto activate model then send chat", () => {
     ];
 
     let configuredProviderID = "";
+    let configuredStore = false;
     let overwroteExisting = false;
 
     globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -1601,8 +1603,10 @@ describe("web e2e: auto activate model then send chat", () => {
       }
 
       if (url.pathname.startsWith("/models/") && url.pathname.endsWith("/config") && method === "PUT") {
+        const payload = JSON.parse(String(init?.body ?? "{}")) as { store?: boolean };
         const rawProviderID = url.pathname.slice("/models/".length, url.pathname.length - "/config".length);
         configuredProviderID = decodeURIComponent(rawProviderID);
+        configuredStore = payload.store === true;
         const exists = catalogProviders.some((provider) => provider.id === configuredProviderID);
         if (exists) {
           overwroteExisting = true;
@@ -1616,6 +1620,7 @@ describe("web e2e: auto activate model then send chat", () => {
             models: [{ id: modelID, name: modelID }],
             allow_custom_base_url: true,
             enabled: true,
+            store: configuredStore,
             has_api_key: false,
             current_api_key: "",
             current_base_url: "",
@@ -1655,12 +1660,20 @@ describe("web e2e: auto activate model then send chat", () => {
     providerTypeSelect.value = "openai-compatible";
     providerTypeSelect.dispatchEvent(new Event("change", { bubbles: true }));
 
+    const providerStoreField = document.getElementById("models-provider-store-field") as HTMLElement;
+    const providerStoreInput = document.getElementById("models-provider-store-input") as HTMLInputElement;
+    expect(providerStoreField.hidden).toBe(false);
+    expect(providerStoreInput.checked).toBe(false);
+    providerStoreInput.checked = true;
+    providerStoreInput.dispatchEvent(new Event("change", { bubbles: true }));
+
     const providerForm = document.getElementById("models-provider-form") as HTMLFormElement;
     providerForm.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
 
     await waitFor(() => configuredProviderID !== "");
 
     expect(configuredProviderID).toBe("openai-compatible-2");
+    expect(configuredStore).toBe(true);
     expect(overwroteExisting).toBe(false);
     expect(catalogProviders.map((provider) => provider.id)).toContain(existingProviderID);
     expect(catalogProviders.map((provider) => provider.id)).toContain("openai-compatible-2");

@@ -250,6 +250,16 @@
                                   data-i18n-placeholder="models.providerTimeoutPlaceholder"
                                 />
                               </label>
+                              <label id="models-provider-reasoning-effort-field">
+                                <span data-i18n="models.providerReasoningEffort">思考强度（可选）</span>
+                                <select id="models-provider-reasoning-effort-select">
+                                  <option value="" data-i18n="models.reasoningEffortDefault">默认</option>
+                                  <option value="minimal" data-i18n="models.reasoningEffortMinimal">最低</option>
+                                  <option value="low" data-i18n="models.reasoningEffortLow">低</option>
+                                  <option value="medium" data-i18n="models.reasoningEffortMedium">中</option>
+                                  <option value="high" data-i18n="models.reasoningEffortHigh">高</option>
+                                </select>
+                              </label>
                               <label class="provider-config-card provider-header-card">
                                 <span data-i18n="models.providerHeaders">headers (optional)</span>
                                 <div class="kv-editor">
@@ -381,7 +391,7 @@
                           </div>
                           <button type="button" class="secondary-btn" data-workspace-action="back" data-i18n="workspace.backToCards">Back</button>
                         </div>
-                        <ul id="workspace-claude-body" class="detail-list models-provider-card-grid workspace-file-card-grid workspace-file-cards"></ul>
+                        <ul id="workspace-claude-body" class="detail-list workspace-codex-tree"></ul>
                       </section>
                     </div>
                   </section>

@@ -24,6 +24,20 @@ interface ViewToolCallNotice {
 
 export function createChatToolCallHelpers(ctx: any) {
   const { t } = ctx;
+  const toolNameAliases: Record<string, string> = {
+    read: "view",
+    notebookread: "view",
+    edit: "edit",
+    write: "edit",
+    multiedit: "edit",
+    notebookedit: "edit",
+    ls: "find",
+    grep: "find",
+    glob: "find",
+    bash: "shell",
+    websearch: "search",
+    webfetch: "browser",
+  };
 
   function isToolCallRawNotice(raw: string): boolean {
     const payload = parseToolCallRawEvent(raw);
@@ -34,7 +48,11 @@ export function createChatToolCallHelpers(ctx: any) {
     if (typeof value !== "string") {
       return "";
     }
-    return value.trim();
+    const normalized = value.trim().toLowerCase();
+    if (normalized === "") {
+      return "";
+    }
+    return toolNameAliases[normalized] ?? normalized;
   }
 
   function parseToolNameFromToolCallRaw(raw: string): string {
@@ -75,11 +93,15 @@ export function createChatToolCallHelpers(ctx: any) {
     const payload = parseToolCallRawEvent(raw);
     if (payload) {
       if (payload.type === "tool_result") {
+        const toolName = normalizeToolName(payload.tool_result?.name);
         const summary = typeof payload.tool_result?.summary === "string" ? payload.tool_result.summary.trim() : "";
         if (summary !== "") {
           const actionSummary = summarizeToolResultActions(summary);
           if (actionSummary !== "") {
             return actionSummary;
+          }
+          if (toolName === "view") {
+            return fallback;
           }
           return truncateToolCallSummary(summary);
         }
@@ -89,6 +111,10 @@ export function createChatToolCallHelpers(ctx: any) {
     const actionSummary = summarizeToolResultActions(raw);
     if (actionSummary !== "") {
       return actionSummary;
+    }
+    const toolName = normalizeToolName(toolCall.toolName) || parseToolNameFromToolCallRaw(raw);
+    if (toolName === "view") {
+      return fallback;
     }
     return truncateToolCallSummary(firstNonEmptyLine(raw) || fallback);
   }
@@ -141,9 +167,21 @@ export function createChatToolCallHelpers(ctx: any) {
     if (lines.length === 0) {
       return "";
     }
+    const editedPaths: string[] = [];
+    const writtenPaths: string[] = [];
     let fileCount = 0;
     let listCount = 0;
     for (const line of lines) {
+      const editResult = parseEditResultLine(line);
+      if (editResult) {
+        const isWriteAction = isWriteResult(editResult);
+        if (isWriteAction) {
+          pushUniquePath(writtenPaths, editResult.path);
+        } else {
+          pushUniquePath(editedPaths, editResult.path);
+        }
+        continue;
+      }
       if (isListBrowseLine(line)) {
         listCount += 1;
         continue;
@@ -151,6 +189,18 @@ export function createChatToolCallHelpers(ctx: any) {
       if (isFileBrowseLine(line)) {
         fileCount += 1;
       }
+    }
+    if (writtenPaths.length === 1 && editedPaths.length === 0 && fileCount === 0 && listCount === 0) {
+      return t("chat.toolCallWritePath", { path: writtenPaths[0] });
+    }
+    if (writtenPaths.length > 1 && editedPaths.length === 0 && fileCount === 0 && listCount === 0) {
+      return `${t("chat.toolCallWrite")} ${t("chat.toolCallSummaryFileCount", { count: writtenPaths.length })}`;
+    }
+    if (editedPaths.length === 1 && writtenPaths.length === 0 && fileCount === 0 && listCount === 0) {
+      return t("chat.toolCallEditPath", { path: editedPaths[0] });
+    }
+    if (editedPaths.length > 1 && writtenPaths.length === 0 && fileCount === 0 && listCount === 0) {
+      return `${t("chat.toolCallEdit")} ${t("chat.toolCallSummaryFileCount", { count: editedPaths.length })}`;
     }
     if (fileCount === 0 && listCount === 0) {
       return "";
@@ -177,6 +227,56 @@ export function createChatToolCallHelpers(ctx: any) {
       return true;
     }
     return /^read\s+\S+/i.test(line) || /^view\s+\S+/i.test(line) || /^cat\s+\S+/i.test(line) || /^opened?\s+\S+/i.test(line);
+  }
+
+  function parseEditResultLine(line: string): {
+    operation: string;
+    path: string;
+    startLine: number;
+    endLine: number;
+    replacedLineCount: number;
+  } | null {
+    const match = line.match(/^(edit|write|multiedit|notebookedit)\s+(.+)\s+\[(\d+)-(\d+)\]\s+replaced\s+(\d+)\s+line\(s\)\.?$/i);
+    if (!match) {
+      return null;
+    }
+    const path = match[2]?.trim() ?? "";
+    const startLine = Number.parseInt(match[3] ?? "", 10);
+    const endLine = Number.parseInt(match[4] ?? "", 10);
+    const replacedLineCount = Number.parseInt(match[5] ?? "", 10);
+    if (
+      path === ""
+      || !Number.isFinite(startLine)
+      || !Number.isFinite(endLine)
+      || !Number.isFinite(replacedLineCount)
+    ) {
+      return null;
+    }
+    return {
+      operation: (match[1] ?? "").toLowerCase(),
+      path,
+      startLine,
+      endLine,
+      replacedLineCount,
+    };
+  }
+
+  function isWriteResult(result: {
+    operation: string;
+    startLine: number;
+    endLine: number;
+    replacedLineCount: number;
+  }): boolean {
+    if (result.operation === "write") {
+      return true;
+    }
+    return result.operation === "edit" && result.startLine === 1 && result.endLine === 1 && result.replacedLineCount === 0;
+  }
+
+  function pushUniquePath(paths: string[], path: string): void {
+    if (!paths.includes(path)) {
+      paths.push(path);
+    }
   }
 
   function truncateToolCallSummary(value: string): string {
@@ -208,7 +308,7 @@ export function createChatToolCallHelpers(ctx: any) {
   }
 
   function formatToolCallSummary(toolCall?: AgentToolCallPayload): string {
-    const name = typeof toolCall?.name === "string" ? toolCall.name.trim() : "";
+    const name = normalizeToolName(toolCall?.name);
     if (name === "shell") {
       const command = summarizeShellCommandForNotice(extractShellCommand(toolCall?.input));
       return command === "" ? t("chat.toolCallShell") : t("chat.toolCallShellCommand", { command });
@@ -237,6 +337,10 @@ export function createChatToolCallHelpers(ctx: any) {
     const directPath = input.path;
     if (typeof directPath === "string" && directPath.trim() !== "") {
       return directPath.trim();
+    }
+    const directFilePath = input.file_path;
+    if (typeof directFilePath === "string" && directFilePath.trim() !== "") {
+      return directFilePath.trim();
     }
     const nested = input.input;
     if (nested && typeof nested === "object" && !Array.isArray(nested)) {

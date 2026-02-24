@@ -101,4 +101,63 @@ describe("renderMarkdownToFragment", () => {
     expect(root.textContent ?? "").toContain("<script>alert('x')</script>");
     expect(root.textContent ?? "").toContain("unsafe");
   });
+
+  it("renders common LaTeX math notation with structured math markup", () => {
+    const root = render(
+      [
+        "\\[",
+        "E=BLv",
+        "\\]",
+        "",
+        "I=\\frac{E}{R+r}=\\frac{BLv}{R+r}",
+        "",
+        "行内 \\(\\frac{a+b}{c}\\) 结束",
+        "",
+        "结论：\\(\\Rightarrow \\boxed{A \\times B}\\)",
+        "",
+        "`\\frac{x}{y}` 应保持不变",
+        "",
+        "```",
+        "\\frac{m}{n}",
+        "```",
+      ].join("\n"),
+    );
+
+    const displayMathNodes = Array.from(root.querySelectorAll(".math-display"));
+    expect(displayMathNodes).toHaveLength(1);
+    expect(displayMathNodes[0]?.textContent?.replace(/\s+/g, "")).toContain("E=BLv");
+
+    const inlineMathNodes = Array.from(root.querySelectorAll(".math-inline"));
+    expect(inlineMathNodes.length).toBeGreaterThanOrEqual(2);
+
+    const fracNodes = Array.from(root.querySelectorAll(".math-frac"));
+    expect(fracNodes.length).toBeGreaterThanOrEqual(3);
+
+    const boxedNode = root.querySelector(".math-boxed");
+    expect(boxedNode).not.toBeNull();
+    expect(boxedNode?.textContent?.replace(/\s+/g, "")).toContain("A×B");
+    expect(root.textContent ?? "").toContain("⇒");
+
+    const codeNodes = Array.from(root.querySelectorAll("code")).map((node) => node.textContent ?? "");
+    expect(codeNodes).toContain("\\frac{x}{y}");
+    expect(codeNodes).toContain("\\frac{m}{n}");
+    expect(root.textContent ?? "").not.toContain("\\Rightarrow");
+    expect(root.textContent ?? "").not.toContain("\\boxed");
+  });
+
+  it("supports dollar-delimited inline and block math", () => {
+    const root = render(
+      [
+        "速度公式：$v=\\frac{s}{t}$",
+        "",
+        "$$",
+        "F=ma",
+        "$$",
+      ].join("\n"),
+    );
+
+    expect(root.querySelectorAll(".math-inline")).toHaveLength(1);
+    expect(root.querySelectorAll(".math-display")).toHaveLength(1);
+    expect((root.textContent ?? "").replace(/\s+/g, "")).toContain("F=ma");
+  });
 });

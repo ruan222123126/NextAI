@@ -43,6 +43,7 @@ interface ProviderInfo {
   openai_compatible?: boolean;
   api_key_prefix?: string;
   models: ModelInfo[];
+  reasoning_effort?: string;
   store?: boolean;
   headers?: Record<string, string>;
   timeout_ms?: number;
@@ -156,6 +157,8 @@ export function createModelDomain(ctx: any) {
     modelsProviderTypeSelect,
     modelsProviderNameInput,
     modelsProviderTimeoutMSInput,
+    modelsProviderReasoningEffortField,
+    modelsProviderReasoningEffortSelect,
     modelsProviderEnabledInput,
     modelsProviderStoreField,
     modelsProviderStoreInput,
@@ -853,7 +856,44 @@ function providerSupportsCustomModels(providerTypeID: string): boolean {
 
 function providerSupportsStore(providerTypeID: string): boolean {
   const normalized = normalizeProviderTypeValue(providerTypeID);
-  return normalized === "codex-compatible";
+  if (normalized === "codex-compatible" || normalized === "openai-compatible") {
+    return true;
+  }
+  const providerID = normalizeProviderIDValue(providerTypeID);
+  if (providerID === "" || providerID === "openai") {
+    return false;
+  }
+  const provider = state.providers.find(
+    (item: ProviderInfo) => normalizeProviderIDValue(item.id) === providerID,
+  );
+  if (!provider) {
+    return false;
+  }
+  if (isCodexCompatibleProviderID(provider.id)) {
+    return true;
+  }
+  return provider.openai_compatible === true;
+}
+
+function providerSupportsReasoningEffort(providerTypeID: string): boolean {
+  const normalized = normalizeProviderTypeValue(providerTypeID);
+  if (normalized === "openai" || normalized === "openai-compatible" || normalized === "codex-compatible") {
+    return true;
+  }
+  const providerID = normalizeProviderIDValue(providerTypeID);
+  if (providerID === "") {
+    return false;
+  }
+  if (providerID === "openai" || isCodexCompatibleProviderID(providerID)) {
+    return true;
+  }
+  const provider = state.providers.find(
+    (item: ProviderInfo) => normalizeProviderIDValue(item.id) === providerID,
+  );
+  if (!provider) {
+    return false;
+  }
+  return provider.openai_compatible === true;
 }
 
 function syncProviderStoreField(providerTypeID: string): void {
@@ -865,9 +905,20 @@ function syncProviderStoreField(providerTypeID: string): void {
   }
 }
 
+function syncProviderReasoningEffortField(providerTypeID: string): void {
+  const enabled = providerSupportsReasoningEffort(providerTypeID);
+  modelsProviderReasoningEffortField.hidden = !enabled;
+  modelsProviderReasoningEffortSelect.disabled = !enabled;
+  if (!enabled) {
+    modelsProviderReasoningEffortSelect.value = "";
+  }
+  syncCustomSelect(modelsProviderReasoningEffortSelect);
+}
+
 function syncProviderCustomModelsField(providerTypeID: string): void {
   const enabled = providerSupportsCustomModels(providerTypeID);
   syncProviderStoreField(providerTypeID);
+  syncProviderReasoningEffortField(providerTypeID);
   modelsProviderCustomModelsField.hidden = false;
   modelsProviderCustomModelsAddButton.disabled = !enabled;
   for (const input of Array.from(
@@ -1048,6 +1099,7 @@ function resetProviderModalForm(): void {
   modelsProviderAPIKeyInput.value = "";
   modelsProviderBaseURLInput.value = "";
   modelsProviderTimeoutMSInput.value = "";
+  modelsProviderReasoningEffortSelect.value = "";
   modelsProviderEnabledInput.checked = true;
   modelsProviderStoreInput.checked = false;
   resetProviderKVEditor(modelsProviderHeadersRows, "headers");
@@ -1104,6 +1156,7 @@ function populateProviderForm(providerID: string): void {
   modelsProviderEnabledInput.checked = provider.enabled !== false;
   modelsProviderStoreInput.checked = provider.store === true;
   modelsProviderTimeoutMSInput.value = typeof provider.timeout_ms === "number" ? String(provider.timeout_ms) : "";
+  modelsProviderReasoningEffortSelect.value = provider.reasoning_effort ?? "";
   populateProviderHeaderRows(provider);
   populateProviderAliasRows(provider);
   populateProviderCustomModelsRows(provider);
@@ -1194,6 +1247,13 @@ async function upsertProvider(options: UpsertProviderOptions = {}): Promise<bool
       : providerSupportsStore(providerID);
   if (storeEnabled) {
     payload.store = modelsProviderStoreInput.checked;
+  }
+  const reasoningEffortEnabled =
+    state.providerModal.mode === "create"
+      ? providerSupportsReasoningEffort(selectedProviderType)
+      : providerSupportsReasoningEffort(providerID);
+  if (reasoningEffortEnabled) {
+    payload.reasoning_effort = modelsProviderReasoningEffortSelect.value.trim().toLowerCase();
   }
   const apiKey = modelsProviderAPIKeyInput.value.trim();
   if (apiKey !== "") {
