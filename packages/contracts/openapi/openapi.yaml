@@ -82,6 +82,103 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/AgentProcessResponse' }
+  /v1/messages:
+    post:
+      summary: Claude-compatible messages API adapter
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ClaudeCompatMessagesRequest' }
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ClaudeCompatMessageResponse' }
+            text/event-stream:
+              schema: { type: string }
+        '400':
+          description: invalid request
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ClaudeCompatErrorResponse' }
+  /v1/messages/count_tokens:
+    post:
+      summary: Claude-compatible count tokens adapter
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ClaudeCompatMessagesRequest' }
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ClaudeCompatCountTokensResponse' }
+        '400':
+          description: invalid request
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ClaudeCompatErrorResponse' }
+  /agent/self/sessions/bootstrap:
+    post:
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SelfBootstrapRequest' }
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SelfBootstrapResponse' }
+  /agent/self/sessions/{session_id}/model:
+    put:
+      parameters:
+        - in: path
+          name: session_id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SelfSessionModelRequest' }
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SelfSessionModelResponse' }
+  /agent/self/config-mutations/preview:
+    post:
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SelfMutationPreviewRequest' }
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SelfMutationPreviewResponse' }
+  /agent/self/config-mutations/apply:
+    post:
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SelfMutationApplyRequest' }
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SelfMutationApplyResponse' }
   /channels/qq/inbound:
     post:
       summary: Accept QQ inbound event and dispatch to agent process
@@ -581,6 +678,207 @@ components:
           type: array
           items: { $ref: '#/components/schemas/AgentEvent' }
       required: [reply]
+    ClaudeCompatMessage:
+      type: object
+      properties:
+        role: { type: string, enum: [user, assistant, system, tool] }
+        content:
+          oneOf:
+            - type: string
+            - type: array
+              items:
+                type: object
+                additionalProperties: true
+      required: [role, content]
+    ClaudeCompatMessagesRequest:
+      type: object
+      properties:
+        model: { type: string, minLength: 1 }
+        max_tokens: { type: integer, minimum: 1 }
+        messages:
+          type: array
+          minItems: 1
+          items: { $ref: '#/components/schemas/ClaudeCompatMessage' }
+        system:
+          nullable: true
+        tools:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        metadata:
+          type: object
+          additionalProperties: true
+        stream: { type: boolean, default: false }
+      required: [model, max_tokens, messages]
+    ClaudeCompatUsage:
+      type: object
+      properties:
+        input_tokens: { type: integer, minimum: 0 }
+        cache_creation_input_tokens: { type: integer, minimum: 0 }
+        cache_read_input_tokens: { type: integer, minimum: 0 }
+        output_tokens: { type: integer, minimum: 0 }
+        service_tier: { type: string }
+      required: [input_tokens, cache_creation_input_tokens, cache_read_input_tokens, output_tokens, service_tier]
+    ClaudeCompatMessageResponse:
+      type: object
+      properties:
+        id: { type: string, minLength: 1 }
+        type: { type: string, enum: [message] }
+        role: { type: string, enum: [assistant] }
+        model: { type: string, minLength: 1 }
+        content:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        stop_reason: { type: string }
+        stop_sequence:
+          nullable: true
+        usage: { $ref: '#/components/schemas/ClaudeCompatUsage' }
+      required: [id, type, role, model, content, stop_reason, usage]
+    ClaudeCompatErrorResponse:
+      type: object
+      properties:
+        type: { type: string, enum: [error] }
+        error:
+          type: object
+          properties:
+            type: { type: string }
+            message: { type: string }
+          required: [type, message]
+      required: [type, error]
+    ClaudeCompatCountTokensResponse:
+      type: object
+      properties:
+        input_tokens: { type: integer, minimum: 0 }
+      required: [input_tokens]
+    ChatActiveLLMOverride:
+      type: object
+      properties:
+        provider_id: { type: string, minLength: 1 }
+        model: { type: string, minLength: 1 }
+        updated_at: { type: string, format: date-time }
+      required: [provider_id, model, updated_at]
+    SelfBootstrapRequest:
+      type: object
+      properties:
+        user_id: { type: string, minLength: 1 }
+        channel: { type: string, minLength: 1, default: console }
+        session_seed: { type: string, minLength: 1 }
+        first_input: { type: string, minLength: 1 }
+        prompt_mode:
+          type: string
+          enum: [default, codex, claude]
+        stream: { type: boolean, default: false }
+      required: [user_id, first_input]
+    SelfBootstrapResponse:
+      type: object
+      properties:
+        chat: { $ref: '#/components/schemas/ChatSpec' }
+        reply: { type: string }
+        events:
+          type: array
+          items: { $ref: '#/components/schemas/AgentEvent' }
+        applied_model: { $ref: '#/components/schemas/ActiveModelSlotConfig' }
+      required: [chat, reply, applied_model]
+    SelfSessionModelRequest:
+      type: object
+      properties:
+        user_id: { type: string, minLength: 1 }
+        channel: { type: string, minLength: 1, default: console }
+        provider_id: { type: string, minLength: 1 }
+        model: { type: string, minLength: 1 }
+      required: [user_id, provider_id, model]
+    SelfSessionModelResponse:
+      type: object
+      properties:
+        session_id: { type: string, minLength: 1 }
+        chat_id: { type: string, minLength: 1 }
+        active_llm_override: { $ref: '#/components/schemas/ChatActiveLLMOverride' }
+      required: [session_id, chat_id, active_llm_override]
+    SelfJSONPatchOperation:
+      type: object
+      properties:
+        op: { type: string, enum: [add, replace, remove] }
+        path: { type: string, minLength: 1 }
+        value:
+          nullable: true
+      required: [op, path]
+    SelfMutationOperation:
+      type: object
+      properties:
+        kind: { type: string, enum: [replace, json_patch, text_rewrite] }
+        path: { type: string }
+        value:
+          nullable: true
+        search: { type: string }
+        replace: { type: string }
+        patch:
+          type: array
+          items: { $ref: '#/components/schemas/SelfJSONPatchOperation' }
+      required: [kind]
+    SelfMutationPreviewRequest:
+      type: object
+      properties:
+        target: { type: string, enum: [workspace_file, provider_config, active_llm] }
+        operations:
+          type: array
+          minItems: 1
+          items: { $ref: '#/components/schemas/SelfMutationOperation' }
+        allow_sensitive: { type: boolean, default: false }
+      required: [target, operations]
+    SelfMutationChecks:
+      type: object
+      properties:
+        path_whitelist_passed: { type: boolean }
+        structure_valid: { type: boolean }
+        risk_level: { type: string, enum: [low, medium, high] }
+        sensitive_fields:
+          type: array
+          items: { type: string }
+        denied_paths:
+          type: array
+          items: { type: string }
+      required: [path_whitelist_passed, structure_valid, risk_level]
+    SelfMutationDiffSummary:
+      type: object
+      properties:
+        target: { type: string }
+        path: { type: string }
+        changed: { type: boolean }
+        before_hash: { type: string }
+        after_hash: { type: string }
+      required: [target, path, changed, before_hash, after_hash]
+    SelfMutationPreviewResponse:
+      type: object
+      properties:
+        mutation_id: { type: string, minLength: 1 }
+        expires_at: { type: string, format: date-time }
+        confirm_hash: { type: string, minLength: 1 }
+        checks: { $ref: '#/components/schemas/SelfMutationChecks' }
+        diff_summary:
+          type: array
+          items: { $ref: '#/components/schemas/SelfMutationDiffSummary' }
+        unified_diff: { type: string }
+        requires_sensitive_allow: { type: boolean }
+      required: [mutation_id, expires_at, confirm_hash, checks, diff_summary, unified_diff, requires_sensitive_allow]
+    SelfMutationApplyRequest:
+      type: object
+      properties:
+        mutation_id: { type: string, minLength: 1 }
+        confirm_hash: { type: string, minLength: 1 }
+        allow_sensitive: { type: boolean, default: false }
+      required: [mutation_id, confirm_hash]
+    SelfMutationApplyResponse:
+      type: object
+      properties:
+        applied: { type: boolean }
+        applied_targets:
+          type: array
+          items: { type: string }
+        audit_id: { type: string, minLength: 1 }
+      required: [applied, applied_targets, audit_id]
     CronJobSpec:
       type: object
       properties:
@@ -781,6 +1079,9 @@ components:
         models:
           type: array
           items: { $ref: '#/components/schemas/ModelInfo' }
+        reasoning_effort:
+          type: string
+          enum: [minimal, low, medium, high]
         store: { type: boolean }
         allow_custom_base_url: { type: boolean }
         enabled: { type: boolean }
@@ -808,6 +1109,9 @@ components:
         api_key: { type: string }
         base_url: { type: string }
         display_name: { type: string }
+        reasoning_effort:
+          type: string
+          enum: [minimal, low, medium, high]
         enabled: { type: boolean }
         store: { type: boolean }
         headers:

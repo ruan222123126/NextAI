@@ -507,6 +507,244 @@ func TestAPIKeyAuthMiddleware(t *testing.T) {
 	}
 }
 
+func TestClaudeCompatMessagesNonStream(t *testing.T) {
+	srv := newTestServer(t)
+
+	reqBody := `{
+		"model":"claude-sonnet-4-20250514",
+		"max_tokens":128,
+		"messages":[
+			{"role":"user","content":"用一句话回复我"}
+		],
+		"metadata":{"user_id":"u-claude-compat"},
+		"stream":false
+	}`
+
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(reqBody)))
+	if w.Code != http.StatusOK {
+		t.Fatalf("claude compat non-stream status=%d body=%s", w.Code, w.Body.String())
+	}
+
+	var resp map[string]interface{}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response failed: %v body=%s", err, w.Body.String())
+	}
+	if resp["type"] != "message" {
+		t.Fatalf("unexpected type: %#v body=%s", resp["type"], w.Body.String())
+	}
+	if resp["role"] != "assistant" {
+		t.Fatalf("unexpected role: %#v body=%s", resp["role"], w.Body.String())
+	}
+	if resp["model"] != "claude-sonnet-4-20250514" {
+		t.Fatalf("unexpected model: %#v body=%s", resp["model"], w.Body.String())
+	}
+	if resp["stop_reason"] != "end_turn" {
+		t.Fatalf("unexpected stop_reason: %#v body=%s", resp["stop_reason"], w.Body.String())
+	}
+
+	content, ok := resp["content"].([]interface{})
+	if !ok || len(content) == 0 {
+		t.Fatalf("content should be non-empty array, body=%s", w.Body.String())
+	}
+	block, ok := content[0].(map[string]interface{})
+	if !ok {
+		t.Fatalf("content[0] should be object, body=%s", w.Body.String())
+	}
+	if block["type"] != "text" {
+		t.Fatalf("content[0].type should be text, got=%#v body=%s", block["type"], w.Body.String())
+	}
+	text, _ := block["text"].(string)
+	if strings.TrimSpace(text) == "" {
+		t.Fatalf("content[0].text should be non-empty, body=%s", w.Body.String())
+	}
+
+	usage, ok := resp["usage"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("usage should be object, body=%s", w.Body.String())
+	}
+	if _, ok := usage["input_tokens"]; !ok {
+		t.Fatalf("usage.input_tokens missing, body=%s", w.Body.String())
+	}
+	if _, ok := usage["output_tokens"]; !ok {
+		t.Fatalf("usage.output_tokens missing, body=%s", w.Body.String())
+	}
+}
+
+func TestClaudeCompatMessagesStream(t *testing.T) {
+	srv := newTestServer(t)
+
+	reqBody := `{
+		"model":"claude-sonnet-4-20250514",
+		"max_tokens":128,
+		"messages":[
+			{"role":"user","content":"stream test"}
+		],
+		"stream":true
+	}`
+
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(reqBody)))
+	if w.Code != http.StatusOK {
+		t.Fatalf("claude compat stream status=%d body=%s", w.Code, w.Body.String())
+	}
+	contentType := w.Header().Get("Content-Type")
+	if !strings.Contains(strings.ToLower(contentType), "text/event-stream") {
+		t.Fatalf("stream content-type invalid: %q body=%s", contentType, w.Body.String())
+	}
+	body := w.Body.String()
+	for _, expected := range []string{
+		"event: message_start",
+		"event: content_block_start",
+		"event: content_block_delta",
+		"event: content_block_stop",
+		"event: message_delta",
+		"event: message_stop",
+	} {
+		if !strings.Contains(body, expected) {
+			t.Fatalf("stream body missing %q, body=%s", expected, body)
+		}
+	}
+}
+
+func TestClaudeCompatMessagesValidationError(t *testing.T) {
+	srv := newTestServer(t)
+
+	reqBody := `{
+		"model":"claude-sonnet-4-20250514",
+		"messages":[
+			{"role":"user","content":"hello"}
+		]
+	}`
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(reqBody)))
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got=%d body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"type":"error"`) {
+		t.Fatalf("expected claude error envelope, body=%s", w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"invalid_request_error"`) {
+		t.Fatalf("expected invalid_request_error, body=%s", w.Body.String())
+	}
+}
+
+func TestClaudeCompatCountTokens(t *testing.T) {
+	srv := newTestServer(t)
+
+	reqBody := `{
+		"model":"claude-sonnet-4-20250514",
+		"max_tokens":64,
+		"messages":[
+			{"role":"user","content":"count these tokens"}
+		],
+		"tools":[
+			{"name":"Read","description":"read file","input_schema":{"type":"object"}}
+		]
+	}`
+
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/v1/messages/count_tokens", strings.NewReader(reqBody)))
+	if w.Code != http.StatusOK {
+		t.Fatalf("count tokens status=%d body=%s", w.Code, w.Body.String())
+	}
+
+	var resp map[string]interface{}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response failed: %v body=%s", err, w.Body.String())
+	}
+	rawInputTokens, ok := resp["input_tokens"]
+	if !ok {
+		t.Fatalf("input_tokens missing, body=%s", w.Body.String())
+	}
+	inputTokens, ok := intFromAny(rawInputTokens)
+	if !ok || inputTokens <= 0 {
+		t.Fatalf("input_tokens should be positive integer, got=%#v body=%s", rawInputTokens, w.Body.String())
+	}
+}
+
+func TestBuildClaudeCompatContentBlocksIncludesToolUse(t *testing.T) {
+	events := []domain.AgentEvent{
+		{
+			Type: "tool_call",
+			Step: 1,
+			ToolCall: &domain.AgentToolCallPayload{
+				Name:  "Read",
+				Input: map[string]interface{}{"file_path": "/tmp/a.txt", "offset": 0},
+			},
+		},
+		{
+			Type: "tool_result",
+			Step: 1,
+			ToolResult: &domain.AgentToolResultPayload{
+				Name:    "Read",
+				OK:      true,
+				Summary: "ok",
+			},
+		},
+	}
+
+	blocks, hasToolUse := buildClaudeCompatContentBlocks("final reply", events)
+	if !hasToolUse {
+		t.Fatalf("expected hasToolUse=true")
+	}
+	if len(blocks) < 2 {
+		t.Fatalf("expected at least 2 content blocks, got=%d", len(blocks))
+	}
+	if blocks[0]["type"] != "tool_use" {
+		t.Fatalf("expected first block type tool_use, got=%#v", blocks[0]["type"])
+	}
+	if blocks[0]["name"] != "Read" {
+		t.Fatalf("expected tool_use name=Read, got=%#v", blocks[0]["name"])
+	}
+	if blocks[len(blocks)-1]["type"] != "text" {
+		t.Fatalf("expected last block type text, got=%#v", blocks[len(blocks)-1]["type"])
+	}
+}
+
+func TestClaudeCompatStreamRendersToolUseDelta(t *testing.T) {
+	srv := newTestServer(t)
+	w := httptest.NewRecorder()
+	response := claudeCompatMessageResponse{
+		ID:    "msg_test",
+		Type:  "message",
+		Role:  "assistant",
+		Model: "claude-sonnet-4-20250514",
+		Content: []map[string]interface{}{
+			{
+				"type":  "tool_use",
+				"id":    "toolu_001",
+				"name":  "Read",
+				"input": map[string]interface{}{"file_path": "/tmp/a.txt"},
+			},
+			{
+				"type": "text",
+				"text": "done",
+			},
+		},
+		StopReason: "end_turn",
+		Usage: claudeCompatUsage{
+			InputTokens:              1,
+			CacheCreationInputTokens: 0,
+			CacheReadInputTokens:     0,
+			OutputTokens:             1,
+			ServiceTier:              "standard",
+		},
+	}
+
+	srv.writeClaudeCompatStreamResponse(w, response)
+	body := w.Body.String()
+	if !strings.Contains(body, `"type":"input_json_delta"`) {
+		t.Fatalf("expected stream to contain input_json_delta, body=%s", body)
+	}
+	if !strings.Contains(body, `"name":"Read"`) {
+		t.Fatalf("expected stream to contain tool name, body=%s", body)
+	}
+	if !strings.Contains(body, `"type":"text_delta"`) {
+		t.Fatalf("expected stream to contain text_delta, body=%s", body)
+	}
+}
+
 func TestChatCreateAndGetHistory(t *testing.T) {
 	srv := newTestServer(t)
 
@@ -1536,18 +1774,25 @@ func TestBuildSystemLayersForCodexModeUsesSingleLayerWhenPromptTemplatesDisabled
 	if err != nil {
 		t.Fatalf("buildSystemLayersForMode(codex) failed: %v", err)
 	}
-	if len(layers) != 1 {
-		t.Fatalf("expected exactly 1 layer, got=%d", len(layers))
+	if len(layers) != 2 {
+		t.Fatalf("expected exactly 2 layers, got=%d", len(layers))
 	}
-	layer := layers[0]
-	if layer.Name != "codex_base_system" {
-		t.Fatalf("expected layer name codex_base_system, got=%q", layer.Name)
+	baseLayer := layers[0]
+	if baseLayer.Name != "codex_base_system" {
+		t.Fatalf("expected first layer name codex_base_system, got=%q", baseLayer.Name)
 	}
-	if layer.Source != codexBasePromptRelativePath {
-		t.Fatalf("expected source=%q, got=%q", codexBasePromptRelativePath, layer.Source)
+	if baseLayer.Source != codexBasePromptRelativePath {
+		t.Fatalf("expected source=%q, got=%q", codexBasePromptRelativePath, baseLayer.Source)
 	}
-	if !strings.Contains(layer.Content, "## "+codexBasePromptRelativePath) {
-		t.Fatalf("unexpected codex layer content header: %q", layer.Content)
+	if !strings.Contains(baseLayer.Content, "## "+codexBasePromptRelativePath) {
+		t.Fatalf("unexpected codex layer content header: %q", baseLayer.Content)
+	}
+	localLayer := layers[1]
+	if localLayer.Name != "codex_local_policy_system" {
+		t.Fatalf("expected second layer name codex_local_policy_system, got=%q", localLayer.Name)
+	}
+	if localLayer.Source != codexLocalPolicyRelativePath {
+		t.Fatalf("expected local policy source=%q, got=%q", codexLocalPolicyRelativePath, localLayer.Source)
 	}
 }
 
@@ -1609,8 +1854,12 @@ func TestBuildSystemLayersForCodexModeIncludesTemplateLayersWhenFeatureEnabled(t
 	if strings.Contains(collabLayer.Content, "{{KNOWN_MODE_NAMES}}") || strings.Contains(collabLayer.Content, "{{REQUEST_USER_INPUT_AVAILABILITY}}") {
 		t.Fatalf("expected collaboration placeholders to be rendered, got=%q", collabLayer.Content)
 	}
-	if _, exists := byName["codex_local_policy_system"]; exists {
-		t.Fatalf("expected codex_local_policy_system to stay disabled in v1 path")
+	localPolicyLayer, exists := byName["codex_local_policy_system"]
+	if !exists {
+		t.Fatalf("missing codex_local_policy_system layer in v1 path: %#v", layers)
+	}
+	if localPolicyLayer.Source != codexLocalPolicyRelativePath {
+		t.Fatalf("expected local policy source=%q, got=%q", codexLocalPolicyRelativePath, localPolicyLayer.Source)
 	}
 	if _, exists := byName["codex_tool_guide_system"]; exists {
 		t.Fatalf("expected codex_tool_guide_system to stay disabled in v1 path")
@@ -2197,14 +2446,20 @@ func TestGetAgentSystemLayersSupportsCodexModeQuery(t *testing.T) {
 		t.Fatalf("expected first layer codex_base_system, got=%q", body.Layers[0].Name)
 	}
 	foundCollab := false
+	foundLocalPolicy := false
 	for _, layer := range body.Layers {
 		if layer.Name == "codex_collaboration_default_system" {
 			foundCollab = true
-			break
+		}
+		if layer.Name == "codex_local_policy_system" {
+			foundLocalPolicy = true
 		}
 	}
 	if !foundCollab {
 		t.Fatalf("expected codex_collaboration_default_system in response, got=%#v", body.Layers)
+	}
+	if !foundLocalPolicy {
+		t.Fatalf("expected codex_local_policy_system in response, got=%#v", body.Layers)
 	}
 	sumTokens := 0
 	for _, layer := range body.Layers {
@@ -2339,18 +2594,33 @@ func TestGetAgentSystemLayersSupportsClaudeModeQuery(t *testing.T) {
 	if body.ModeVariant != promptModeVariantClaudeV1 {
 		t.Fatalf("expected mode_variant=%q, got=%q", promptModeVariantClaudeV1, body.ModeVariant)
 	}
-	if len(body.Layers) < 1 {
-		t.Fatalf("expected at least 1 layer, got=%d", len(body.Layers))
+	requiredOrderedLayers := []string{
+		"claude_identity_system",
+		"claude_workflow_system",
+		"claude_reminder_start_system",
+		"claude_reminder_end_system",
 	}
-	if body.Layers[0].Name != "claude_base_system" {
-		t.Fatalf("expected first layer claude_base_system, got=%q", body.Layers[0].Name)
+	if len(body.Layers) < len(requiredOrderedLayers) {
+		t.Fatalf("expected at least %d layers, got=%d", len(requiredOrderedLayers), len(body.Layers))
+	}
+	for index, name := range requiredOrderedLayers {
+		if body.Layers[index].Name != name {
+			t.Fatalf("expected layer[%d]=%q, got=%q", index, name, body.Layers[index].Name)
+		}
 	}
 	sumTokens := 0
+	hasToolAdapterLayer := false
 	for _, layer := range body.Layers {
 		if strings.TrimSpace(layer.LayerHash) == "" {
 			t.Fatalf("expected non-empty layer_hash for layer %q", layer.Name)
 		}
+		if layer.Name == "claude_nextai_tool_adapter_system" {
+			hasToolAdapterLayer = true
+		}
 		sumTokens += layer.EstimatedTokens
+	}
+	if !hasToolAdapterLayer {
+		t.Fatalf("expected claude_nextai_tool_adapter_system in claude response, got=%#v", body.Layers)
 	}
 	if sumTokens != body.EstimatedTokensTotal {
 		t.Fatalf("expected estimated_tokens_total=%d, got=%d", sumTokens, body.EstimatedTokensTotal)
@@ -2976,6 +3246,105 @@ func TestProcessAgentStreamCompletedEventIncludesModelRequestMeta(t *testing.T) 
 	}
 	if !strings.Contains(body, `"system_layers"`) {
 		t.Fatalf("expected system_layers in model_request meta, body=%s", body)
+	}
+}
+
+func TestProcessAgentOpenAICompatibleUsesPromptCacheAndPreviousResponseID(t *testing.T) {
+	requests := make([]map[string]interface{}, 0, 2)
+	responseIDs := []string{"chatcmpl_1", "chatcmpl_2"}
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/chat/completions" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		var req map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request failed: %v", err)
+		}
+		requests = append(requests, req)
+		currentIdx := len(requests) - 1
+		responseID := responseIDs[currentIdx]
+		replyText := "reply " + strconv.Itoa(currentIdx+1)
+		_, _ = fmt.Fprintf(w, `{"id":%q,"choices":[{"message":{"content":%q}}]}`, responseID, replyText)
+	}))
+	defer mock.Close()
+
+	srv := newTestServer(t)
+
+	configProvider := `{"api_key":"sk-test","base_url":"` + mock.URL + `","store":true}`
+	w1 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w1, httptest.NewRequest(http.MethodPut, "/models/openai-compatible/config", strings.NewReader(configProvider)))
+	if w1.Code != http.StatusOK {
+		t.Fatalf("config provider status=%d body=%s", w1.Code, w1.Body.String())
+	}
+
+	setActive := `{"provider_id":"openai-compatible","model":"ark-code-latest"}`
+	w2 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w2, httptest.NewRequest(http.MethodPut, "/models/active", strings.NewReader(setActive)))
+	if w2.Code != http.StatusOK {
+		t.Fatalf("set active status=%d body=%s", w2.Code, w2.Body.String())
+	}
+
+	req1 := `{"input":[{"role":"user","type":"message","content":[{"type":"text","text":"first"}]}],"session_id":"s-cache-openai-compatible","user_id":"u-cache-openai-compatible","channel":"console","stream":false}`
+	w3 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w3, httptest.NewRequest(http.MethodPost, "/agent/process", strings.NewReader(req1)))
+	if w3.Code != http.StatusOK {
+		t.Fatalf("first process status=%d body=%s", w3.Code, w3.Body.String())
+	}
+
+	req2 := `{"input":[{"role":"user","type":"message","content":[{"type":"text","text":"second"}]}],"session_id":"s-cache-openai-compatible","user_id":"u-cache-openai-compatible","channel":"console","stream":false}`
+	w4 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w4, httptest.NewRequest(http.MethodPost, "/agent/process", strings.NewReader(req2)))
+	if w4.Code != http.StatusOK {
+		t.Fatalf("second process status=%d body=%s", w4.Code, w4.Body.String())
+	}
+
+	if len(requests) != 2 {
+		t.Fatalf("expected 2 provider requests, got=%d", len(requests))
+	}
+
+	first := requests[0]
+	if first["prompt_cache_key"] != "s-cache-openai-compatible" {
+		t.Fatalf("first prompt_cache_key=%#v", first["prompt_cache_key"])
+	}
+	if firstStore, _ := first["store"].(bool); !firstStore {
+		t.Fatalf("expected first request store=true, got=%#v", first["store"])
+	}
+	if _, ok := first["previous_response_id"]; ok {
+		t.Fatalf("first request should not carry previous_response_id, got=%#v", first["previous_response_id"])
+	}
+
+	second := requests[1]
+	if second["prompt_cache_key"] != "s-cache-openai-compatible" {
+		t.Fatalf("second prompt_cache_key=%#v", second["prompt_cache_key"])
+	}
+	if secondStore, _ := second["store"].(bool); !secondStore {
+		t.Fatalf("expected second request store=true, got=%#v", second["store"])
+	}
+	if second["previous_response_id"] != "chatcmpl_1" {
+		t.Fatalf("second previous_response_id=%#v", second["previous_response_id"])
+	}
+
+	var latestAssistant domain.RuntimeMessage
+	srv.store.Read(func(st *repo.State) {
+		for _, chat := range st.Chats {
+			if chat.SessionID != "s-cache-openai-compatible" || chat.UserID != "u-cache-openai-compatible" || chat.Channel != "console" {
+				continue
+			}
+			history := st.Histories[chat.ID]
+			for idx := len(history) - 1; idx >= 0; idx-- {
+				if history[idx].Role == "assistant" {
+					latestAssistant = history[idx]
+					return
+				}
+			}
+		}
+	})
+	if latestAssistant.ID == "" {
+		t.Fatalf("expected persisted assistant message")
+	}
+	if latestAssistant.Metadata == nil || latestAssistant.Metadata["provider_response_id"] != "chatcmpl_2" {
+		t.Fatalf("expected assistant metadata provider_response_id=chatcmpl_2, got=%#v", latestAssistant.Metadata)
 	}
 }
 
@@ -3808,14 +4177,27 @@ func TestProcessAgentCodexPromptModePersistsAndIsReused(t *testing.T) {
 	}
 	for idx, reqBody := range requests[:2] {
 		systemMessages := collectSystemMessagesFromModelRequest(t, reqBody)
-		if len(systemMessages) != 1 {
-			t.Fatalf("request %d expected exactly 1 system message in codex mode, got=%d", idx+1, len(systemMessages))
+		if len(systemMessages) != 2 {
+			t.Fatalf("request %d expected exactly 2 system messages in codex mode, got=%d", idx+1, len(systemMessages))
 		}
-		if !strings.Contains(systemMessages[0], "## "+codexBasePromptRelativePath) {
-			t.Fatalf("request %d should use codex prompt layer, got=%q", idx+1, systemMessages[0])
+		foundCodexBase := false
+		foundLocalPolicy := false
+		for _, msg := range systemMessages {
+			if strings.Contains(msg, "## "+codexBasePromptRelativePath) {
+				foundCodexBase = true
+			}
+			if strings.Contains(msg, "## "+codexLocalPolicyRelativePath) {
+				foundLocalPolicy = true
+			}
+			if strings.Contains(msg, "ai-tools.md") {
+				t.Fatalf("request %d should not include default tool guide layer in codex mode, got=%q", idx+1, msg)
+			}
 		}
-		if strings.Contains(systemMessages[0], aiToolsGuideRelativePath) || strings.Contains(systemMessages[0], "ai-tools.md") {
-			t.Fatalf("request %d should not include default prompt layers in codex mode, got=%q", idx+1, systemMessages[0])
+		if !foundCodexBase {
+			t.Fatalf("request %d should include codex prompt layer, got=%#v", idx+1, systemMessages)
+		}
+		if !foundLocalPolicy {
+			t.Fatalf("request %d should include codex local policy layer, got=%#v", idx+1, systemMessages)
 		}
 	}
 
@@ -3891,7 +4273,7 @@ func TestProcessAgentClaudePromptModePersistsAndIsReused(t *testing.T) {
 		if len(systemMessages) < 1 {
 			t.Fatalf("request %d expected at least 1 system message in claude mode, got=%d", idx+1, len(systemMessages))
 		}
-		if !strings.Contains(systemMessages[0], "## "+claudeBasePromptRelativePath) {
+		if !strings.Contains(systemMessages[0], "## "+claudeIdentityPromptRelativePath) {
 			t.Fatalf("request %d should start with claude prompt layer, got=%q", idx+1, systemMessages[0])
 		}
 		if strings.Contains(systemMessages[0], codexBasePromptRelativePath) {
@@ -4002,7 +4384,7 @@ func TestProcessAgentReturnsClaudePromptUnavailableWhenPromptMissing(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	claudePath := filepath.Join(repoRoot, filepath.FromSlash(claudeBasePromptRelativePath))
+	claudePath := filepath.Join(repoRoot, filepath.FromSlash(claudeIdentityPromptRelativePath))
 	backupPath := fmt.Sprintf("%s.bak-%d", claudePath, time.Now().UnixNano())
 	if err := os.Rename(claudePath, backupPath); err != nil {
 		t.Fatalf("rename claude prompt failed: %v", err)
@@ -4080,6 +4462,118 @@ func TestProcessAgentOmitsBlacklistedToolsFromModelRequest(t *testing.T) {
 	}
 	if !names["view"] || !names["edit"] {
 		t.Fatalf("expected line tools in model request, got=%#v", names)
+	}
+}
+
+func TestProcessAgentManualClaudeReadToolSupportsClaudeName(t *testing.T) {
+	srv := newTestServer(t)
+	_, absPath := newToolTestPath(t, "claude-read")
+	if err := os.WriteFile(absPath, []byte("line-1\nline-2\nline-3\n"), 0o644); err != nil {
+		t.Fatalf("seed tool test file failed: %v", err)
+	}
+
+	procReq := fmt.Sprintf(`{
+		"input":[{"role":"user","type":"message","content":[{"type":"text","text":"read file"}]}],
+		"session_id":"s-claude-read",
+		"user_id":"u-claude-read",
+		"channel":"console",
+		"stream":false,
+		"biz_params":{"prompt_mode":"claude","tool":{"name":"Read","input":{"file_path":%q,"offset":0,"limit":2}}}
+	}`, absPath)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/agent/process", strings.NewReader(procReq)))
+	if w.Code != http.StatusOK {
+		t.Fatalf("process status=%d body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "line-1") || !strings.Contains(w.Body.String(), "line-2") {
+		t.Fatalf("expected read output lines in response, body=%s", w.Body.String())
+	}
+}
+
+func TestProcessAgentManualNonClaudeReadToolNameRejected(t *testing.T) {
+	srv := newTestServer(t)
+	_, absPath := newToolTestPath(t, "non-claude-read")
+	if err := os.WriteFile(absPath, []byte("line-1\nline-2\n"), 0o644); err != nil {
+		t.Fatalf("seed tool test file failed: %v", err)
+	}
+
+	procReq := fmt.Sprintf(`{
+		"input":[{"role":"user","type":"message","content":[{"type":"text","text":"read file"}]}],
+		"session_id":"s-non-claude-read",
+		"user_id":"u-non-claude-read",
+		"channel":"console",
+		"stream":false,
+		"biz_params":{"prompt_mode":"default","tool":{"name":"Read","input":{"file_path":%q,"offset":0,"limit":2}}}
+	}`, absPath)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/agent/process", strings.NewReader(procReq)))
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got=%d body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"code":"tool_not_supported"`) {
+		t.Fatalf("expected tool_not_supported, body=%s", w.Body.String())
+	}
+}
+
+func TestProcessAgentPublishesClaudeToolDefinitionsOnlyInClaudeMode(t *testing.T) {
+	requests := make([]map[string]interface{}, 0, 2)
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/chat/completions" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		defer r.Body.Close()
+		body := map[string]interface{}{}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode request body failed: %v", err)
+		}
+		requests = append(requests, body)
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"provider reply"}}]}`))
+	}))
+	defer mock.Close()
+
+	srv := newTestServer(t)
+	configureOpenAIProviderForTest(t, srv, mock.URL)
+
+	claudeReq := `{"input":[{"role":"user","type":"message","content":[{"type":"text","text":"hello claude"}]}],"session_id":"s-claude-tools","user_id":"u-claude-tools","channel":"console","stream":false,"biz_params":{"prompt_mode":"claude"}}`
+	claudeW := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(claudeW, httptest.NewRequest(http.MethodPost, "/agent/process", strings.NewReader(claudeReq)))
+	if claudeW.Code != http.StatusOK {
+		t.Fatalf("claude process status=%d body=%s", claudeW.Code, claudeW.Body.String())
+	}
+
+	defaultReq := `{"input":[{"role":"user","type":"message","content":[{"type":"text","text":"hello default"}]}],"session_id":"s-default-tools","user_id":"u-default-tools","channel":"console","stream":false,"biz_params":{"prompt_mode":"default"}}`
+	defaultW := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(defaultW, httptest.NewRequest(http.MethodPost, "/agent/process", strings.NewReader(defaultReq)))
+	if defaultW.Code != http.StatusOK {
+		t.Fatalf("default process status=%d body=%s", defaultW.Code, defaultW.Body.String())
+	}
+
+	if len(requests) < 2 {
+		t.Fatalf("expected at least 2 provider requests, got=%d", len(requests))
+	}
+	toolNamesFromRequest := func(body map[string]interface{}) map[string]bool {
+		out := map[string]bool{}
+		rawTools, _ := body["tools"].([]interface{})
+		for _, rawTool := range rawTools {
+			toolObj, _ := rawTool.(map[string]interface{})
+			functionObj, _ := toolObj["function"].(map[string]interface{})
+			name, _ := functionObj["name"].(string)
+			if strings.TrimSpace(name) != "" {
+				out[name] = true
+			}
+		}
+		return out
+	}
+
+	claudeTools := toolNamesFromRequest(requests[0])
+	if !claudeTools["Read"] || !claudeTools["Bash"] || !claudeTools["TodoWrite"] || !claudeTools["Task"] {
+		t.Fatalf("expected claude request to include Claude tool definitions, got=%#v", claudeTools)
+	}
+
+	defaultTools := toolNamesFromRequest(requests[1])
+	if defaultTools["Read"] || defaultTools["Bash"] || defaultTools["TodoWrite"] || defaultTools["Task"] {
+		t.Fatalf("expected default request to exclude Claude-only tool definitions, got=%#v", defaultTools)
 	}
 }
 
@@ -4190,6 +4684,59 @@ func TestProcessAgentEditsSpecificFileLines(t *testing.T) {
 	}
 	if string(updated) != "line-1\nnew-2\nnew-3\nline-4\n" {
 		t.Fatalf("unexpected updated file content: %q", string(updated))
+	}
+}
+
+func TestProcessAgentEditCreatesMissingFileWithInitialRange(t *testing.T) {
+	srv := newTestServer(t)
+	absPath := filepath.Join(t.TempDir(), "nested", "created-by-edit.txt")
+
+	procReq := fmt.Sprintf(`{
+		"input":[{"role":"user","type":"message","content":[{"type":"text","text":"create file via edit"}]}],
+		"session_id":"s-edit-create-missing",
+		"user_id":"u-edit-create-missing",
+		"channel":"console",
+		"stream":false,
+		"edit":[{"path":%q,"start":1,"end":1,"content":"new-1\nnew-2"}]
+	}`, absPath)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/agent/process", strings.NewReader(procReq)))
+	if w.Code != http.StatusOK {
+		t.Fatalf("process status=%d body=%s", w.Code, w.Body.String())
+	}
+
+	created, err := os.ReadFile(absPath)
+	if err != nil {
+		t.Fatalf("read created file failed: %v", err)
+	}
+	if string(created) != "new-1\nnew-2" {
+		t.Fatalf("unexpected created file content: %q", string(created))
+	}
+}
+
+func TestProcessAgentAllowsCreateMissingFileWithNonInitialRange(t *testing.T) {
+	srv := newTestServer(t)
+	absPath := filepath.Join(t.TempDir(), "nested", "created-invalid.txt")
+
+	procReq := fmt.Sprintf(`{
+		"input":[{"role":"user","type":"message","content":[{"type":"text","text":"invalid create via edit"}]}],
+		"session_id":"s-edit-create-invalid-range",
+		"user_id":"u-edit-create-invalid-range",
+		"channel":"console",
+		"stream":false,
+		"edit":[{"path":%q,"start":2,"end":2,"content":"new-2"}]
+	}`, absPath)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/agent/process", strings.NewReader(procReq)))
+	if w.Code != http.StatusOK {
+		t.Fatalf("process status=%d body=%s", w.Code, w.Body.String())
+	}
+	created, err := os.ReadFile(absPath)
+	if err != nil {
+		t.Fatalf("read created file failed: %v", err)
+	}
+	if string(created) != "new-2" {
+		t.Fatalf("unexpected created file content: %q", string(created))
 	}
 }
 
@@ -5680,7 +6227,7 @@ func TestSetActiveModelsResolvesAlias(t *testing.T) {
 func TestConfigureProviderExposesModelAliasesInProviderInfo(t *testing.T) {
 	srv := newTestServer(t)
 
-	configProvider := `{"model_aliases":{"my-model":"my-model","fast":"gpt-4o-mini"},"headers":{"x-tenant":"nextai"},"timeout_ms":15000}`
+	configProvider := `{"model_aliases":{"my-model":"my-model","fast":"gpt-4o-mini"},"headers":{"x-tenant":"nextai"},"timeout_ms":15000,"reasoning_effort":"high"}`
 	w1 := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(w1, httptest.NewRequest(http.MethodPut, "/models/custom-openai/config", strings.NewReader(configProvider)))
 	if w1.Code != http.StatusOK {
@@ -5702,6 +6249,9 @@ func TestConfigureProviderExposesModelAliasesInProviderInfo(t *testing.T) {
 	}
 	if configured.TimeoutMS != 15000 {
 		t.Fatalf("expected timeout_ms in provider response, got=%d", configured.TimeoutMS)
+	}
+	if configured.ReasoningEffort != "high" {
+		t.Fatalf("expected reasoning_effort in provider response, got=%q", configured.ReasoningEffort)
 	}
 
 	w2 := httptest.NewRecorder()
@@ -5734,6 +6284,9 @@ func TestConfigureProviderExposesModelAliasesInProviderInfo(t *testing.T) {
 	}
 	if custom.TimeoutMS != 15000 {
 		t.Fatalf("expected timeout_ms in catalog provider, got=%d", custom.TimeoutMS)
+	}
+	if custom.ReasoningEffort != "high" {
+		t.Fatalf("expected reasoning_effort in catalog provider, got=%q", custom.ReasoningEffort)
 	}
 }
 

@@ -5,7 +5,13 @@
 - `/runtime-config`
 - `/chats`, `/chats/{chat_id}`, `/chats/batch-delete`
 - `/agent/process`
+- `/v1/messages`（Claude-compatible 适配入口）
+- `/v1/messages/count_tokens`（Claude-compatible token 预估）
 - `/agent/system-layers`
+- `/agent/self/sessions/bootstrap`
+- `/agent/self/sessions/{session_id}/model`
+- `/agent/self/config-mutations/preview`
+- `/agent/self/config-mutations/apply`
 - `/channels/qq/inbound`
 - `/channels/qq/state`
 - `/cron/jobs` 系列
@@ -15,6 +21,45 @@
 - `/workspace/files`, `/workspace/files/{file_path}`
 - `/workspace/uploads`, `/workspace/export`, `/workspace/import`
 - `/config/channels` 系列
+
+### SelfOps 契约（`/agent/self/*`）
+- `POST /agent/self/sessions/bootstrap`
+  - 单次原子入口：创建会话 + 写首条 user 输入 + 触发一次 process。
+  - `channel` 默认 `console`，`stream` 默认 `false`。
+  - 返回 `chat + reply + events + applied_model`。
+- `PUT /agent/self/sessions/{session_id}/model`
+  - 仅设置目标会话模型覆盖（`chat.meta.active_llm_override`），不影响全局 `/models/active`。
+  - 会校验 provider 存在、启用、model/alias 可解析。
+- 两阶段配置变更：
+  - `POST /agent/self/config-mutations/preview`
+  - `POST /agent/self/config-mutations/apply`
+
+#### preview -> apply 时序
+1. 调 `preview` 生成一次性 `mutation_id` 与 `confirm_hash`（默认 TTL 5 分钟）。
+2. `preview` 返回 `checks + diff_summary + unified_diff + requires_sensitive_allow`。
+3. 调 `apply` 必须带回同一 `mutation_id + confirm_hash`，且 `allow_sensitive` 必须与 preview 一致。
+4. 命中敏感字段且未显式放行时，`apply` 拒绝。
+
+#### 路径白名单（workspace_file target）
+- `prompts/**`
+- `prompt/**`
+- `docs/AI/**`
+- `config/models.json`
+- `config/active-llm.json`
+
+#### 敏感字段判定
+- `api_key`
+- 环境变量形态后缀：`*_KEY` / `*_TOKEN` / `*_SECRET`
+
+#### SelfOps 错误码
+- `session_not_found`
+- `session_model_invalid`
+- `mutation_not_found`
+- `mutation_expired`
+- `mutation_hash_mismatch`
+- `mutation_sensitive_denied`
+- `mutation_path_denied`
+- `mutation_apply_conflict`
 
 ### 渠道配置契约（`/config/channels`）
 - 支持类型：`console`、`webhook`、`qq`
@@ -217,7 +262,8 @@ Sample response:
 - `prompt_mode=codex`：
   - 必选注入 `prompts/codex/codex-rs/core/prompt.md`（codex base）。
   - 当 `NEXTAI_ENABLE_CODEX_MODE_V2=false`（`mode_variant=codex_v1`）：
-    - 维持原行为；仅当 `NEXTAI_ENABLE_PROMPT_TEMPLATES=true` 时追加 codex 模板层。
+    - 注入 `codex_local_policy_system`（`prompts/AGENTS.md`）以覆盖本地身份与策略约束。
+    - 仅当 `NEXTAI_ENABLE_PROMPT_TEMPLATES=true` 时追加 codex 模板层。
   - 当 `NEXTAI_ENABLE_CODEX_MODE_V2=true`（`mode_variant=codex_v2`）：
     - 按确定性顺序尝试注入：
       1. `codex_base_system`（必选）
@@ -240,14 +286,14 @@ Sample response:
     - 仅记录日志 `codex_prompt_shadow_diff`（含 `session_id/model_slug/file_hash/catalog_hash/diff_reason`），不改变接口响应。
   - 两个变体都不叠加 default 模式的系统层。
 - `prompt_mode=claude`：
-  - 必选注入 `prompts/claude/main.md`（claude base）。
-  - 可选按顺序注入：
-    1. `claude_doing_tasks_system`（`prompts/claude/doing-tasks.md`）
-    2. `claude_execution_care_system`（`prompts/claude/executing-actions-with-care.md`）
-    3. `claude_tool_usage_policy_system`（`prompts/claude/tool-usage-policy.md`）
-    4. `claude_tone_style_system`（`prompts/claude/tone-and-style.md`）
-    5. `claude_local_policy_system`（`prompts/AGENTS.md`）
-    6. `claude_tool_guide_system`（`prompts/ai-tools.md` + legacy fallback）
+  - `claude_v1` 现已替换为 reverse 对齐实现（对外 `mode_variant` 不变）。
+  - 必选按顺序注入（四层）：
+    1. `claude_identity_system`（`prompts/claude/claude-code-reverse/results/prompts/system-identity.prompt.md`）
+    2. `claude_workflow_system`（`prompts/claude/claude-code-reverse/results/prompts/system-workflow.prompt.md`）
+    3. `claude_reminder_start_system`（`prompts/claude/claude-code-reverse/results/prompts/system-reminder-start.prompt.md`）
+    4. `claude_reminder_end_system`（`prompts/claude/claude-code-reverse/results/prompts/system-reminder-end.prompt.md`）
+  - 可选追加：
+    - `claude_nextai_tool_adapter_system`（`prompts/claude/claude-code-reverse/tool-adapter-nextai.md`），用于 Claude 工具术语到 NextAI 工具名映射。
   - `mode_variant=claude_v1`，并在编排末尾执行内容归一化去重。
   - 不叠加 default/codex 的系统层。
 
@@ -260,7 +306,7 @@ Sample response:
 - `prompt_mode=codex` 且 codex base 文件缺失或为空时返回：
   - `500 codex_prompt_unavailable`
   - `message=codex prompt is unavailable`
-- `prompt_mode=claude` 且 claude base 文件缺失或为空时返回：
+- `prompt_mode=claude` 且 Claude 必选层文件缺失或为空时返回：
   - `500 claude_prompt_unavailable`
   - `message=claude prompt is unavailable`
 - `prompt_mode=default` 继续沿用既有系统层错误语义（如 `ai_tool_guide_unavailable`）。
@@ -361,7 +407,7 @@ curl -sS http://127.0.0.1:8088/chats \
 - 快速排查：
   - `GET /models/catalog` 查看 provider 与 active_llm
   - `GET /models/active` 查看当前激活模型
-  - 检查 provider `api_key`、`base_url`、`model_aliases`、`store`
+  - 检查 provider `api_key`、`base_url`、`model_aliases`、`store`、`reasoning_effort`
 - 修复动作：
   - 先配置 provider，再设置 active model：
 
@@ -382,7 +428,7 @@ curl -sS -X PUT http://127.0.0.1:8088/models/active \
 - 快速排查：
   - 检查对应提示词文件是否存在且非空：
     - `prompts/codex/codex-rs/core/prompt.md`
-    - `prompts/claude/main.md`
+    - `prompts/claude/claude-code-reverse/results/prompts/system-identity.prompt.md`
 - 修复动作：
   - 补齐文件后重启网关。
 

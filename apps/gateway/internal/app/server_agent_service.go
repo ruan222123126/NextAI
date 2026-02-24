@@ -18,11 +18,11 @@ func (s *Server) newAgentService() *agentservice.Service {
 	return agentservice.NewService(agentservice.Dependencies{
 		Runner: adapters.AgentRunner{Runner: s.runner},
 		ToolRuntime: adapters.AgentToolRuntime{
-			ListToolDefinitionsFunc: func() []runner.ToolDefinition {
-				return s.listToolDefinitions()
+			ListToolDefinitionsFunc: func(promptMode string) []runner.ToolDefinition {
+				return s.listToolDefinitionsForPromptMode(promptMode)
 			},
-			ExecuteToolCallFunc: func(name string, input map[string]interface{}) (string, error) {
-				return s.executeToolCall(toolCall{Name: name, Input: input})
+			ExecuteToolCallFunc: func(promptMode string, name string, input map[string]interface{}) (string, error) {
+				return s.executeToolCallForPromptMode(promptMode, toolCall{Name: name, Input: input})
 			},
 			RecoverInvalidProviderToolCallFunc: func(err error, step int) (ports.RecoverableProviderToolCall, bool) {
 				recovered, ok := recoverInvalidProviderToolCall(err, step)

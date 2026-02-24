@@ -48,29 +48,31 @@ func (s *Server) getModelCatalog(w http.ResponseWriter, _ *http.Request) {
 
 func (s *Server) configureProvider(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		APIKey       *string            `json:"api_key"`
-		BaseURL      *string            `json:"base_url"`
-		DisplayName  *string            `json:"display_name"`
-		Enabled      *bool              `json:"enabled"`
-		Store        *bool              `json:"store"`
-		Headers      *map[string]string `json:"headers"`
-		TimeoutMS    *int               `json:"timeout_ms"`
-		ModelAliases *map[string]string `json:"model_aliases"`
+		APIKey          *string            `json:"api_key"`
+		BaseURL         *string            `json:"base_url"`
+		DisplayName     *string            `json:"display_name"`
+		ReasoningEffort *string            `json:"reasoning_effort"`
+		Enabled         *bool              `json:"enabled"`
+		Store           *bool              `json:"store"`
+		Headers         *map[string]string `json:"headers"`
+		TimeoutMS       *int               `json:"timeout_ms"`
+		ModelAliases    *map[string]string `json:"model_aliases"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid_json", "invalid request body", nil)
 		return
 	}
 	out, err := s.getModelService().ConfigureProvider(modelservice.ConfigureProviderInput{
-		ProviderID:   chi.URLParam(r, "provider_id"),
-		APIKey:       body.APIKey,
-		BaseURL:      body.BaseURL,
-		DisplayName:  body.DisplayName,
-		Enabled:      body.Enabled,
-		Store:        body.Store,
-		Headers:      body.Headers,
-		TimeoutMS:    body.TimeoutMS,
-		ModelAliases: body.ModelAliases,
+		ProviderID:      chi.URLParam(r, "provider_id"),
+		APIKey:          body.APIKey,
+		BaseURL:         body.BaseURL,
+		DisplayName:     body.DisplayName,
+		ReasoningEffort: body.ReasoningEffort,
+		Enabled:         body.Enabled,
+		Store:           body.Store,
+		Headers:         body.Headers,
+		TimeoutMS:       body.TimeoutMS,
+		ModelAliases:    body.ModelAliases,
 	})
 	if err != nil {
 		if validation := (*modelservice.ValidationError)(nil); errors.As(err, &validation) {
@@ -1288,6 +1290,7 @@ func buildProviderInfo(providerID string, setting repo.ProviderSetting) domain.P
 		OpenAICompatible:   provider.ResolveAdapter(providerID) == provider.AdapterOpenAICompatible,
 		APIKeyPrefix:       spec.APIKeyPrefix,
 		Models:             provider.ResolveModels(providerID, setting.ModelAliases),
+		ReasoningEffort:    setting.ReasoningEffort,
 		Headers:            sanitizeStringMap(setting.Headers),
 		TimeoutMS:          setting.TimeoutMS,
 		ModelAliases:       sanitizeStringMap(setting.ModelAliases),
@@ -1345,6 +1348,7 @@ func normalizeProviderSetting(setting *repo.ProviderSetting) {
 	setting.DisplayName = strings.TrimSpace(setting.DisplayName)
 	setting.APIKey = strings.TrimSpace(setting.APIKey)
 	setting.BaseURL = strings.TrimSpace(setting.BaseURL)
+	setting.ReasoningEffort = strings.ToLower(strings.TrimSpace(setting.ReasoningEffort))
 	if setting.Enabled == nil {
 		enabled := true
 		setting.Enabled = &enabled
@@ -1578,7 +1582,10 @@ func (s *Server) buildCodexSystemLayers(options codexLayerBuildOptions) ([]syste
 		},
 	}
 	if !s.cfg.EnablePromptTemplates {
-		return appendCodexReviewPromptLayerIfNeeded(layers, options)
+		if layers, err = appendCodexReviewPromptLayerIfNeeded(layers, options); err != nil {
+			return nil, err
+		}
+		return appendCodexOptionalLayer(layers, "codex_local_policy_system", codexLocalPolicyRelativePath, nil)
 	}
 
 	if layers, err = appendCodexOptionalLayer(layers, "codex_orchestrator_system", codexOrchestratorRelativePath, nil); err != nil {
@@ -1606,6 +1613,9 @@ func (s *Server) buildCodexSystemLayers(options codexLayerBuildOptions) ([]syste
 		return nil, err
 	}
 	if layers, err = appendCodexSearchToolLayer(layers); err != nil {
+		return nil, err
+	}
+	if layers, err = appendCodexOptionalLayer(layers, "codex_local_policy_system", codexLocalPolicyRelativePath, nil); err != nil {
 		return nil, err
 	}
 	return layers, nil
@@ -1967,43 +1977,47 @@ func normalizeCodexPromptSource(raw string) string {
 }
 
 func (s *Server) buildClaudeSystemLayers() ([]systemPromptLayer, error) {
-	source, content, err := loadRequiredSystemLayer([]string{claudeBasePromptRelativePath})
-	if err != nil {
-		return nil, err
+	requiredLayers := []struct {
+		Name string
+		Path string
+	}{
+		{
+			Name: "claude_identity_system",
+			Path: claudeIdentityPromptRelativePath,
+		},
+		{
+			Name: "claude_workflow_system",
+			Path: claudeWorkflowPromptRelativePath,
+		},
+		{
+			Name: "claude_reminder_start_system",
+			Path: claudeReminderStartRelativePath,
+		},
+		{
+			Name: "claude_reminder_end_system",
+			Path: claudeReminderEndRelativePath,
+		},
 	}
 
-	layers := []systemPromptLayer{
-		{
-			Name:    "claude_base_system",
+	layers := make([]systemPromptLayer, 0, len(requiredLayers)+1)
+	for _, layer := range requiredLayers {
+		source, content, err := loadRequiredSystemLayer([]string{layer.Path})
+		if err != nil {
+			return nil, err
+		}
+		layers = append(layers, systemPromptLayer{
+			Name:    layer.Name,
 			Role:    "system",
 			Source:  source,
 			Content: systempromptservice.FormatLayerSourceContent(source, content),
-		},
+		})
 	}
 
-	if layers, err = appendCodexOptionalLayer(layers, "claude_doing_tasks_system", claudeDoingTasksRelativePath, nil); err != nil {
-		return nil, err
-	}
-	if layers, err = appendCodexOptionalLayer(layers, "claude_execution_care_system", claudeExecutionCareRelativePath, nil); err != nil {
-		return nil, err
-	}
-	if layers, err = appendCodexOptionalLayer(layers, "claude_tool_usage_policy_system", claudeToolUsageRelativePath, nil); err != nil {
-		return nil, err
-	}
-	if layers, err = appendCodexOptionalLayer(layers, "claude_tone_style_system", claudeToneStyleRelativePath, nil); err != nil {
-		return nil, err
-	}
-	if layers, err = appendCodexOptionalLayer(layers, "claude_local_policy_system", claudeLocalPolicyRelativePath, nil); err != nil {
-		return nil, err
-	}
-	if layers, err = appendCodexOptionalLayerFromCandidates(
+	var err error
+	if layers, err = appendCodexOptionalLayer(
 		layers,
-		"claude_tool_guide_system",
-		[]string{
-			claudeToolGuideRelativePath,
-			aiToolsGuideLegacyV1RelativePath,
-			aiToolsGuideLegacyV2RelativePath,
-		},
+		"claude_nextai_tool_adapter_system",
+		claudeNextAIToolAdapterRelativePath,
 		nil,
 	); err != nil {
 		return nil, err

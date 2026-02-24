@@ -593,6 +593,15 @@ func TestContractRegressionModelsEndpointErrors(t *testing.T) {
 			wantMessage: "timeout_ms must be >= 0",
 		},
 		{
+			name:        "configure_invalid_reasoning_effort",
+			method:      http.MethodPut,
+			path:        "/models/openai/config",
+			body:        `{"reasoning_effort":"extreme"}`,
+			wantStatus:  http.StatusBadRequest,
+			wantCode:    "invalid_provider_config",
+			wantMessage: "reasoning_effort must be one of: minimal, low, medium, high",
+		},
+		{
 			name:        "configure_invalid_aliases",
 			method:      http.MethodPut,
 			path:        "/models/openai/config",

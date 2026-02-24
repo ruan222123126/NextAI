@@ -18,6 +18,7 @@ func TestLoadKeepsCustomProviderAndActiveProvider(t *testing.T) {
       "base_url": "http://127.0.0.1:19002/v1",
 	    "display_name": "Legacy Gateway",
 	    "enabled": true,
+	    "reasoning_effort": "high",
 	    "store": true,
 	    "headers": {"X-Test": "1"},
 	    "timeout_ms": 12000,
@@ -57,6 +58,9 @@ func TestLoadKeepsCustomProviderAndActiveProvider(t *testing.T) {
 		}
 		if custom.ModelAliases["fast"] != "gpt-4o-mini" {
 			t.Fatalf("expected model_aliases preserved, got=%v", custom.ModelAliases)
+		}
+		if custom.ReasoningEffort != "high" {
+			t.Fatalf("expected reasoning_effort preserved, got=%q", custom.ReasoningEffort)
 		}
 		if custom.Store == nil || !*custom.Store {
 			t.Fatalf("expected store preserved, got=%v", custom.Store)

@@ -32,8 +32,8 @@ type RecoverableProviderToolCall struct {
 }
 
 type AgentToolRuntime interface {
-	ListToolDefinitions() []runner.ToolDefinition
-	ExecuteToolCall(name string, input map[string]interface{}) (string, error)
+	ListToolDefinitions(promptMode string) []runner.ToolDefinition
+	ExecuteToolCall(promptMode string, name string, input map[string]interface{}) (string, error)
 	RecoverInvalidProviderToolCall(err error, step int) (RecoverableProviderToolCall, bool)
 	FormatToolErrorFeedback(err error) string
 }

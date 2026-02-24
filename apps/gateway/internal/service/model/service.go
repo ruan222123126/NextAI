@@ -39,15 +39,16 @@ type Service struct {
 }
 
 type ConfigureProviderInput struct {
-	ProviderID   string
-	APIKey       *string
-	BaseURL      *string
-	DisplayName  *string
-	Enabled      *bool
-	Store        *bool
-	Headers      *map[string]string
-	TimeoutMS    *int
-	ModelAliases *map[string]string
+	ProviderID      string
+	APIKey          *string
+	BaseURL         *string
+	DisplayName     *string
+	ReasoningEffort *string
+	Enabled         *bool
+	Store           *bool
+	Headers         *map[string]string
+	TimeoutMS       *int
+	ModelAliases    *map[string]string
 }
 
 func NewService(deps Dependencies) *Service {
@@ -104,6 +105,13 @@ func (s *Service) ConfigureProvider(input ConfigureProviderInput) (domain.Provid
 			Message: "timeout_ms must be >= 0",
 		}
 	}
+	sanitizedReasoningEffort, reasoningErr := sanitizeReasoningEffort(providerID, input.ReasoningEffort)
+	if reasoningErr != nil {
+		return domain.ProviderInfo{}, &ValidationError{
+			Code:    "invalid_provider_config",
+			Message: reasoningErr.Error(),
+		}
+	}
 
 	sanitizedAliases, aliasErr := sanitizeModelAliases(input.ModelAliases)
 	if aliasErr != nil {
@@ -125,6 +133,9 @@ func (s *Service) ConfigureProvider(input ConfigureProviderInput) (domain.Provid
 		}
 		if input.DisplayName != nil {
 			setting.DisplayName = strings.TrimSpace(*input.DisplayName)
+		}
+		if input.ReasoningEffort != nil {
+			setting.ReasoningEffort = sanitizedReasoningEffort
 		}
 		if input.Enabled != nil {
 			enabled := *input.Enabled
@@ -282,6 +293,7 @@ func (s *Service) buildProviderInfo(providerID string, setting repo.ProviderSett
 		OpenAICompatible:   provider.ResolveAdapter(providerID) == provider.AdapterOpenAICompatible,
 		APIKeyPrefix:       spec.APIKeyPrefix,
 		Models:             provider.ResolveModels(providerID, setting.ModelAliases),
+		ReasoningEffort:    setting.ReasoningEffort,
 		Store:              providerStoreEnabled(setting),
 		Headers:            sanitizeStringMap(setting.Headers),
 		TimeoutMS:          setting.TimeoutMS,
@@ -354,6 +366,7 @@ func normalizeProviderSetting(setting *repo.ProviderSetting) {
 	setting.DisplayName = strings.TrimSpace(setting.DisplayName)
 	setting.APIKey = strings.TrimSpace(setting.APIKey)
 	setting.BaseURL = strings.TrimSpace(setting.BaseURL)
+	setting.ReasoningEffort = normalizeReasoningEffort(strings.TrimSpace(setting.ReasoningEffort))
 	if setting.Enabled == nil {
 		enabled := true
 		setting.Enabled = &enabled
@@ -393,6 +406,39 @@ func sanitizeModelAliases(raw *map[string]string) (map[string]string, error) {
 		out[alias] = modelID
 	}
 	return out, nil
+}
+
+var allowedReasoningEfforts = map[string]struct{}{
+	"minimal": {},
+	"low":     {},
+	"medium":  {},
+	"high":    {},
+}
+
+func sanitizeReasoningEffort(providerID string, raw *string) (string, error) {
+	if raw == nil {
+		return "", nil
+	}
+	effort := normalizeReasoningEffort(*raw)
+	if effort == "" {
+		return "", nil
+	}
+	if !providerSupportsReasoningEffort(providerID) {
+		return "", errors.New("reasoning_effort is only supported for openai-compatible and codex-compatible providers")
+	}
+	if _, ok := allowedReasoningEfforts[effort]; !ok {
+		return "", errors.New("reasoning_effort must be one of: minimal, low, medium, high")
+	}
+	return effort, nil
+}
+
+func providerSupportsReasoningEffort(providerID string) bool {
+	adapter := provider.ResolveAdapter(providerID)
+	return adapter == provider.AdapterOpenAICompatible || adapter == provider.AdapterCodexCompatible
+}
+
+func normalizeReasoningEffort(raw string) string {
+	return strings.ToLower(strings.TrimSpace(raw))
 }
 
 func getProviderSettingByID(st *repo.State, providerID string) repo.ProviderSetting {

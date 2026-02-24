@@ -7,6 +7,7 @@ const (
 	DefaultChatUserID     = "demo-user"
 	DefaultChatChannel    = "console"
 	ChatMetaSystemDefault = "system_default"
+	ChatMetaActiveLLM     = "active_llm_override"
 
 	DefaultCronJobID       = "cron-default"
 	DefaultCronJobName     = "\u4f60\u597d\u6587\u672c\u4efb\u52a1"
@@ -34,6 +35,12 @@ type ChatSpec struct {
 	CreatedAt string                 `json:"created_at"`
 	UpdatedAt string                 `json:"updated_at"`
 	Meta      map[string]interface{} `json:"meta"`
+}
+
+type ChatActiveLLMOverride struct {
+	ProviderID string `json:"provider_id"`
+	Model      string `json:"model"`
+	UpdatedAt  string `json:"updated_at"`
 }
 
 type RuntimeContent struct {
@@ -236,6 +243,7 @@ type ProviderInfo struct {
 	OpenAICompatible   bool              `json:"openai_compatible"`
 	APIKeyPrefix       string            `json:"api_key_prefix"`
 	Models             []ModelInfo       `json:"models"`
+	ReasoningEffort    string            `json:"reasoning_effort,omitempty"`
 	Store              bool              `json:"store"`
 	Headers            map[string]string `json:"headers,omitempty"`
 	TimeoutMS          int               `json:"timeout_ms,omitempty"`

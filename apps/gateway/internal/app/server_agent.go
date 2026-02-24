@@ -1,13 +1,18 @@
 package app
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"net/url"
+	"os"
+	"path"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -18,6 +23,7 @@ import (
 	"nextai/apps/gateway/internal/repo"
 	"nextai/apps/gateway/internal/runner"
 	agentservice "nextai/apps/gateway/internal/service/agent"
+	selfopsservice "nextai/apps/gateway/internal/service/selfops"
 )
 
 func (s *Server) processAgent(w http.ResponseWriter, r *http.Request) {
@@ -303,15 +309,15 @@ func (s *Server) processAgentWithBody(w http.ResponseWriter, r *http.Request, bo
 			})
 		}
 		historyInput = runtimeHistoryToAgentInputMessages(state.Histories[chatID])
-		activeLLM = state.ActiveLLM
-		activeLLM.ProviderID = normalizeProviderID(activeLLM.ProviderID)
+		chatSpec := state.Chats[chatID]
+		activeLLM = resolveChatActiveModelSlot(chatSpec.Meta, state)
 		providerSetting = getProviderSettingByID(state, activeLLM.ProviderID)
 		return nil
 	}); err != nil {
 		writeErr(w, http.StatusInternalServerError, "store_error", err.Error(), nil)
 		return
 	}
-	requestedToolCall, hasToolCall, err := parseToolCall(req.BizParams, rawRequest)
+	requestedToolCall, hasToolCall, err := parseToolCall(req.BizParams, rawRequest, effectivePromptMode)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid_tool_input", err.Error(), nil)
 		return
@@ -390,6 +396,7 @@ func (s *Server) processAgentWithBody(w http.ResponseWriter, r *http.Request, bo
 				AdapterID:          provider.ResolveAdapter(activeLLM.ProviderID),
 				Headers:            sanitizeStringMap(providerSetting.Headers),
 				TimeoutMS:          providerSetting.TimeoutMS,
+				ReasoningEffort:    providerSetting.ReasoningEffort,
 				Store:              providerStoreEnabled(providerSetting),
 				PromptCacheKey:     req.SessionID,
 				PreviousResponseID: latestProviderResponseIDFromInput(historyInput),
@@ -927,6 +934,53 @@ func resolvePromptModeFromChatMeta(meta map[string]interface{}) string {
 	return mode
 }
 
+func resolveChatActiveModelSlot(meta map[string]interface{}, state *repo.State) domain.ModelSlotConfig {
+	if override, ok := parseChatActiveModelOverride(meta); ok {
+		return override
+	}
+	if state == nil {
+		return domain.ModelSlotConfig{}
+	}
+	return domain.ModelSlotConfig{
+		ProviderID: normalizeProviderID(state.ActiveLLM.ProviderID),
+		Model:      strings.TrimSpace(state.ActiveLLM.Model),
+	}
+}
+
+func parseChatActiveModelOverride(meta map[string]interface{}) (domain.ModelSlotConfig, bool) {
+	if len(meta) == 0 {
+		return domain.ModelSlotConfig{}, false
+	}
+	rawOverride, ok := meta[domain.ChatMetaActiveLLM]
+	if !ok || rawOverride == nil {
+		return domain.ModelSlotConfig{}, false
+	}
+	switch value := rawOverride.(type) {
+	case map[string]interface{}:
+		providerID := normalizeProviderID(stringValue(value["provider_id"]))
+		modelID := strings.TrimSpace(stringValue(value["model"]))
+		if providerID == "" || modelID == "" {
+			return domain.ModelSlotConfig{}, false
+		}
+		return domain.ModelSlotConfig{
+			ProviderID: providerID,
+			Model:      modelID,
+		}, true
+	case domain.ChatActiveLLMOverride:
+		providerID := normalizeProviderID(value.ProviderID)
+		modelID := strings.TrimSpace(value.Model)
+		if providerID == "" || modelID == "" {
+			return domain.ModelSlotConfig{}, false
+		}
+		return domain.ModelSlotConfig{
+			ProviderID: providerID,
+			Model:      modelID,
+		}, true
+	default:
+		return domain.ModelSlotConfig{}, false
+	}
+}
+
 func normalizePromptMode(raw string) (string, bool) {
 	switch strings.ToLower(strings.TrimSpace(raw)) {
 	case promptModeDefault:
@@ -1080,7 +1134,11 @@ func splitReplyChunks(text string, chunkSize int) []string {
 }
 
 func (s *Server) listToolDefinitions() []runner.ToolDefinition {
-	if len(s.tools) == 0 {
+	return s.listToolDefinitionsForPromptMode(promptModeDefault)
+}
+
+func (s *Server) listToolDefinitionsForPromptMode(promptMode string) []runner.ToolDefinition {
+	if len(s.tools) == 0 && s.toolDisabled("self_ops") {
 		return nil
 	}
 	nameSet := map[string]struct{}{}
@@ -1104,6 +1162,14 @@ func (s *Server) listToolDefinitions() []runner.ToolDefinition {
 			nameSet["screenshot"] = struct{}{}
 		}
 	}
+	if !s.toolDisabled("self_ops") {
+		nameSet["self_ops"] = struct{}{}
+	}
+	if isClaudePromptMode(promptMode) {
+		for _, name := range claudeCompatibleToolDefinitionNames() {
+			nameSet[name] = struct{}{}
+		}
+	}
 
 	names := make([]string, 0, len(nameSet))
 	for name := range nameSet {
@@ -1116,6 +1182,26 @@ func (s *Server) listToolDefinitions() []runner.ToolDefinition {
 		out = append(out, buildToolDefinition(name))
 	}
 	return out
+}
+
+func claudeCompatibleToolDefinitionNames() []string {
+	return []string{
+		"Bash",
+		"Edit",
+		"ExitPlanMode",
+		"Glob",
+		"Grep",
+		"LS",
+		"MultiEdit",
+		"NotebookEdit",
+		"NotebookRead",
+		"Read",
+		"Task",
+		"TodoWrite",
+		"WebFetch",
+		"WebSearch",
+		"Write",
+	}
 }
 
 func buildToolDefinition(name string) runner.ToolDefinition {
@@ -1161,7 +1247,7 @@ func buildToolDefinition(name string) runner.ToolDefinition {
 	case "edit":
 		return runner.ToolDefinition{
 			Name:        "edit",
-			Description: "Replace line ranges for one or multiple files. input must be an array.",
+			Description: "Replace line ranges for one or multiple files; can create missing files directly. input must be an array.",
 			Parameters: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -1445,6 +1531,306 @@ func buildToolDefinition(name string) runner.ToolDefinition {
 					},
 				},
 				"additionalProperties": true,
+			},
+		}
+	case "self_ops":
+		return runner.ToolDefinition{
+			Name:        "self_ops",
+			Description: "Execute self-operation actions: bootstrap_session, set_session_model, preview_mutation, apply_mutation.",
+			Parameters: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"action": map[string]interface{}{
+						"type": "string",
+						"enum": []string{"bootstrap_session", "set_session_model", "preview_mutation", "apply_mutation"},
+					},
+					"user_id":         map[string]interface{}{"type": "string"},
+					"channel":         map[string]interface{}{"type": "string"},
+					"session_seed":    map[string]interface{}{"type": "string"},
+					"first_input":     map[string]interface{}{"type": "string"},
+					"prompt_mode":     map[string]interface{}{"type": "string"},
+					"session_id":      map[string]interface{}{"type": "string"},
+					"provider_id":     map[string]interface{}{"type": "string"},
+					"model":           map[string]interface{}{"type": "string"},
+					"target":          map[string]interface{}{"type": "string"},
+					"operations":      map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "object", "additionalProperties": true}},
+					"allow_sensitive": map[string]interface{}{"type": "boolean"},
+					"mutation_id":     map[string]interface{}{"type": "string"},
+					"confirm_hash":    map[string]interface{}{"type": "string"},
+				},
+				"required":             []string{"action"},
+				"additionalProperties": true,
+			},
+		}
+	case "Bash":
+		return runner.ToolDefinition{
+			Name:        "Bash",
+			Description: "Execute a bash command with optional timeout in milliseconds.",
+			Parameters: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"command":     map[string]interface{}{"type": "string"},
+					"timeout":     map[string]interface{}{"type": "number"},
+					"description": map[string]interface{}{"type": "string"},
+					"cwd":         map[string]interface{}{"type": "string"},
+					"workdir":     map[string]interface{}{"type": "string"},
+				},
+				"required":             []string{"command"},
+				"additionalProperties": false,
+			},
+		}
+	case "Read":
+		return runner.ToolDefinition{
+			Name:        "Read",
+			Description: "Read a file with optional line offset/limit.",
+			Parameters: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"file_path": map[string]interface{}{"type": "string"},
+					"offset":    map[string]interface{}{"type": "number"},
+					"limit":     map[string]interface{}{"type": "number"},
+				},
+				"required":             []string{"file_path"},
+				"additionalProperties": false,
+			},
+		}
+	case "NotebookRead":
+		return runner.ToolDefinition{
+			Name:        "NotebookRead",
+			Description: "Read cells from a Jupyter notebook.",
+			Parameters: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"notebook_path": map[string]interface{}{"type": "string"},
+					"cell_id":       map[string]interface{}{"type": "string"},
+				},
+				"required":             []string{"notebook_path"},
+				"additionalProperties": false,
+			},
+		}
+	case "Write":
+		return runner.ToolDefinition{
+			Name:        "Write",
+			Description: "Write full file content.",
+			Parameters: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"file_path": map[string]interface{}{"type": "string"},
+					"content":   map[string]interface{}{"type": "string"},
+				},
+				"required":             []string{"file_path", "content"},
+				"additionalProperties": false,
+			},
+		}
+	case "Edit":
+		return runner.ToolDefinition{
+			Name:        "Edit",
+			Description: "Replace exact string in a file.",
+			Parameters: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"file_path":   map[string]interface{}{"type": "string"},
+					"old_string":  map[string]interface{}{"type": "string"},
+					"new_string":  map[string]interface{}{"type": "string"},
+					"replace_all": map[string]interface{}{"type": "boolean"},
+				},
+				"required":             []string{"file_path", "old_string", "new_string"},
+				"additionalProperties": false,
+			},
+		}
+	case "MultiEdit":
+		return runner.ToolDefinition{
+			Name:        "MultiEdit",
+			Description: "Apply multiple exact string edits to a file atomically.",
+			Parameters: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"file_path": map[string]interface{}{"type": "string"},
+					"edits": map[string]interface{}{
+						"type":     "array",
+						"minItems": 1,
+						"items": map[string]interface{}{
+							"type": "object",
+							"properties": map[string]interface{}{
+								"old_string":  map[string]interface{}{"type": "string"},
+								"new_string":  map[string]interface{}{"type": "string"},
+								"replace_all": map[string]interface{}{"type": "boolean"},
+							},
+							"required":             []string{"old_string", "new_string"},
+							"additionalProperties": false,
+						},
+					},
+				},
+				"required":             []string{"file_path", "edits"},
+				"additionalProperties": false,
+			},
+		}
+	case "NotebookEdit":
+		return runner.ToolDefinition{
+			Name:        "NotebookEdit",
+			Description: "Replace, insert, or delete notebook cells.",
+			Parameters: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"notebook_path": map[string]interface{}{"type": "string"},
+					"cell_id":       map[string]interface{}{"type": "string"},
+					"new_source":    map[string]interface{}{"type": "string"},
+					"cell_type": map[string]interface{}{
+						"type": "string",
+						"enum": []string{"code", "markdown"},
+					},
+					"edit_mode": map[string]interface{}{
+						"type": "string",
+						"enum": []string{"replace", "insert", "delete"},
+					},
+				},
+				"required":             []string{"notebook_path", "new_source"},
+				"additionalProperties": false,
+			},
+		}
+	case "LS":
+		return runner.ToolDefinition{
+			Name:        "LS",
+			Description: "List entries in a directory.",
+			Parameters: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"path": map[string]interface{}{"type": "string"},
+					"ignore": map[string]interface{}{
+						"type":  "array",
+						"items": map[string]interface{}{"type": "string"},
+					},
+				},
+				"required":             []string{"path"},
+				"additionalProperties": false,
+			},
+		}
+	case "Glob":
+		return runner.ToolDefinition{
+			Name:        "Glob",
+			Description: "Match files by glob pattern.",
+			Parameters: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"pattern": map[string]interface{}{"type": "string"},
+					"path":    map[string]interface{}{"type": "string"},
+				},
+				"required":             []string{"pattern"},
+				"additionalProperties": false,
+			},
+		}
+	case "Grep":
+		return runner.ToolDefinition{
+			Name:        "Grep",
+			Description: "Regex search in files.",
+			Parameters: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"pattern":     map[string]interface{}{"type": "string"},
+					"path":        map[string]interface{}{"type": "string"},
+					"glob":        map[string]interface{}{"type": "string"},
+					"output_mode": map[string]interface{}{"type": "string", "enum": []string{"content", "files_with_matches", "count"}},
+					"-B":          map[string]interface{}{"type": "number"},
+					"-A":          map[string]interface{}{"type": "number"},
+					"-C":          map[string]interface{}{"type": "number"},
+					"-n":          map[string]interface{}{"type": "boolean"},
+					"-i":          map[string]interface{}{"type": "boolean"},
+					"type":        map[string]interface{}{"type": "string"},
+					"head_limit":  map[string]interface{}{"type": "number"},
+					"multiline":   map[string]interface{}{"type": "boolean"},
+				},
+				"required":             []string{"pattern"},
+				"additionalProperties": false,
+			},
+		}
+	case "WebSearch":
+		return runner.ToolDefinition{
+			Name:        "WebSearch",
+			Description: "Search web results.",
+			Parameters: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"query": map[string]interface{}{"type": "string"},
+					"allowed_domains": map[string]interface{}{
+						"type":  "array",
+						"items": map[string]interface{}{"type": "string"},
+					},
+					"blocked_domains": map[string]interface{}{
+						"type":  "array",
+						"items": map[string]interface{}{"type": "string"},
+					},
+				},
+				"required":             []string{"query"},
+				"additionalProperties": false,
+			},
+		}
+	case "WebFetch":
+		return runner.ToolDefinition{
+			Name:        "WebFetch",
+			Description: "Fetch and summarize a URL.",
+			Parameters: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"url":    map[string]interface{}{"type": "string"},
+					"prompt": map[string]interface{}{"type": "string"},
+				},
+				"required":             []string{"url", "prompt"},
+				"additionalProperties": false,
+			},
+		}
+	case "Task":
+		return runner.ToolDefinition{
+			Name:        "Task",
+			Description: "Launch a sub-agent style task (emulated in NextAI).",
+			Parameters: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"description":   map[string]interface{}{"type": "string"},
+					"prompt":        map[string]interface{}{"type": "string"},
+					"subagent_type": map[string]interface{}{"type": "string"},
+				},
+				"required":             []string{"description", "prompt", "subagent_type"},
+				"additionalProperties": false,
+			},
+		}
+	case "TodoWrite":
+		return runner.ToolDefinition{
+			Name:        "TodoWrite",
+			Description: "Update todo list state (emulated in NextAI).",
+			Parameters: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"todos": map[string]interface{}{
+						"type":     "array",
+						"minItems": 1,
+						"items": map[string]interface{}{
+							"type": "object",
+							"properties": map[string]interface{}{
+								"content":  map[string]interface{}{"type": "string"},
+								"status":   map[string]interface{}{"type": "string", "enum": []string{"pending", "in_progress", "completed"}},
+								"priority": map[string]interface{}{"type": "string", "enum": []string{"high", "medium", "low"}},
+								"id":       map[string]interface{}{"type": "string"},
+							},
+							"required":             []string{"content", "status", "priority", "id"},
+							"additionalProperties": false,
+						},
+					},
+				},
+				"required":             []string{"todos"},
+				"additionalProperties": false,
+			},
+		}
+	case "ExitPlanMode":
+		return runner.ToolDefinition{
+			Name:        "ExitPlanMode",
+			Description: "Ask to exit plan mode (emulated in NextAI).",
+			Parameters: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"plan": map[string]interface{}{"type": "string"},
+				},
+				"required":             []string{"plan"},
+				"additionalProperties": false,
 			},
 		}
 	default:
@@ -1819,14 +2205,14 @@ func (e *toolError) Unwrap() error {
 	return e.Err
 }
 
-func parseToolCall(bizParams map[string]interface{}, rawRequest map[string]interface{}) (toolCall, bool, error) {
-	if call, ok, err := parseBizParamsToolCall(bizParams); ok || err != nil {
+func parseToolCall(bizParams map[string]interface{}, rawRequest map[string]interface{}, promptMode string) (toolCall, bool, error) {
+	if call, ok, err := parseBizParamsToolCall(bizParams, promptMode); ok || err != nil {
 		return call, ok, err
 	}
-	return parseShortcutToolCall(rawRequest)
+	return parseShortcutToolCall(rawRequest, promptMode)
 }
 
-func parseBizParamsToolCall(bizParams map[string]interface{}) (toolCall, bool, error) {
+func parseBizParamsToolCall(bizParams map[string]interface{}, promptMode string) (toolCall, bool, error) {
 	if len(bizParams) == 0 {
 		return toolCall{}, false, nil
 	}
@@ -1846,7 +2232,7 @@ func parseBizParamsToolCall(bizParams map[string]interface{}) (toolCall, bool, e
 	if !ok {
 		return toolCall{}, false, errors.New("biz_params.tool.name must be a string")
 	}
-	name = normalizeToolName(strings.ToLower(strings.TrimSpace(name)))
+	name = normalizeToolNameForPromptMode(strings.ToLower(strings.TrimSpace(name)), promptMode)
 	if name == "" {
 		return toolCall{}, false, errors.New("biz_params.tool.name cannot be empty")
 	}
@@ -1868,11 +2254,17 @@ func parseBizParamsToolCall(bizParams map[string]interface{}) (toolCall, bool, e
 	return toolCall{Name: name, Input: input}, true, nil
 }
 
-func parseShortcutToolCall(rawRequest map[string]interface{}) (toolCall, bool, error) {
+func parseShortcutToolCall(rawRequest map[string]interface{}, promptMode string) (toolCall, bool, error) {
 	if len(rawRequest) == 0 {
 		return toolCall{}, false, nil
 	}
-	shortcuts := []string{"view", "edit", "shell", "browser", "search", "open", "find", "click", "screenshot"}
+	shortcuts := []string{
+		"view", "edit", "shell", "browser", "search", "open", "find", "click", "screenshot",
+		"read", "write", "bash", "glob", "grep", "ls", "task", "todowrite", "exitplanmode",
+		"websearch", "webfetch", "multiedit", "notebookread", "notebookedit",
+		"Read", "Write", "Bash", "Glob", "Grep", "LS", "Task", "TodoWrite", "ExitPlanMode",
+		"WebSearch", "WebFetch", "MultiEdit", "NotebookRead", "NotebookEdit", "Edit",
+	}
 	matched := make([]string, 0, 1)
 	for _, key := range shortcuts {
 		if raw, ok := rawRequest[key]; ok && raw != nil {
@@ -1890,7 +2282,7 @@ func parseShortcutToolCall(rawRequest map[string]interface{}) (toolCall, bool, e
 	if err != nil {
 		return toolCall{}, false, err
 	}
-	return toolCall{Name: normalizeToolName(name), Input: input}, true, nil
+	return toolCall{Name: normalizeToolNameForPromptMode(name, promptMode), Input: input}, true, nil
 }
 
 func parseToolPayload(raw interface{}, path string) (map[string]interface{}, error) {
@@ -1930,17 +2322,47 @@ func normalizeToolName(name string) string {
 		return "click"
 	case "screenshot":
 		return "screenshot"
+	case "selfops", "self_ops":
+		return "self_ops"
 	default:
 		return name
 	}
 }
 
+func normalizeToolNameForPromptMode(name string, promptMode string) string {
+	normalized := normalizeToolName(strings.ToLower(strings.TrimSpace(name)))
+	if !isClaudePromptMode(promptMode) {
+		return normalized
+	}
+	switch normalized {
+	case "bash", "read", "write", "glob", "grep", "ls", "task", "todowrite", "exitplanmode",
+		"websearch", "webfetch", "multiedit", "notebookread", "notebookedit":
+		return normalized
+	default:
+		return normalized
+	}
+}
+
+func isClaudePromptMode(promptMode string) bool {
+	return strings.EqualFold(strings.TrimSpace(promptMode), promptModeClaude)
+}
+
 func (s *Server) executeToolCall(call toolCall) (string, error) {
-	name := normalizeToolName(strings.ToLower(strings.TrimSpace(call.Name)))
+	return s.executeToolCallForPromptMode(promptModeDefault, call)
+}
+
+func (s *Server) executeToolCallForPromptMode(promptMode string, call toolCall) (string, error) {
+	name := normalizeToolNameForPromptMode(strings.ToLower(strings.TrimSpace(call.Name)), promptMode)
 	if name == "" {
 		name = strings.ToLower(strings.TrimSpace(call.Name))
 	}
 	input := safeMap(call.Input)
+
+	if isClaudePromptMode(promptMode) {
+		if result, handled, err := s.executeClaudeCompatibleToolCall(name, input); handled || err != nil {
+			return result, err
+		}
+	}
 
 	if s.toolDisabled(name) {
 		return "", &toolError{
@@ -1954,6 +2376,8 @@ func (s *Server) executeToolCall(call toolCall) (string, error) {
 		return s.executeOpenToolCall(input)
 	case "click", "screenshot":
 		return s.executeApproxBrowserToolCall(name, input)
+	case "self_ops":
+		return s.executeSelfOpsToolCall(input)
 	default:
 		result, err := s.invokeRegisteredTool(name, input)
 		if err != nil {
@@ -1961,6 +2385,1294 @@ func (s *Server) executeToolCall(call toolCall) (string, error) {
 		}
 		return renderToolResult(name, result)
 	}
+}
+
+func (s *Server) executeClaudeCompatibleToolCall(name string, input map[string]interface{}) (string, bool, error) {
+	switch name {
+	case "bash":
+		out, err := s.executeClaudeBashTool(input)
+		return out, true, err
+	case "read":
+		out, err := s.executeClaudeReadTool(input)
+		return out, true, err
+	case "notebookread":
+		out, err := s.executeClaudeNotebookReadTool(input)
+		return out, true, err
+	case "write":
+		out, err := s.executeClaudeWriteTool(input)
+		return out, true, err
+	case "edit":
+		if !looksLikeClaudeEditInput(input) {
+			return "", false, nil
+		}
+		out, err := s.executeClaudeEditTool(input)
+		return out, true, err
+	case "multiedit":
+		out, err := s.executeClaudeMultiEditTool(input)
+		return out, true, err
+	case "notebookedit":
+		out, err := s.executeClaudeNotebookEditTool(input)
+		return out, true, err
+	case "ls":
+		out, err := s.executeClaudeLSTool(input)
+		return out, true, err
+	case "glob":
+		out, err := s.executeClaudeGlobTool(input)
+		return out, true, err
+	case "grep":
+		out, err := s.executeClaudeGrepTool(input)
+		return out, true, err
+	case "websearch":
+		out, err := s.executeClaudeWebSearchTool(input)
+		return out, true, err
+	case "webfetch":
+		out, err := s.executeClaudeWebFetchTool(input)
+		return out, true, err
+	case "task":
+		out, err := executeClaudeTaskTool(input)
+		return out, true, err
+	case "todowrite":
+		out, err := executeClaudeTodoWriteTool(input)
+		return out, true, err
+	case "exitplanmode":
+		out, err := executeClaudeExitPlanModeTool(input)
+		return out, true, err
+	default:
+		return "", false, nil
+	}
+}
+
+func looksLikeClaudeEditInput(input map[string]interface{}) bool {
+	item := firstToolInputItem(input)
+	filePath := strings.TrimSpace(firstNonEmptyString(item, "file_path"))
+	if filePath == "" {
+		return false
+	}
+	if _, ok := item["old_string"]; ok {
+		return true
+	}
+	if _, ok := item["new_string"]; ok {
+		return true
+	}
+	return false
+}
+
+func (s *Server) executeClaudeBashTool(input map[string]interface{}) (string, error) {
+	if err := s.ensureToolEnabled("shell"); err != nil {
+		return "", err
+	}
+	item := firstToolInputItem(input)
+	command := strings.TrimSpace(firstNonEmptyString(item, "command", "cmd"))
+	if command == "" {
+		return "", &toolError{
+			Code:    "tool_invoke_failed",
+			Message: `tool "Bash" invocation failed`,
+			Err:     plugin.ErrShellToolCommandMissing,
+		}
+	}
+	shellItem := map[string]interface{}{
+		"command": command,
+	}
+	if cwd := strings.TrimSpace(firstNonEmptyString(item, "cwd", "workdir")); cwd != "" {
+		shellItem["cwd"] = cwd
+	}
+	if timeoutMS, ok := firstPositiveInt(item, "timeout", "yield_time_ms"); ok {
+		timeoutSeconds := timeoutMS / 1000
+		if timeoutMS%1000 != 0 {
+			timeoutSeconds++
+		}
+		if timeoutSeconds < 1 {
+			timeoutSeconds = 1
+		}
+		shellItem["timeout_seconds"] = timeoutSeconds
+	}
+	result, err := s.invokeRegisteredTool("shell", map[string]interface{}{
+		"items": []interface{}{shellItem},
+	})
+	if err != nil {
+		return "", err
+	}
+	return renderToolResult("Bash", result)
+}
+
+func (s *Server) executeClaudeReadTool(input map[string]interface{}) (string, error) {
+	if err := s.ensureToolEnabled("view"); err != nil {
+		return "", err
+	}
+	item := firstToolInputItem(input)
+	filePath := strings.TrimSpace(firstNonEmptyString(item, "file_path", "path"))
+	if filePath == "" {
+		return "", &toolError{
+			Code:    "tool_invoke_failed",
+			Message: `tool "Read" invocation failed`,
+			Err:     plugin.ErrFileLinesToolPathMissing,
+		}
+	}
+	absPath, err := resolveClaudeToolPath(filePath)
+	if err != nil {
+		return "", &toolError{
+			Code:    "tool_invoke_failed",
+			Message: `tool "Read" invocation failed`,
+			Err:     err,
+		}
+	}
+	raw, err := os.ReadFile(absPath)
+	if err != nil {
+		return "", &toolError{
+			Code:    "tool_invoke_failed",
+			Message: `tool "Read" invocation failed`,
+			Err:     err,
+		}
+	}
+	offset := 0
+	if parsed, ok := parseNonNegativeIntAny(item["offset"]); ok {
+		offset = parsed
+	}
+	limit := 2000
+	if parsed, ok := parsePositiveIntAny(item["limit"]); ok {
+		limit = parsed
+	}
+	text := formatClaudeReadOutput(absPath, string(raw), offset, limit)
+	return text, nil
+}
+
+func (s *Server) executeClaudeNotebookReadTool(input map[string]interface{}) (string, error) {
+	if err := s.ensureToolEnabled("view"); err != nil {
+		return "", err
+	}
+	item := firstToolInputItem(input)
+	notebookPath := strings.TrimSpace(firstNonEmptyString(item, "notebook_path", "file_path", "path"))
+	if notebookPath == "" {
+		return "", &toolError{
+			Code:    "tool_invoke_failed",
+			Message: `tool "NotebookRead" invocation failed`,
+			Err:     plugin.ErrFileLinesToolPathMissing,
+		}
+	}
+	absPath, err := resolveClaudeToolPath(notebookPath)
+	if err != nil {
+		return "", &toolError{
+			Code:    "tool_invoke_failed",
+			Message: `tool "NotebookRead" invocation failed`,
+			Err:     err,
+		}
+	}
+	raw, err := os.ReadFile(absPath)
+	if err != nil {
+		return "", &toolError{
+			Code:    "tool_invoke_failed",
+			Message: `tool "NotebookRead" invocation failed`,
+			Err:     err,
+		}
+	}
+	nb := map[string]interface{}{}
+	if err := json.Unmarshal(raw, &nb); err != nil {
+		return "", &toolError{
+			Code:    "tool_invoke_failed",
+			Message: `tool "NotebookRead" invocation failed`,
+			Err:     err,
+		}
+	}
+	rawCells, _ := nb["cells"].([]interface{})
+	cellID := strings.TrimSpace(firstNonEmptyString(item, "cell_id"))
+	lines := make([]string, 0, len(rawCells)+2)
+	lines = append(lines, fmt.Sprintf("NotebookRead %s", absPath))
+	matched := 0
+	for idx, rawCell := range rawCells {
+		cell, ok := rawCell.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		id := strings.TrimSpace(stringValue(cell["id"]))
+		if id == "" {
+			id = fmt.Sprintf("cell-%d", idx)
+		}
+		if cellID != "" && id != cellID {
+			continue
+		}
+		matched++
+		cellType := strings.TrimSpace(stringValue(cell["cell_type"]))
+		if cellType == "" {
+			cellType = "unknown"
+		}
+		sourceText := normalizeNotebookSource(cell["source"])
+		lines = append(lines, fmt.Sprintf("--- [%d] id=%s type=%s", idx, id, cellType))
+		if strings.TrimSpace(sourceText) == "" {
+			lines = append(lines, "(empty source)")
+		} else {
+			lines = append(lines, sourceText)
+		}
+	}
+	if matched == 0 {
+		if cellID != "" {
+			lines = append(lines, fmt.Sprintf("cell_id=%s not found", cellID))
+		} else {
+			lines = append(lines, "no cells found")
+		}
+	}
+	return strings.Join(lines, "\n"), nil
+}
+
+func (s *Server) executeClaudeWriteTool(input map[string]interface{}) (string, error) {
+	if err := s.ensureToolEnabled("edit"); err != nil {
+		return "", err
+	}
+	item := firstToolInputItem(input)
+	filePath := strings.TrimSpace(firstNonEmptyString(item, "file_path", "path"))
+	if filePath == "" {
+		return "", &toolError{
+			Code:    "tool_invoke_failed",
+			Message: `tool "Write" invocation failed`,
+			Err:     plugin.ErrFileLinesToolPathMissing,
+		}
+	}
+	content, ok := item["content"].(string)
+	if !ok {
+		return "", &toolError{
+			Code:    "tool_invoke_failed",
+			Message: `tool "Write" invocation failed`,
+			Err:     plugin.ErrFileLinesToolContentMissing,
+		}
+	}
+	absPath, err := resolveClaudeToolPath(filePath)
+	if err != nil {
+		return "", &toolError{
+			Code:    "tool_invoke_failed",
+			Message: `tool "Write" invocation failed`,
+			Err:     err,
+		}
+	}
+	if err := writeTextFileWithMode(absPath, content); err != nil {
+		return "", &toolError{
+			Code:    "tool_invoke_failed",
+			Message: `tool "Write" invocation failed`,
+			Err:     err,
+		}
+	}
+	return fmt.Sprintf("Write %s ok (bytes=%d)", absPath, len(content)), nil
+}
+
+func (s *Server) executeClaudeEditTool(input map[string]interface{}) (string, error) {
+	if err := s.ensureToolEnabled("edit"); err != nil {
+		return "", err
+	}
+	item := firstToolInputItem(input)
+	filePath := strings.TrimSpace(firstNonEmptyString(item, "file_path", "path"))
+	if filePath == "" {
+		return "", &toolError{
+			Code:    "tool_invoke_failed",
+			Message: `tool "Edit" invocation failed`,
+			Err:     plugin.ErrFileLinesToolPathMissing,
+		}
+	}
+	oldString, ok := item["old_string"].(string)
+	if !ok {
+		return "", &toolError{
+			Code:    "tool_invoke_failed",
+			Message: `tool "Edit" invocation failed`,
+			Err:     plugin.ErrFileLinesToolContentMissing,
+		}
+	}
+	newString, ok := item["new_string"].(string)
+	if !ok {
+		return "", &toolError{
+			Code:    "tool_invoke_failed",
+			Message: `tool "Edit" invocation failed`,
+			Err:     plugin.ErrFileLinesToolContentMissing,
+		}
+	}
+	replaceAll := parseBoolAny(item["replace_all"])
+	absPath, err := resolveClaudeToolPath(filePath)
+	if err != nil {
+		return "", &toolError{
+			Code:    "tool_invoke_failed",
+			Message: `tool "Edit" invocation failed`,
+			Err:     err,
+		}
+	}
+	raw, err := os.ReadFile(absPath)
+	if err != nil {
+		return "", &toolError{
+			Code:    "tool_invoke_failed",
+			Message: `tool "Edit" invocation failed`,
+			Err:     err,
+		}
+	}
+	original := string(raw)
+	occurrences := strings.Count(original, oldString)
+	if occurrences == 0 {
+		return "", &toolError{
+			Code:    "tool_invoke_failed",
+			Message: `tool "Edit" invocation failed`,
+			Err:     errors.New("old_string not found"),
+		}
+	}
+	if !replaceAll && occurrences != 1 {
+		return "", &toolError{
+			Code:    "tool_invoke_failed",
+			Message: `tool "Edit" invocation failed`,
+			Err:     fmt.Errorf("old_string is not unique (matches=%d)", occurrences),
+		}
+	}
+	replaced := original
+	changed := 1
+	if replaceAll {
+		replaced = strings.ReplaceAll(original, oldString, newString)
+		changed = occurrences
+	} else {
+		replaced = strings.Replace(original, oldString, newString, 1)
+	}
+	if err := writeTextFileWithMode(absPath, replaced); err != nil {
+		return "", &toolError{
+			Code:    "tool_invoke_failed",
+			Message: `tool "Edit" invocation failed`,
+			Err:     err,
+		}
+	}
+	return fmt.Sprintf("Edit %s ok (replacements=%d)", absPath, changed), nil
+}
+
+func (s *Server) executeClaudeMultiEditTool(input map[string]interface{}) (string, error) {
+	if err := s.ensureToolEnabled("edit"); err != nil {
+		return "", err
+	}
+	item := firstToolInputItem(input)
+	filePath := strings.TrimSpace(firstNonEmptyString(item, "file_path", "path"))
+	if filePath == "" {
+		return "", &toolError{
+			Code:    "tool_invoke_failed",
+			Message: `tool "MultiEdit" invocation failed`,
+			Err:     plugin.ErrFileLinesToolPathMissing,
+		}
+	}
+	rawEdits, ok := item["edits"].([]interface{})
+	if !ok || len(rawEdits) == 0 {
+		return "", &toolError{
+			Code:    "tool_invoke_failed",
+			Message: `tool "MultiEdit" invocation failed`,
+			Err:     plugin.ErrFileLinesToolItemsInvalid,
+		}
+	}
+	absPath, err := resolveClaudeToolPath(filePath)
+	if err != nil {
+		return "", &toolError{
+			Code:    "tool_invoke_failed",
+			Message: `tool "MultiEdit" invocation failed`,
+			Err:     err,
+		}
+	}
+	raw, err := os.ReadFile(absPath)
+	if err != nil {
+		return "", &toolError{
+			Code:    "tool_invoke_failed",
+			Message: `tool "MultiEdit" invocation failed`,
+			Err:     err,
+		}
+	}
+	updated := string(raw)
+	totalReplacements := 0
+	for index, rawEdit := range rawEdits {
+		editItem, ok := rawEdit.(map[string]interface{})
+		if !ok {
+			return "", &toolError{
+				Code:    "tool_invoke_failed",
+				Message: `tool "MultiEdit" invocation failed`,
+				Err:     fmt.Errorf("edits[%d] must be an object", index),
+			}
+		}
+		oldString, ok := editItem["old_string"].(string)
+		if !ok {
+			return "", &toolError{
+				Code:    "tool_invoke_failed",
+				Message: `tool "MultiEdit" invocation failed`,
+				Err:     fmt.Errorf("edits[%d].old_string is required", index),
+			}
+		}
+		newString, ok := editItem["new_string"].(string)
+		if !ok {
+			return "", &toolError{
+				Code:    "tool_invoke_failed",
+				Message: `tool "MultiEdit" invocation failed`,
+				Err:     fmt.Errorf("edits[%d].new_string is required", index),
+			}
+		}
+		replaceAll := parseBoolAny(editItem["replace_all"])
+		occurrences := strings.Count(updated, oldString)
+		if occurrences == 0 {
+			return "", &toolError{
+				Code:    "tool_invoke_failed",
+				Message: `tool "MultiEdit" invocation failed`,
+				Err:     fmt.Errorf("edits[%d].old_string not found", index),
+			}
+		}
+		if !replaceAll && occurrences != 1 {
+			return "", &toolError{
+				Code:    "tool_invoke_failed",
+				Message: `tool "MultiEdit" invocation failed`,
+				Err:     fmt.Errorf("edits[%d].old_string is not unique (matches=%d)", index, occurrences),
+			}
+		}
+		if replaceAll {
+			updated = strings.ReplaceAll(updated, oldString, newString)
+			totalReplacements += occurrences
+		} else {
+			updated = strings.Replace(updated, oldString, newString, 1)
+			totalReplacements++
+		}
+	}
+	if err := writeTextFileWithMode(absPath, updated); err != nil {
+		return "", &toolError{
+			Code:    "tool_invoke_failed",
+			Message: `tool "MultiEdit" invocation failed`,
+			Err:     err,
+		}
+	}
+	return fmt.Sprintf("MultiEdit %s ok (replacements=%d)", absPath, totalReplacements), nil
+}
+
+func (s *Server) executeClaudeNotebookEditTool(input map[string]interface{}) (string, error) {
+	if err := s.ensureToolEnabled("edit"); err != nil {
+		return "", err
+	}
+	item := firstToolInputItem(input)
+	notebookPath := strings.TrimSpace(firstNonEmptyString(item, "notebook_path", "file_path", "path"))
+	if notebookPath == "" {
+		return "", &toolError{
+			Code:    "tool_invoke_failed",
+			Message: `tool "NotebookEdit" invocation failed`,
+			Err:     plugin.ErrFileLinesToolPathMissing,
+		}
+	}
+	absPath, err := resolveClaudeToolPath(notebookPath)
+	if err != nil {
+		return "", &toolError{
+			Code:    "tool_invoke_failed",
+			Message: `tool "NotebookEdit" invocation failed`,
+			Err:     err,
+		}
+	}
+	raw, err := os.ReadFile(absPath)
+	if err != nil {
+		return "", &toolError{
+			Code:    "tool_invoke_failed",
+			Message: `tool "NotebookEdit" invocation failed`,
+			Err:     err,
+		}
+	}
+	nb := map[string]interface{}{}
+	if err := json.Unmarshal(raw, &nb); err != nil {
+		return "", &toolError{
+			Code:    "tool_invoke_failed",
+			Message: `tool "NotebookEdit" invocation failed`,
+			Err:     err,
+		}
+	}
+	rawCells, _ := nb["cells"].([]interface{})
+	cells := make([]map[string]interface{}, 0, len(rawCells))
+	for _, rawCell := range rawCells {
+		if cell, ok := rawCell.(map[string]interface{}); ok {
+			cells = append(cells, safeMap(cell))
+		}
+	}
+	mode := strings.ToLower(strings.TrimSpace(firstNonEmptyString(item, "edit_mode")))
+	if mode == "" {
+		mode = "replace"
+	}
+	cellID := strings.TrimSpace(firstNonEmptyString(item, "cell_id"))
+	newSource := firstNonEmptyString(item, "new_source")
+	cellType := strings.ToLower(strings.TrimSpace(firstNonEmptyString(item, "cell_type")))
+	targetIndex := -1
+	if cellID != "" {
+		for index, cell := range cells {
+			if strings.TrimSpace(stringValue(cell["id"])) == cellID {
+				targetIndex = index
+				break
+			}
+		}
+	}
+	switch mode {
+	case "replace":
+		if targetIndex < 0 {
+			if len(cells) == 0 {
+				return "", &toolError{
+					Code:    "tool_invoke_failed",
+					Message: `tool "NotebookEdit" invocation failed`,
+					Err:     errors.New("no cells available to replace"),
+				}
+			}
+			targetIndex = 0
+		}
+		cell := safeMap(cells[targetIndex])
+		cell["source"] = []interface{}{newSource}
+		if cellType != "" {
+			cell["cell_type"] = cellType
+		}
+		cells[targetIndex] = cell
+	case "insert":
+		insertIndex := 0
+		if targetIndex >= 0 {
+			insertIndex = targetIndex + 1
+		}
+		insertType := cellType
+		if insertType == "" {
+			insertType = "code"
+		}
+		cell := map[string]interface{}{
+			"id":        newID("nb-cell"),
+			"cell_type": insertType,
+			"metadata":  map[string]interface{}{},
+			"source":    []interface{}{newSource},
+		}
+		if insertType == "code" {
+			cell["outputs"] = []interface{}{}
+			cell["execution_count"] = nil
+		}
+		cells = append(cells[:insertIndex], append([]map[string]interface{}{cell}, cells[insertIndex:]...)...)
+	case "delete":
+		if targetIndex < 0 {
+			return "", &toolError{
+				Code:    "tool_invoke_failed",
+				Message: `tool "NotebookEdit" invocation failed`,
+				Err:     errors.New("cell_id not found for delete"),
+			}
+		}
+		cells = append(cells[:targetIndex], cells[targetIndex+1:]...)
+	default:
+		return "", &toolError{
+			Code:    "tool_invoke_failed",
+			Message: `tool "NotebookEdit" invocation failed`,
+			Err:     fmt.Errorf("unsupported edit_mode %q", mode),
+		}
+	}
+	finalCells := make([]interface{}, 0, len(cells))
+	for _, cell := range cells {
+		finalCells = append(finalCells, cell)
+	}
+	nb["cells"] = finalCells
+	encoded, err := json.MarshalIndent(nb, "", "  ")
+	if err != nil {
+		return "", &toolError{
+			Code:    "tool_invoke_failed",
+			Message: `tool "NotebookEdit" invocation failed`,
+			Err:     err,
+		}
+	}
+	if err := writeTextFileWithMode(absPath, string(encoded)); err != nil {
+		return "", &toolError{
+			Code:    "tool_invoke_failed",
+			Message: `tool "NotebookEdit" invocation failed`,
+			Err:     err,
+		}
+	}
+	return fmt.Sprintf("NotebookEdit %s ok (mode=%s cells=%d)", absPath, mode, len(cells)), nil
+}
+
+func (s *Server) executeClaudeLSTool(input map[string]interface{}) (string, error) {
+	if err := s.ensureToolEnabled("find"); err != nil {
+		return "", err
+	}
+	item := firstToolInputItem(input)
+	pathValue := strings.TrimSpace(firstNonEmptyString(item, "path"))
+	if pathValue == "" {
+		return "", &toolError{
+			Code:    "tool_invoke_failed",
+			Message: `tool "LS" invocation failed`,
+			Err:     plugin.ErrFileLinesToolPathMissing,
+		}
+	}
+	absPath, err := resolveClaudeToolPath(pathValue)
+	if err != nil {
+		return "", &toolError{
+			Code:    "tool_invoke_failed",
+			Message: `tool "LS" invocation failed`,
+			Err:     err,
+		}
+	}
+	entries, err := os.ReadDir(absPath)
+	if err != nil {
+		return "", &toolError{
+			Code:    "tool_invoke_failed",
+			Message: `tool "LS" invocation failed`,
+			Err:     err,
+		}
+	}
+	ignorePatterns := stringSliceFromAny(item["ignore"])
+	lines := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		name := entry.Name()
+		if shouldSkipByGlob(name, ignorePatterns) {
+			continue
+		}
+		if entry.IsDir() {
+			lines = append(lines, name+"/")
+		} else {
+			lines = append(lines, name)
+		}
+	}
+	sort.Strings(lines)
+	if len(lines) == 0 {
+		return fmt.Sprintf("LS %s (empty)", absPath), nil
+	}
+	return fmt.Sprintf("LS %s (%d)\n%s", absPath, len(lines), strings.Join(lines, "\n")), nil
+}
+
+func (s *Server) executeClaudeGlobTool(input map[string]interface{}) (string, error) {
+	if err := s.ensureToolEnabled("find"); err != nil {
+		return "", err
+	}
+	item := firstToolInputItem(input)
+	pattern := strings.TrimSpace(firstNonEmptyString(item, "pattern"))
+	if pattern == "" {
+		return "", &toolError{
+			Code:    "tool_invoke_failed",
+			Message: `tool "Glob" invocation failed`,
+			Err:     plugin.ErrFindToolPatternMissing,
+		}
+	}
+	basePath := strings.TrimSpace(firstNonEmptyString(item, "path"))
+	if basePath == "" {
+		repoRoot, err := findRepoRoot()
+		if err != nil {
+			return "", &toolError{
+				Code:    "tool_invoke_failed",
+				Message: `tool "Glob" invocation failed`,
+				Err:     err,
+			}
+		}
+		basePath = repoRoot
+	}
+	baseAbs, err := resolveClaudeToolPath(basePath)
+	if err != nil {
+		return "", &toolError{
+			Code:    "tool_invoke_failed",
+			Message: `tool "Glob" invocation failed`,
+			Err:     err,
+		}
+	}
+	matcher, err := compileClaudeGlobMatcher(pattern)
+	if err != nil {
+		return "", &toolError{
+			Code:    "tool_invoke_failed",
+			Message: `tool "Glob" invocation failed`,
+			Err:     err,
+		}
+	}
+	type globMatch struct {
+		Path    string
+		ModTime int64
+	}
+	matches := make([]globMatch, 0, 64)
+	_ = filepath.WalkDir(baseAbs, func(current string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return nil
+		}
+		if d.IsDir() {
+			return nil
+		}
+		rel, relErr := filepath.Rel(baseAbs, current)
+		if relErr != nil {
+			return nil
+		}
+		relSlash := filepath.ToSlash(rel)
+		if !matcher(relSlash) {
+			return nil
+		}
+		info, infoErr := d.Info()
+		modTime := int64(0)
+		if infoErr == nil {
+			modTime = info.ModTime().UnixNano()
+		}
+		matches = append(matches, globMatch{Path: current, ModTime: modTime})
+		return nil
+	})
+	sort.Slice(matches, func(i, j int) bool {
+		if matches[i].ModTime == matches[j].ModTime {
+			return matches[i].Path < matches[j].Path
+		}
+		return matches[i].ModTime > matches[j].ModTime
+	})
+	if len(matches) == 0 {
+		return fmt.Sprintf("Glob pattern=%q path=%s matched 0 file(s)", pattern, baseAbs), nil
+	}
+	lines := make([]string, 0, len(matches))
+	for _, item := range matches {
+		lines = append(lines, item.Path)
+	}
+	return fmt.Sprintf("Glob pattern=%q path=%s matched %d file(s)\n%s", pattern, baseAbs, len(lines), strings.Join(lines, "\n")), nil
+}
+
+func (s *Server) executeClaudeGrepTool(input map[string]interface{}) (string, error) {
+	if err := s.ensureToolEnabled("find"); err != nil {
+		return "", err
+	}
+	item := firstToolInputItem(input)
+	pattern := strings.TrimSpace(firstNonEmptyString(item, "pattern"))
+	if pattern == "" {
+		return "", &toolError{
+			Code:    "tool_invoke_failed",
+			Message: `tool "Grep" invocation failed`,
+			Err:     plugin.ErrFindToolPatternMissing,
+		}
+	}
+	ignoreCase := parseBoolAny(item["-i"])
+	multiline := parseBoolAny(item["multiline"])
+	expr := pattern
+	if ignoreCase {
+		expr = "(?i)" + expr
+	}
+	if multiline {
+		expr = "(?s)" + expr
+	}
+	re, err := regexp.Compile(expr)
+	if err != nil {
+		return "", &toolError{
+			Code:    "tool_invoke_failed",
+			Message: `tool "Grep" invocation failed`,
+			Err:     err,
+		}
+	}
+	basePath := strings.TrimSpace(firstNonEmptyString(item, "path"))
+	if basePath == "" {
+		repoRoot, rootErr := findRepoRoot()
+		if rootErr != nil {
+			return "", &toolError{
+				Code:    "tool_invoke_failed",
+				Message: `tool "Grep" invocation failed`,
+				Err:     rootErr,
+			}
+		}
+		basePath = repoRoot
+	}
+	baseAbs, err := resolveClaudeToolPath(basePath)
+	if err != nil {
+		return "", &toolError{
+			Code:    "tool_invoke_failed",
+			Message: `tool "Grep" invocation failed`,
+			Err:     err,
+		}
+	}
+	globPattern := strings.TrimSpace(firstNonEmptyString(item, "glob"))
+	var globMatcher func(string) bool
+	if globPattern != "" {
+		matcher, compileErr := compileClaudeGlobMatcher(globPattern)
+		if compileErr != nil {
+			return "", &toolError{
+				Code:    "tool_invoke_failed",
+				Message: `tool "Grep" invocation failed`,
+				Err:     compileErr,
+			}
+		}
+		globMatcher = matcher
+	}
+	typeFilter := strings.TrimSpace(firstNonEmptyString(item, "type"))
+	outputMode := strings.ToLower(strings.TrimSpace(firstNonEmptyString(item, "output_mode")))
+	if outputMode == "" {
+		outputMode = "files_with_matches"
+	}
+	showLineNo := parseBoolAny(item["-n"])
+	afterCtx, _ := firstPositiveInt(item, "-A")
+	beforeCtx, _ := firstPositiveInt(item, "-B")
+	if ctx, ok := firstPositiveInt(item, "-C"); ok {
+		afterCtx = ctx
+		beforeCtx = ctx
+	}
+	headLimit, hasHeadLimit := firstPositiveInt(item, "head_limit")
+
+	files := collectClaudeSearchFiles(baseAbs, globMatcher, typeFilter)
+	fileMatches := make([]string, 0, 64)
+	countLines := make([]string, 0, 64)
+	contentLines := make([]string, 0, 128)
+	for _, filePath := range files {
+		raw, readErr := os.ReadFile(filePath)
+		if readErr != nil {
+			continue
+		}
+		if isLikelyBinary(raw) {
+			continue
+		}
+		text := string(raw)
+		if multiline {
+			all := re.FindAllStringIndex(text, -1)
+			if len(all) == 0 {
+				continue
+			}
+			fileMatches = append(fileMatches, filePath)
+			countLines = append(countLines, fmt.Sprintf("%s:%d", filePath, len(all)))
+			if outputMode == "content" {
+				for _, index := range all {
+					segment := strings.TrimSpace(text[index[0]:index[1]])
+					if segment == "" {
+						continue
+					}
+					contentLines = append(contentLines, fmt.Sprintf("%s:%s", filePath, segment))
+					if hasHeadLimit && len(contentLines) >= headLimit {
+						break
+					}
+				}
+			}
+			continue
+		}
+
+		lines := splitIntoLines(text)
+		matchedIndexes := make([]int, 0, 8)
+		for index, line := range lines {
+			if re.MatchString(line) {
+				matchedIndexes = append(matchedIndexes, index)
+			}
+		}
+		if len(matchedIndexes) == 0 {
+			continue
+		}
+		fileMatches = append(fileMatches, filePath)
+		countLines = append(countLines, fmt.Sprintf("%s:%d", filePath, len(matchedIndexes)))
+		if outputMode != "content" {
+			continue
+		}
+		include := map[int]struct{}{}
+		for _, lineIndex := range matchedIndexes {
+			start := lineIndex - beforeCtx
+			if start < 0 {
+				start = 0
+			}
+			end := lineIndex + afterCtx
+			if end >= len(lines) {
+				end = len(lines) - 1
+			}
+			for pos := start; pos <= end; pos++ {
+				include[pos] = struct{}{}
+			}
+		}
+		ordered := make([]int, 0, len(include))
+		for index := range include {
+			ordered = append(ordered, index)
+		}
+		sort.Ints(ordered)
+		for _, index := range ordered {
+			if showLineNo {
+				contentLines = append(contentLines, fmt.Sprintf("%s:%d:%s", filePath, index+1, lines[index]))
+			} else {
+				contentLines = append(contentLines, fmt.Sprintf("%s:%s", filePath, lines[index]))
+			}
+			if hasHeadLimit && len(contentLines) >= headLimit {
+				break
+			}
+		}
+	}
+
+	var output []string
+	switch outputMode {
+	case "count":
+		output = countLines
+	case "content":
+		output = contentLines
+	default:
+		output = fileMatches
+	}
+	if hasHeadLimit && len(output) > headLimit {
+		output = output[:headLimit]
+	}
+	if len(output) == 0 {
+		return fmt.Sprintf("Grep pattern=%q matched 0 entries", pattern), nil
+	}
+	return strings.Join(output, "\n"), nil
+}
+
+func (s *Server) executeClaudeWebSearchTool(input map[string]interface{}) (string, error) {
+	if err := s.ensureToolEnabled("search"); err != nil {
+		return "", err
+	}
+	item := firstToolInputItem(input)
+	query := strings.TrimSpace(firstNonEmptyString(item, "query", "q"))
+	if query == "" {
+		return "", &toolError{
+			Code:    "tool_invoke_failed",
+			Message: `tool "WebSearch" invocation failed`,
+			Err:     plugin.ErrSearchToolQueryMissing,
+		}
+	}
+	query = decorateQueryWithDomainFilters(query, stringSliceFromAny(item["allowed_domains"]), stringSliceFromAny(item["blocked_domains"]))
+	searchItem := map[string]interface{}{
+		"query": query,
+	}
+	if provider := strings.TrimSpace(firstNonEmptyString(item, "provider")); provider != "" {
+		searchItem["provider"] = provider
+	}
+	if count, ok := firstPositiveInt(item, "count", "num_results"); ok {
+		searchItem["count"] = count
+	}
+	if timeout, ok := firstPositiveInt(item, "timeout_seconds", "yield_time_ms"); ok {
+		searchItem["timeout_seconds"] = timeout
+	}
+	result, err := s.invokeRegisteredTool("search", map[string]interface{}{
+		"items": []interface{}{searchItem},
+	})
+	if err != nil {
+		return "", err
+	}
+	return renderToolResult("WebSearch", result)
+}
+
+func (s *Server) executeClaudeWebFetchTool(input map[string]interface{}) (string, error) {
+	if err := s.ensureToolEnabled("browser"); err != nil {
+		return "", err
+	}
+	item := firstToolInputItem(input)
+	urlValue := strings.TrimSpace(firstNonEmptyString(item, "url", "path"))
+	promptValue := strings.TrimSpace(firstNonEmptyString(item, "prompt", "query", "task"))
+	if urlValue == "" || promptValue == "" {
+		return "", &toolError{
+			Code:    "tool_invoke_failed",
+			Message: `tool "WebFetch" invocation failed`,
+			Err:     plugin.ErrBrowserToolTaskMissing,
+		}
+	}
+	normalizedURL := normalizeClaudeWebFetchURL(urlValue)
+	browserItem := map[string]interface{}{
+		"task": fmt.Sprintf("打开并阅读网页，然后按要求提取信息。\nURL: %s\n提取要求: %s", normalizedURL, promptValue),
+	}
+	if timeout, ok := firstPositiveInt(item, "timeout_seconds", "yield_time_ms"); ok {
+		browserItem["timeout_seconds"] = timeout
+	}
+	result, err := s.invokeRegisteredTool("browser", map[string]interface{}{
+		"items": []interface{}{browserItem},
+	})
+	if err != nil {
+		return "", err
+	}
+	return renderToolResult("WebFetch", result)
+}
+
+func executeClaudeTaskTool(input map[string]interface{}) (string, error) {
+	item := firstToolInputItem(input)
+	description := strings.TrimSpace(firstNonEmptyString(item, "description"))
+	prompt := strings.TrimSpace(firstNonEmptyString(item, "prompt"))
+	subagentType := strings.TrimSpace(firstNonEmptyString(item, "subagent_type"))
+	if description == "" && prompt == "" && subagentType == "" {
+		return "Task emulation: no task payload provided.", nil
+	}
+	lines := []string{
+		"Task emulation (NextAI single-agent fallback):",
+		fmt.Sprintf("- description: %s", defaultIfEmpty(description, "(empty)")),
+		fmt.Sprintf("- subagent_type: %s", defaultIfEmpty(subagentType, "(empty)")),
+		fmt.Sprintf("- prompt: %s", defaultIfEmpty(prompt, "(empty)")),
+		"Action: continue in current agent with explicit step-by-step progress updates.",
+	}
+	return strings.Join(lines, "\n"), nil
+}
+
+func executeClaudeTodoWriteTool(input map[string]interface{}) (string, error) {
+	item := firstToolInputItem(input)
+	rawTodos, ok := item["todos"].([]interface{})
+	if !ok || len(rawTodos) == 0 {
+		return "TodoWrite emulation: empty todo list.", nil
+	}
+	lines := make([]string, 0, len(rawTodos)+1)
+	lines = append(lines, fmt.Sprintf("TodoWrite emulation: received %d todo item(s).", len(rawTodos)))
+	for _, rawTodo := range rawTodos {
+		todo, ok := rawTodo.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		content := strings.TrimSpace(stringValue(todo["content"]))
+		status := strings.TrimSpace(stringValue(todo["status"]))
+		priority := strings.TrimSpace(stringValue(todo["priority"]))
+		id := strings.TrimSpace(stringValue(todo["id"]))
+		lines = append(lines, fmt.Sprintf("- [%s] (%s/%s) %s", defaultIfEmpty(id, "-"), defaultIfEmpty(status, "pending"), defaultIfEmpty(priority, "medium"), defaultIfEmpty(content, "(empty)")))
+	}
+	return strings.Join(lines, "\n"), nil
+}
+
+func executeClaudeExitPlanModeTool(input map[string]interface{}) (string, error) {
+	item := firstToolInputItem(input)
+	plan := strings.TrimSpace(firstNonEmptyString(item, "plan"))
+	if plan == "" {
+		return "ExitPlanMode emulation: no plan content.", nil
+	}
+	return "ExitPlanMode emulation: plan ready for user confirmation.\n" + plan, nil
+}
+
+func (s *Server) ensureToolEnabled(name string) error {
+	if !s.toolDisabled(name) {
+		return nil
+	}
+	return &toolError{
+		Code:    "tool_disabled",
+		Message: fmt.Sprintf("tool %q is disabled by server config", name),
+	}
+}
+
+func resolveClaudeToolPath(raw string) (string, error) {
+	candidate := strings.TrimSpace(raw)
+	if candidate == "" {
+		return "", plugin.ErrFileLinesToolPathMissing
+	}
+	if filepath.IsAbs(candidate) {
+		return filepath.Clean(candidate), nil
+	}
+	repoRoot, err := findRepoRoot()
+	if err != nil {
+		return "", plugin.ErrFileLinesToolPathInvalid
+	}
+	return filepath.Clean(filepath.Join(repoRoot, candidate)), nil
+}
+
+func writeTextFileWithMode(path string, content string) error {
+	if strings.TrimSpace(path) == "" {
+		return plugin.ErrFileLinesToolPathMissing
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	perm := os.FileMode(0o644)
+	if info, err := os.Stat(path); err == nil {
+		perm = info.Mode().Perm()
+	}
+	return os.WriteFile(path, []byte(content), perm)
+}
+
+func formatClaudeReadOutput(path string, raw string, offset int, limit int) string {
+	lines := splitIntoLines(raw)
+	start := offset
+	if start < 0 {
+		start = 0
+	}
+	if start > len(lines) {
+		start = len(lines)
+	}
+	end := start + limit
+	if end > len(lines) {
+		end = len(lines)
+	}
+	selected := lines[start:end]
+	if len(selected) == 0 {
+		return fmt.Sprintf("Read %s [empty]", path)
+	}
+	numbered := make([]string, 0, len(selected))
+	for index, line := range selected {
+		lineNo := start + index + 1
+		numbered = append(numbered, fmt.Sprintf("%6d\t%s", lineNo, line))
+	}
+	return strings.Join(numbered, "\n")
+}
+
+func splitIntoLines(raw string) []string {
+	normalized := strings.ReplaceAll(raw, "\r\n", "\n")
+	lines := strings.Split(normalized, "\n")
+	if len(lines) > 0 && lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
+	return lines
+}
+
+func normalizeNotebookSource(raw interface{}) string {
+	switch value := raw.(type) {
+	case string:
+		return value
+	case []interface{}:
+		parts := make([]string, 0, len(value))
+		for _, item := range value {
+			parts = append(parts, stringValue(item))
+		}
+		return strings.Join(parts, "")
+	default:
+		return ""
+	}
+}
+
+func stringSliceFromAny(raw interface{}) []string {
+	switch value := raw.(type) {
+	case []interface{}:
+		out := make([]string, 0, len(value))
+		for _, item := range value {
+			text := strings.TrimSpace(stringValue(item))
+			if text != "" {
+				out = append(out, text)
+			}
+		}
+		return out
+	case []string:
+		out := make([]string, 0, len(value))
+		for _, item := range value {
+			text := strings.TrimSpace(item)
+			if text != "" {
+				out = append(out, text)
+			}
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
+func compileClaudeGlobMatcher(pattern string) (func(string) bool, error) {
+	trimmed := strings.TrimSpace(pattern)
+	if trimmed == "" {
+		return nil, errors.New("glob pattern is required")
+	}
+	normalized := filepath.ToSlash(trimmed)
+	placeholder := "__DOUBLE_STAR__PLACEHOLDER__"
+	escaped := regexp.QuoteMeta(normalized)
+	escaped = strings.ReplaceAll(escaped, "\\*\\*", placeholder)
+	escaped = strings.ReplaceAll(escaped, "\\*", "[^/]*")
+	escaped = strings.ReplaceAll(escaped, "\\?", "[^/]")
+	escaped = strings.ReplaceAll(escaped, placeholder, ".*")
+	re, err := regexp.Compile("^" + escaped + "$")
+	if err != nil {
+		return nil, err
+	}
+	return func(pathValue string) bool {
+		return re.MatchString(filepath.ToSlash(strings.TrimSpace(pathValue)))
+	}, nil
+}
+
+func shouldSkipByGlob(name string, patterns []string) bool {
+	for _, pattern := range patterns {
+		matcher, err := compileClaudeGlobMatcher(pattern)
+		if err != nil {
+			continue
+		}
+		if matcher(name) {
+			return true
+		}
+	}
+	return false
+}
+
+func parseBoolAny(raw interface{}) bool {
+	switch value := raw.(type) {
+	case bool:
+		return value
+	case string:
+		return strings.EqualFold(strings.TrimSpace(value), "true")
+	case float64:
+		return value != 0
+	case int:
+		return value != 0
+	case int64:
+		return value != 0
+	default:
+		return false
+	}
+}
+
+func parseNonNegativeIntAny(raw interface{}) (int, bool) {
+	switch value := raw.(type) {
+	case int:
+		if value >= 0 {
+			return value, true
+		}
+	case int32:
+		if value >= 0 {
+			return int(value), true
+		}
+	case int64:
+		if value >= 0 {
+			return int(value), true
+		}
+	case float64:
+		number := int(value)
+		if float64(number) == value && number >= 0 {
+			return number, true
+		}
+	case string:
+		number, err := strconv.Atoi(strings.TrimSpace(value))
+		if err == nil && number >= 0 {
+			return number, true
+		}
+	}
+	return 0, false
+}
+
+func collectClaudeSearchFiles(basePath string, globMatcher func(string) bool, typeFilter string) []string {
+	normalizedType := strings.ToLower(strings.TrimSpace(typeFilter))
+	files := make([]string, 0, 128)
+	info, err := os.Stat(basePath)
+	if err != nil {
+		return files
+	}
+	addPath := func(pathValue string) {
+		if normalizedType != "" {
+			ext := strings.TrimPrefix(strings.ToLower(filepath.Ext(pathValue)), ".")
+			if ext != normalizedType {
+				return
+			}
+		}
+		if globMatcher != nil {
+			rel := filepath.ToSlash(pathValue)
+			if relPath, err := filepath.Rel(basePath, pathValue); err == nil {
+				rel = filepath.ToSlash(relPath)
+			}
+			base := path.Base(rel)
+			if !globMatcher(rel) && !globMatcher(base) {
+				return
+			}
+		}
+		files = append(files, pathValue)
+	}
+	if !info.IsDir() {
+		addPath(basePath)
+		return files
+	}
+	_ = filepath.WalkDir(basePath, func(current string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return nil
+		}
+		if d.IsDir() {
+			return nil
+		}
+		addPath(current)
+		return nil
+	})
+	sort.Strings(files)
+	return files
+}
+
+func isLikelyBinary(raw []byte) bool {
+	for _, b := range raw {
+		if b == 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func decorateQueryWithDomainFilters(query string, allowed []string, blocked []string) string {
+	result := strings.TrimSpace(query)
+	for _, domain := range allowed {
+		trimmed := strings.TrimSpace(domain)
+		if trimmed == "" {
+			continue
+		}
+		result += " site:" + trimmed
+	}
+	for _, domain := range blocked {
+		trimmed := strings.TrimSpace(domain)
+		if trimmed == "" {
+			continue
+		}
+		result += " -site:" + trimmed
+	}
+	return result
+}
+
+func normalizeClaudeWebFetchURL(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	parsed, err := url.Parse(trimmed)
+	if err != nil {
+		return trimmed
+	}
+	if strings.EqualFold(strings.TrimSpace(parsed.Scheme), "http") {
+		parsed.Scheme = "https"
+		return parsed.String()
+	}
+	return trimmed
+}
+
+func defaultIfEmpty(value string, fallback string) string {
+	if strings.TrimSpace(value) == "" {
+		return fallback
+	}
+	return value
 }
 
 func (s *Server) executeOpenToolCall(input map[string]interface{}) (string, error) {
@@ -2008,6 +3720,132 @@ func (s *Server) executeApproxBrowserToolCall(action string, input map[string]in
 		approx["text"] = fmt.Sprintf("mode=approx action=%s routed_to=browser\n%s", action, originalText)
 	}
 	return renderToolResult(action, approx)
+}
+
+func (s *Server) executeSelfOpsToolCall(input map[string]interface{}) (string, error) {
+	payload := firstToolInputItem(input)
+	action := strings.ToLower(strings.TrimSpace(stringValue(payload["action"])))
+	if action == "" {
+		return "", &toolError{
+			Code:    "tool_invoke_failed",
+			Message: `tool "self_ops" invocation failed`,
+			Err:     errors.New("self_ops action is required"),
+		}
+	}
+
+	service := s.getSelfOpsService()
+	if service == nil {
+		return "", &toolError{
+			Code:    "tool_invoke_failed",
+			Message: `tool "self_ops" invocation failed`,
+			Err:     errors.New("self_ops service is unavailable"),
+		}
+	}
+
+	encodeResult := func(result interface{}) (string, error) {
+		return renderToolResult("self_ops", map[string]interface{}{
+			"ok":     true,
+			"action": action,
+			"result": result,
+		})
+	}
+	wrapErr := func(err error) (string, error) {
+		if err == nil {
+			return "", nil
+		}
+		if serviceErr := (*selfopsservice.ServiceError)(nil); errors.As(err, &serviceErr) {
+			return "", &toolError{
+				Code:    "tool_invoke_failed",
+				Message: fmt.Sprintf(`tool "self_ops" invocation failed: %s`, serviceErr.Code),
+				Err:     err,
+			}
+		}
+		return "", &toolError{
+			Code:    "tool_invoke_failed",
+			Message: `tool "self_ops" invocation failed`,
+			Err:     err,
+		}
+	}
+
+	switch action {
+	case "bootstrap_session":
+		var req selfopsservice.BootstrapSessionInput
+		if err := decodeSelfOpsInput(payload, &req); err != nil {
+			return "", &toolError{
+				Code:    "tool_invoke_failed",
+				Message: `tool "self_ops" invocation failed`,
+				Err:     err,
+			}
+		}
+		result, processErr, err := service.BootstrapSession(context.Background(), req)
+		if processErr != nil {
+			return "", &toolError{
+				Code:    "tool_invoke_failed",
+				Message: fmt.Sprintf(`tool "self_ops" invocation failed: %s`, processErr.Code),
+				Err:     processErr,
+			}
+		}
+		if wrapped, wrapErrValue := wrapErr(err); wrapErrValue != nil {
+			return wrapped, wrapErrValue
+		}
+		return encodeResult(result)
+	case "set_session_model":
+		var req selfopsservice.SetSessionModelInput
+		if err := decodeSelfOpsInput(payload, &req); err != nil {
+			return "", &toolError{
+				Code:    "tool_invoke_failed",
+				Message: `tool "self_ops" invocation failed`,
+				Err:     err,
+			}
+		}
+		result, err := service.SetSessionModel(req)
+		if wrapped, wrapErrValue := wrapErr(err); wrapErrValue != nil {
+			return wrapped, wrapErrValue
+		}
+		return encodeResult(result)
+	case "preview_mutation":
+		var req selfopsservice.PreviewMutationInput
+		if err := decodeSelfOpsInput(payload, &req); err != nil {
+			return "", &toolError{
+				Code:    "tool_invoke_failed",
+				Message: `tool "self_ops" invocation failed`,
+				Err:     err,
+			}
+		}
+		result, err := service.PreviewMutation(req)
+		if wrapped, wrapErrValue := wrapErr(err); wrapErrValue != nil {
+			return wrapped, wrapErrValue
+		}
+		return encodeResult(result)
+	case "apply_mutation":
+		var req selfopsservice.ApplyMutationInput
+		if err := decodeSelfOpsInput(payload, &req); err != nil {
+			return "", &toolError{
+				Code:    "tool_invoke_failed",
+				Message: `tool "self_ops" invocation failed`,
+				Err:     err,
+			}
+		}
+		result, err := service.ApplyMutation(req)
+		if wrapped, wrapErrValue := wrapErr(err); wrapErrValue != nil {
+			return wrapped, wrapErrValue
+		}
+		return encodeResult(result)
+	default:
+		return "", &toolError{
+			Code:    "tool_invoke_failed",
+			Message: `tool "self_ops" invocation failed`,
+			Err:     fmt.Errorf("unsupported self_ops action %q", action),
+		}
+	}
+}
+
+func decodeSelfOpsInput(payload map[string]interface{}, out interface{}) error {
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(data, out)
 }
 
 func (s *Server) invokeRegisteredTool(name string, input map[string]interface{}) (map[string]interface{}, error) {

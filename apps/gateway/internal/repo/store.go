@@ -13,14 +13,15 @@ import (
 )
 
 type ProviderSetting struct {
-	APIKey       string            `json:"api_key"`
-	BaseURL      string            `json:"base_url"`
-	DisplayName  string            `json:"display_name,omitempty"`
-	Enabled      *bool             `json:"enabled,omitempty"`
-	Store        *bool             `json:"store,omitempty"`
-	Headers      map[string]string `json:"headers,omitempty"`
-	TimeoutMS    int               `json:"timeout_ms,omitempty"`
-	ModelAliases map[string]string `json:"model_aliases,omitempty"`
+	APIKey          string            `json:"api_key"`
+	BaseURL         string            `json:"base_url"`
+	DisplayName     string            `json:"display_name,omitempty"`
+	ReasoningEffort string            `json:"reasoning_effort,omitempty"`
+	Enabled         *bool             `json:"enabled,omitempty"`
+	Store           *bool             `json:"store,omitempty"`
+	Headers         map[string]string `json:"headers,omitempty"`
+	TimeoutMS       int               `json:"timeout_ms,omitempty"`
+	ModelAliases    map[string]string `json:"model_aliases,omitempty"`
 }
 
 type State struct {
@@ -410,6 +411,7 @@ func normalizeProviderSetting(setting *ProviderSetting) {
 	setting.DisplayName = strings.TrimSpace(setting.DisplayName)
 	setting.APIKey = strings.TrimSpace(setting.APIKey)
 	setting.BaseURL = strings.TrimSpace(setting.BaseURL)
+	setting.ReasoningEffort = strings.ToLower(strings.TrimSpace(setting.ReasoningEffort))
 	if setting.Enabled == nil {
 		enabled := true
 		setting.Enabled = &enabled
@@ -434,6 +436,9 @@ func mergeProviderSetting(dst *ProviderSetting, src ProviderSetting) {
 	}
 	if src.BaseURL != "" {
 		dst.BaseURL = src.BaseURL
+	}
+	if src.ReasoningEffort != "" {
+		dst.ReasoningEffort = src.ReasoningEffort
 	}
 	if src.Enabled != nil {
 		enabled := *src.Enabled

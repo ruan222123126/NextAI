@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strings"
 	"testing"
 
 	"nextai/apps/gateway/internal/domain"
@@ -26,8 +27,8 @@ func TestProcessToolCallSuccess(t *testing.T) {
 			},
 		},
 		ToolRuntime: adapters.AgentToolRuntime{
-			ListToolDefinitionsFunc: func() []runner.ToolDefinition { return nil },
-			ExecuteToolCallFunc: func(name string, _ map[string]interface{}) (string, error) {
+			ListToolDefinitionsFunc: func(string) []runner.ToolDefinition { return nil },
+			ExecuteToolCallFunc: func(_ string, name string, _ map[string]interface{}) (string, error) {
 				if name != "shell" {
 					t.Fatalf("unexpected tool name: %s", name)
 				}
@@ -87,8 +88,8 @@ func TestProcessRunnerLoopWithToolCallAndStreamDelta(t *testing.T) {
 			},
 		},
 		ToolRuntime: adapters.AgentToolRuntime{
-			ListToolDefinitionsFunc: func() []runner.ToolDefinition { return nil },
-			ExecuteToolCallFunc: func(name string, _ map[string]interface{}) (string, error) {
+			ListToolDefinitionsFunc: func(string) []runner.ToolDefinition { return nil },
+			ExecuteToolCallFunc: func(_ string, name string, _ map[string]interface{}) (string, error) {
 				if name != "view" {
 					t.Fatalf("unexpected tool name: %s", name)
 				}
@@ -143,8 +144,8 @@ func TestProcessRunnerErrorMapped(t *testing.T) {
 			},
 		},
 		ToolRuntime: adapters.AgentToolRuntime{
-			ListToolDefinitionsFunc: func() []runner.ToolDefinition { return nil },
-			ExecuteToolCallFunc: func(string, map[string]interface{}) (string, error) {
+			ListToolDefinitionsFunc: func(string) []runner.ToolDefinition { return nil },
+			ExecuteToolCallFunc: func(_ string, _ string, _ map[string]interface{}) (string, error) {
 				t.Fatalf("ExecuteToolCall should not be called")
 				return "", nil
 			},
@@ -170,6 +171,64 @@ func TestProcessRunnerErrorMapped(t *testing.T) {
 	}
 	if processErr.Status != http.StatusBadGateway || processErr.Code != "provider_invalid_reply" {
 		t.Fatalf("unexpected process error: %+v", processErr)
+	}
+}
+
+func TestProcessRunnerErrorMappedIncludesDetails(t *testing.T) {
+	t.Parallel()
+
+	root := errors.New("provider stream chunk is not valid json: invalid character 'P' looking for beginning of value")
+	runErr := &runner.RunnerError{
+		Code:    runner.ErrorCodeProviderInvalidReply,
+		Message: "provider stream response is invalid",
+		Err:     root,
+	}
+
+	svc := NewService(Dependencies{
+		Runner: adapters.AgentRunner{
+			GenerateTurnFunc: func(context.Context, domain.AgentProcessRequest, runner.GenerateConfig, []runner.ToolDefinition) (runner.TurnResult, error) {
+				return runner.TurnResult{}, runErr
+			},
+			GenerateTurnStreamFunc: func(context.Context, domain.AgentProcessRequest, runner.GenerateConfig, []runner.ToolDefinition, func(string)) (runner.TurnResult, error) {
+				t.Fatalf("GenerateTurnStream should not be called")
+				return runner.TurnResult{}, nil
+			},
+		},
+		ToolRuntime: adapters.AgentToolRuntime{
+			ListToolDefinitionsFunc: func(string) []runner.ToolDefinition { return nil },
+			ExecuteToolCallFunc: func(_ string, _ string, _ map[string]interface{}) (string, error) {
+				t.Fatalf("ExecuteToolCall should not be called")
+				return "", nil
+			},
+		},
+		ErrorMapper: adapters.AgentErrorMapper{
+			MapToolErrorFunc: func(err error) (int, string, string) { return http.StatusBadRequest, "tool_error", err.Error() },
+			MapRunnerErrorFunc: func(err error) (int, string, string) {
+				return http.StatusBadGateway, "provider_invalid_reply", "provider stream response is invalid"
+			},
+		},
+	})
+
+	_, processErr := svc.Process(context.Background(), ProcessParams{
+		Request:        domain.AgentProcessRequest{},
+		EffectiveInput: []domain.AgentInputMessage{{Role: "user", Type: "message"}},
+		Streaming:      false,
+	}, nil)
+	if processErr == nil {
+		t.Fatalf("expected process error")
+	}
+	if processErr.Status != http.StatusBadGateway || processErr.Code != "provider_invalid_reply" {
+		t.Fatalf("unexpected process error: %+v", processErr)
+	}
+	details, ok := processErr.Details.(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected details map, got=%T (%v)", processErr.Details, processErr.Details)
+	}
+	if got, _ := details["runner_message"].(string); got != "provider stream response is invalid" {
+		t.Fatalf("unexpected runner_message: %q", got)
+	}
+	if got, _ := details["cause"].(string); got == "" || !strings.Contains(got, "provider stream chunk is not valid json") {
+		t.Fatalf("unexpected cause: %q", got)
 	}
 }
 
@@ -202,8 +261,8 @@ func TestProcessCodexModeNormalizesLegacyProviderViewObject(t *testing.T) {
 			},
 		},
 		ToolRuntime: adapters.AgentToolRuntime{
-			ListToolDefinitionsFunc: func() []runner.ToolDefinition { return nil },
-			ExecuteToolCallFunc: func(name string, input map[string]interface{}) (string, error) {
+			ListToolDefinitionsFunc: func(string) []runner.ToolDefinition { return nil },
+			ExecuteToolCallFunc: func(_ string, name string, input map[string]interface{}) (string, error) {
 				if name != "view" {
 					t.Fatalf("tool name=%s want=view", name)
 				}
@@ -276,8 +335,8 @@ func TestProcessCodexModeNormalizesExecCommandLegacyParams(t *testing.T) {
 			},
 		},
 		ToolRuntime: adapters.AgentToolRuntime{
-			ListToolDefinitionsFunc: func() []runner.ToolDefinition { return nil },
-			ExecuteToolCallFunc: func(name string, input map[string]interface{}) (string, error) {
+			ListToolDefinitionsFunc: func(string) []runner.ToolDefinition { return nil },
+			ExecuteToolCallFunc: func(_ string, name string, input map[string]interface{}) (string, error) {
 				if name != "shell" {
 					t.Fatalf("tool name=%s want=shell", name)
 				}
@@ -355,8 +414,8 @@ func TestProcessDefaultModeAlsoNormalizesLegacyProviderInput(t *testing.T) {
 			},
 		},
 		ToolRuntime: adapters.AgentToolRuntime{
-			ListToolDefinitionsFunc: func() []runner.ToolDefinition { return nil },
-			ExecuteToolCallFunc: func(name string, input map[string]interface{}) (string, error) {
+			ListToolDefinitionsFunc: func(string) []runner.ToolDefinition { return nil },
+			ExecuteToolCallFunc: func(_ string, name string, input map[string]interface{}) (string, error) {
 				if name != "shell" {
 					t.Fatalf("tool name=%s want=shell", name)
 				}
@@ -390,5 +449,57 @@ func TestProcessDefaultModeAlsoNormalizesLegacyProviderInput(t *testing.T) {
 	}, nil)
 	if processErr != nil {
 		t.Fatalf("process error: %+v", processErr)
+	}
+}
+
+func TestProcessSelfOpsToolCallAutoInjectsRequestScope(t *testing.T) {
+	t.Parallel()
+
+	svc := NewService(Dependencies{
+		Runner: adapters.AgentRunner{
+			GenerateTurnFunc: func(context.Context, domain.AgentProcessRequest, runner.GenerateConfig, []runner.ToolDefinition) (runner.TurnResult, error) {
+				t.Fatalf("GenerateTurn should not be called when has tool call")
+				return runner.TurnResult{}, nil
+			},
+			GenerateTurnStreamFunc: func(context.Context, domain.AgentProcessRequest, runner.GenerateConfig, []runner.ToolDefinition, func(string)) (runner.TurnResult, error) {
+				t.Fatalf("GenerateTurnStream should not be called when has tool call")
+				return runner.TurnResult{}, nil
+			},
+		},
+		ToolRuntime: adapters.AgentToolRuntime{
+			ListToolDefinitionsFunc: func(string) []runner.ToolDefinition { return nil },
+			ExecuteToolCallFunc: func(_ string, name string, input map[string]interface{}) (string, error) {
+				if name != "self_ops" {
+					t.Fatalf("unexpected tool name: %s", name)
+				}
+				if got, _ := input["session_id"].(string); got != "s-selfops" {
+					t.Fatalf("session_id=%q, want=s-selfops", got)
+				}
+				if got, _ := input["user_id"].(string); got != "u-selfops" {
+					t.Fatalf("user_id=%q, want=u-selfops", got)
+				}
+				if got, _ := input["channel"].(string); got != "console" {
+					t.Fatalf("channel=%q, want=console", got)
+				}
+				return "ok", nil
+			},
+		},
+		ErrorMapper: adapters.AgentErrorMapper{
+			MapToolErrorFunc:   func(err error) (int, string, string) { return http.StatusBadRequest, "tool_error", err.Error() },
+			MapRunnerErrorFunc: func(err error) (int, string, string) { return http.StatusBadGateway, "runner_error", err.Error() },
+		},
+	})
+
+	_, processErr := svc.Process(context.Background(), ProcessParams{
+		Request: domain.AgentProcessRequest{
+			SessionID: "s-selfops",
+			UserID:    "u-selfops",
+			Channel:   "console",
+		},
+		HasToolCall:       true,
+		RequestedToolCall: ToolCall{Name: "self_ops", Input: map[string]interface{}{"action": "set_session_model"}},
+	}, nil)
+	if processErr != nil {
+		t.Fatalf("unexpected process error: %+v", processErr)
 	}
 }

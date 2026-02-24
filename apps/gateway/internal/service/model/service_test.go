@@ -149,6 +149,56 @@ func TestConfigureProviderSupportsStoreFlag(t *testing.T) {
 	}
 }
 
+func TestConfigureProviderSupportsReasoningEffort(t *testing.T) {
+	t.Parallel()
+
+	store := newTestStore(t)
+	svc := NewService(Dependencies{Store: store})
+
+	effort := "HIGH"
+	provider, err := svc.ConfigureProvider(ConfigureProviderInput{
+		ProviderID:      "openai",
+		ReasoningEffort: &effort,
+	})
+	if err != nil {
+		t.Fatalf("configure provider failed: %v", err)
+	}
+	if provider.ReasoningEffort != "high" {
+		t.Fatalf("expected provider.ReasoningEffort=high, got=%q", provider.ReasoningEffort)
+	}
+
+	catalog, err := svc.GetCatalog()
+	if err != nil {
+		t.Fatalf("get catalog failed: %v", err)
+	}
+	if len(catalog.Providers) == 0 || catalog.Providers[0].ReasoningEffort != "high" {
+		t.Fatalf("expected catalog provider reasoning_effort=high, providers=%+v", catalog.Providers)
+	}
+}
+
+func TestConfigureProviderRejectsInvalidReasoningEffort(t *testing.T) {
+	t.Parallel()
+
+	store := newTestStore(t)
+	svc := NewService(Dependencies{Store: store})
+
+	effort := "extreme"
+	_, err := svc.ConfigureProvider(ConfigureProviderInput{
+		ProviderID:      "openai",
+		ReasoningEffort: &effort,
+	})
+	validation := (*ValidationError)(nil)
+	if !errors.As(err, &validation) {
+		t.Fatalf("expected validation error, got=%v", err)
+	}
+	if validation.Code != "invalid_provider_config" {
+		t.Fatalf("unexpected validation code: %s", validation.Code)
+	}
+	if validation.Message != "reasoning_effort must be one of: minimal, low, medium, high" {
+		t.Fatalf("unexpected validation message: %q", validation.Message)
+	}
+}
+
 func newTestStore(t *testing.T) *repo.Store {
 	t.Helper()
 
