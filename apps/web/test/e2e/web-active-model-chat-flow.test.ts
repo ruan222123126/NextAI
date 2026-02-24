@@ -24,6 +24,15 @@ async function waitFor(condition: () => boolean, timeoutMS = 2000): Promise<void
   }
 }
 
+async function waitForComposerSelectReady(selectID: string): Promise<HTMLSelectElement> {
+  await waitFor(() => document.body.getAttribute("data-nextai-boot-ready") === "true");
+  await waitFor(() => {
+    const select = document.getElementById(selectID);
+    return select instanceof HTMLSelectElement && !select.disabled && select.options.length > 0;
+  });
+  return document.getElementById(selectID) as HTMLSelectElement;
+}
+
 function rect(top: number, bottom: number, left = 0, right = 0): DOMRect {
   return {
     x: left,
@@ -1439,9 +1448,7 @@ describe("web e2e: auto activate model then send chat", () => {
 
     await import("../../src/main.ts");
 
-    await waitFor(() => Boolean(document.getElementById("composer-model-select")));
-
-    const modelSelect = document.getElementById("composer-model-select") as HTMLSelectElement;
+    const modelSelect = await waitForComposerSelectReady("composer-model-select");
     const container = modelSelect.closest<HTMLDivElement>(".custom-select-container");
     const trigger = container?.querySelector<HTMLDivElement>(".select-trigger") ?? null;
     expect(container).not.toBeNull();
@@ -1531,9 +1538,7 @@ describe("web e2e: auto activate model then send chat", () => {
 
     await import("../../src/main.ts");
 
-    await waitFor(() => Boolean(document.getElementById("composer-provider-select")));
-
-    const providerSelect = document.getElementById("composer-provider-select") as HTMLSelectElement;
+    const providerSelect = await waitForComposerSelectReady("composer-provider-select");
     const container = providerSelect.closest<HTMLDivElement>(".custom-select-container");
     const trigger = container?.querySelector<HTMLDivElement>(".select-trigger") ?? null;
     const chatPanel = document.querySelector<HTMLElement>(".chat.panel");

@@ -1,349 +1,85 @@
-import { parseErrorMessage } from "./api-utils.js";
 import {
   CronWorkflowCanvas,
   createDefaultCronWorkflow,
   validateCronWorkflowSpec,
 } from "./cron-workflow.js";
 import { DEFAULT_LOCALE, getLocale, isWebMessageKey, setLocale, t } from "./i18n.js";
-import { createChatDomain } from "./main/chat-domain.js";
+import { createChatFeature } from "./main/chat-feature.js";
 import {
   createComposerSlashController,
   type LocalizedComposerSlashCommand,
 } from "./main/composer-slash.js";
-import { createCronDomain } from "./main/cron-domain.js";
+import { createCronFeature } from "./main/cron-feature.js";
 import { createCustomSelectController } from "./main/custom-select.js";
 import { createLogger } from "./main/logging.js";
-import { createModelDomain } from "./main/model-domain.js";
+import { createModelFeature } from "./main/model-feature.js";
 import { createTransport } from "./main/transport.js";
-import { createWorkspaceDomain } from "./main/workspace-domain.js";
+import type {
+  ActiveModelsInfo,
+  AgentStreamEvent,
+  AgentToolCallPayload,
+  AgentToolResultPayload,
+  ChannelsSettingsLevel,
+  ChatHistoryResponse,
+  ChatSpec,
+  ComposerModelOption,
+  CronDispatchSpec,
+  CronDispatchTarget,
+  CronJobSpec,
+  CronJobState,
+  CronModalMode,
+  CronRuntimeSpec,
+  CronScheduleSpec,
+  CronWorkflowEdge,
+  CronWorkflowExecution,
+  CronWorkflowNode,
+  CronWorkflowNodeExecution,
+  CronWorkflowSpec,
+  CronWorkflowViewport,
+  DeleteResult,
+  ModelCapabilities,
+  ModelCatalogInfo,
+  ModelInfo,
+  ModelLimit,
+  ModelModalities,
+  ModelSlotConfig,
+  ModelsSettingsLevel,
+  PromptMode,
+  ProviderInfo,
+  ProviderKVKind,
+  ProviderTypeInfo,
+  QQAPIEnvironment,
+  QQChannelConfig,
+  QQTargetType,
+  RuntimeContent,
+  RuntimeMessage,
+  UpsertProviderOptions,
+  ViewMessage,
+  ViewMessageTimelineEntry,
+  ViewToolCallNotice,
+  WorkspaceCardKey,
+  WorkspaceCodexTreeNode,
+  WorkspaceEditorMode,
+  WorkspaceFileCatalog,
+  WorkspaceFileInfo,
+  WorkspaceSettingsLevel,
+  WorkspaceTextPayload,
+  WorkspaceUploadResponse,
+} from "./main/types.js";
+import { createWorkspaceFeature } from "./main/workspace-feature.js";
 import { renderMarkdownToFragment } from "./markdown.js";
 
 type TabKey = "chat" | "cron";
 type SettingsSectionKey = "connection" | "identity" | "display" | "models" | "channels" | "workspace";
-type ModelsSettingsLevel = "list" | "edit";
-type ChannelsSettingsLevel = "list" | "edit";
-type WorkspaceSettingsLevel = "list" | "config" | "prompt" | "codex" | "claude";
-type WorkspaceCardKey = "config" | "prompt" | "codex" | "claude";
-type PromptMode = "default" | "codex" | "claude";
-type ProviderKVKind = "headers" | "aliases";
-type WorkspaceEditorMode = "json" | "text";
-type CronModalMode = "create" | "edit";
 type I18nKey = Parameters<typeof t>[0];
 type ComposerSlashGroup = "quick" | "template" | "mode";
 
 const TRASH_ICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path fill="currentColor" d="M7 21q-.825 0-1.412-.587T5 19V6H4V4h5V3h6v1h5v2h-1v13q0 .825-.587 1.413T17 21zM17 6H7v13h10zM9 17h2V8H9zm4 0h2V8h-2zM7 6v13z"/></svg>`;
 
-interface ChatSpec {
-  id: string;
-  name: string;
-  session_id: string;
-  user_id: string;
-  channel: string;
-  updated_at: string;
-  meta?: Record<string, unknown>;
-}
-
-interface RuntimeContent {
-  type?: string;
-  text?: string;
-}
-
-interface RuntimeMessage {
-  id?: string;
-  role?: string;
-  content?: RuntimeContent[];
-  metadata?: Record<string, unknown>;
-}
-
-interface ChatHistoryResponse {
-  messages: RuntimeMessage[];
-}
-
-interface ModelInfo {
-  id: string;
-  name: string;
-  status?: string;
-  alias_of?: string;
-  capabilities?: ModelCapabilities;
-  limit?: ModelLimit;
-}
-
-interface ModelModalities {
-  text: boolean;
-  audio: boolean;
-  image: boolean;
-  video: boolean;
-  pdf: boolean;
-}
-
-interface ModelCapabilities {
-  temperature: boolean;
-  reasoning: boolean;
-  attachment: boolean;
-  tool_call: boolean;
-  input?: ModelModalities;
-  output?: ModelModalities;
-}
-
-interface ModelLimit {
-  context?: number;
-  input?: number;
-  output?: number;
-}
-
-interface ProviderInfo {
-  id: string;
-  name: string;
-  display_name: string;
-  openai_compatible?: boolean;
-  api_key_prefix?: string;
-  models: ModelInfo[];
-  reasoning_effort?: string;
-  store?: boolean;
-  headers?: Record<string, string>;
-  timeout_ms?: number;
-  model_aliases?: Record<string, string>;
-  allow_custom_base_url?: boolean;
-  enabled?: boolean;
-  has_api_key: boolean;
-  current_api_key?: string;
-  current_base_url?: string;
-}
-
-interface ProviderTypeInfo {
-  id: string;
-  display_name: string;
-}
-
-interface ComposerModelOption {
-  value: string;
-  canonical: string;
-  label: string;
-}
-
-interface ModelSlotConfig {
-  provider_id: string;
-  model: string;
-}
-
-interface ModelCatalogInfo {
-  providers: ProviderInfo[];
-  provider_types?: ProviderTypeInfo[];
-  defaults: Record<string, string>;
-  active_llm?: ModelSlotConfig;
-}
-
-interface ActiveModelsInfo {
-  active_llm?: ModelSlotConfig;
-}
-
-interface DeleteResult {
-  deleted: boolean;
-}
-
 interface PersistedSettings {
   apiBase?: unknown;
   apiKey?: unknown;
   workspaceCardEnabled?: unknown;
-}
-
-interface WorkspaceFileInfo {
-  path: string;
-  kind: "config" | "skill";
-  size: number | null;
-}
-
-interface WorkspaceUploadResponse {
-  uploaded?: boolean;
-  path?: string;
-  name?: string;
-  size?: number;
-}
-
-interface WorkspaceCodexTreeNode {
-  name: string;
-  path: string;
-  folders: WorkspaceCodexTreeNode[];
-  files: WorkspaceFileInfo[];
-}
-
-interface WorkspaceFileCatalog {
-  files: WorkspaceFileInfo[];
-  configFiles: WorkspaceFileInfo[];
-  promptFiles: WorkspaceFileInfo[];
-  codexFiles: WorkspaceFileInfo[];
-  claudeFiles: WorkspaceFileInfo[];
-  codexTree: WorkspaceCodexTreeNode[];
-  codexRootFiles: WorkspaceFileInfo[];
-  codexFolderPaths: Set<string>;
-  codexTopLevelFolderPaths: Set<string>;
-  claudeTree: WorkspaceCodexTreeNode[];
-  claudeRootFiles: WorkspaceFileInfo[];
-  claudeFolderPaths: Set<string>;
-  claudeTopLevelFolderPaths: Set<string>;
-}
-
-interface WorkspaceTextPayload {
-  content: string;
-}
-
-interface CronScheduleSpec {
-  type: string;
-  cron: string;
-  timezone?: string;
-}
-
-interface CronDispatchTarget {
-  user_id: string;
-  session_id: string;
-}
-
-interface CronDispatchSpec {
-  type?: string;
-  channel?: string;
-  target: CronDispatchTarget;
-  mode?: string;
-  meta?: Record<string, unknown>;
-}
-
-interface CronRuntimeSpec {
-  max_concurrency?: number;
-  timeout_seconds?: number;
-  misfire_grace_seconds?: number;
-}
-
-interface CronWorkflowViewport {
-  pan_x?: number;
-  pan_y?: number;
-  zoom?: number;
-}
-
-interface CronWorkflowNode {
-  id: string;
-  type: "start" | "text_event" | "delay" | "if_event";
-  title?: string;
-  x: number;
-  y: number;
-  text?: string;
-  delay_seconds?: number;
-  if_condition?: string;
-  continue_on_error?: boolean;
-}
-
-interface CronWorkflowEdge {
-  id: string;
-  source: string;
-  target: string;
-}
-
-interface CronWorkflowSpec {
-  version: "v1";
-  viewport?: CronWorkflowViewport;
-  nodes: CronWorkflowNode[];
-  edges: CronWorkflowEdge[];
-}
-
-interface CronWorkflowNodeExecution {
-  node_id: string;
-  node_type: "text_event" | "delay" | "if_event";
-  status: "succeeded" | "failed" | "skipped";
-  continue_on_error: boolean;
-  started_at: string;
-  finished_at?: string;
-  error?: string;
-}
-
-interface CronWorkflowExecution {
-  run_id: string;
-  started_at: string;
-  finished_at?: string;
-  had_failures: boolean;
-  nodes: CronWorkflowNodeExecution[];
-}
-
-interface CronJobSpec {
-  id: string;
-  name: string;
-  enabled: boolean;
-  schedule: CronScheduleSpec;
-  task_type: "text" | "workflow";
-  text?: string;
-  workflow?: CronWorkflowSpec;
-  dispatch: CronDispatchSpec;
-  runtime: CronRuntimeSpec;
-  meta?: Record<string, unknown>;
-}
-
-interface CronJobState {
-  next_run_at?: string;
-  last_run_at?: string;
-  last_status?: string;
-  last_error?: string;
-  paused?: boolean;
-  last_execution?: CronWorkflowExecution;
-}
-
-type QQTargetType = "c2c" | "group" | "guild";
-type QQAPIEnvironment = "production" | "sandbox";
-
-interface QQChannelConfig {
-  enabled: boolean;
-  app_id: string;
-  client_secret: string;
-  bot_prefix: string;
-  target_type: QQTargetType;
-  target_id: string;
-  api_base: string;
-  token_url: string;
-  timeout_seconds: number;
-}
-
-interface ViewMessage {
-  id: string;
-  role: "user" | "assistant";
-  text: string;
-  toolCalls: ViewToolCallNotice[];
-  textOrder?: number;
-  toolOrder?: number;
-  timeline: ViewMessageTimelineEntry[];
-}
-
-interface ViewToolCallNotice {
-  summary: string;
-  raw: string;
-  order?: number;
-  step?: number;
-  toolName?: string;
-  outputReady?: boolean;
-}
-
-interface ViewMessageTimelineEntry {
-  type: "text" | "tool_call";
-  order: number;
-  text?: string;
-  toolCall?: ViewToolCallNotice;
-}
-
-interface AgentToolCallPayload {
-  name?: string;
-  input?: Record<string, unknown>;
-}
-
-interface AgentToolResultPayload {
-  name?: string;
-  ok?: boolean;
-  summary?: string;
-}
-
-interface AgentStreamEvent {
-  type?: string;
-  step?: number;
-  delta?: string;
-  reply?: string;
-  tool_call?: AgentToolCallPayload;
-  tool_result?: AgentToolResultPayload;
-  meta?: Record<string, unknown>;
-  raw?: string;
 }
 
 interface AgentSystemLayerInfo {
@@ -376,11 +112,6 @@ interface SystemPromptTokenScenario {
   cacheKey: string;
 }
 
-interface UpsertProviderOptions {
-  closeAfterSave?: boolean;
-  notifyStatus?: boolean;
-}
-
 interface ComposerSlashCommandConfig {
   id: string;
   command: string;
@@ -405,8 +136,6 @@ const DEFAULT_QQ_TOKEN_URL = "https://bots.qq.com/app/getAppAccessToken";
 const DEFAULT_QQ_TIMEOUT_SECONDS = 8;
 const CHAT_LIVE_REFRESH_INTERVAL_MS = 1500;
 const PROVIDER_AUTO_SAVE_DELAY_MS = 900;
-const REQUEST_SOURCE_HEADER = "X-NextAI-Source";
-const REQUEST_SOURCE_WEB = "web";
 const AGENT_RAW_REQUEST_LOG_LABEL = "[NextAI][agent-process][raw-request]";
 const AGENT_RAW_RESPONSE_LOG_LABEL = "[NextAI][agent-process][raw-response]";
 const SCROLLBAR_ACTIVE_CLASS = "is-scrollbar-scrolling";
@@ -434,6 +163,8 @@ const FEATURE_FLAG_PROMPT_CONTEXT_INTROSPECT = "nextai.feature.prompt_context_in
 const PROMPT_MODE_META_KEY = "prompt_mode";
 const SETTINGS_KEY = "nextai.web.chat.settings";
 const LOCALE_KEY = "nextai.web.locale";
+const BOOT_READY_ATTRIBUTE = "data-nextai-boot-ready";
+const BOOT_READY_EVENT = "nextai:boot-ready";
 const BUILTIN_PROVIDER_IDS = new Set(["openai"]);
 const COMPOSER_SLASH_COMMANDS: ComposerSlashCommandConfig[] = [
   {
@@ -550,7 +281,6 @@ const scrollbarActivityTimers = new WeakMap<HTMLElement, number>();
 let chatLiveRefreshTimer: number | null = null;
 let chatLiveRefreshInFlight = false;
 let activeSettingsSection: SettingsSectionKey = "models";
-let composerFileDragDepth = 0;
 let systemPromptTokensLoaded = false;
 let systemPromptTokensInFlight: Promise<void> | null = null;
 let systemPromptTokensInFlightScenarioKey = "";
@@ -832,10 +562,8 @@ const transport = createTransport({
   getApiBase: () => state.apiBase,
   getApiKey: () => state.apiKey,
   getLocale,
-  requestSourceHeader: REQUEST_SOURCE_HEADER,
-  requestSourceValue: REQUEST_SOURCE_WEB,
 });
-const { applyDefaultHeaders: applyTransportDefaultHeaders, requestJSON, toAbsoluteURL } = transport;
+const { requestJSON, openStream } = transport;
 
 const logger = createLogger({
   statusLine,
@@ -848,204 +576,157 @@ const logger = createLogger({
 });
 const { setStatus, logComposerStatusToConsole, logAgentRawRequest, logAgentRawResponse } = logger;
 
-const chatDomain = createChatDomain({
+const workspaceFeature = createWorkspaceFeature({
   state,
   t,
   setStatus,
-  asErrorMessage,
-  requestJSON,
-  toAbsoluteURL,
-  applyTransportDefaultHeaders,
-  parseErrorMessage,
-  logAgentRawRequest,
-  logAgentRawResponse,
-  toViewMessage,
-  compactTime,
-  renderMarkdownToFragment,
-  requestWorkspaceFile: (path: string) => requestWorkspaceFile(path),
-  extractWorkspaceFileText,
-  renderComposerTokenEstimate,
-  syncControlState,
-  appendEmptyItem,
-  newSessionID,
-  setSearchModalOpen,
-  getBootstrapTask: () => bootstrapTask,
-  hideComposerSlashPanel,
-  renderComposerSlashPanel,
-  parsePositiveInteger,
-  resetComposerFileDragDepth: () => {
-    composerFileDragDepth = 0;
-  },
-  runtimeFlags,
-  WEB_CHAT_CHANNEL,
-  QQ_CHANNEL,
-  TRASH_ICON_SVG,
-  PROMPT_TEMPLATE_PREFIX,
-  PROMPT_TEMPLATE_NAME_PATTERN,
-  PROMPT_TEMPLATE_ARG_KEY_PATTERN,
-  PROMPT_TEMPLATE_PLACEHOLDER_PATTERN,
-  PROMPT_MODE_META_KEY,
-  chatList,
-  chatTitle,
-  chatSession,
-  chatPromptModeSelect,
-  searchChatInput,
-  searchChatResults,
-  messageList,
-  thinkingIndicator,
-  composerMain,
-  messageInput,
-  sendButton,
-  composerAttachButton,
-  composerAttachInput,
-});
-const {
-  reloadChats,
-  openChat,
-  deleteChat,
-  startDraftSession,
-  sendMessage,
-  pauseReply,
-  isFileDragEvent,
-  clearComposerFileDragState,
-  handleComposerAttachmentFiles,
-  extractDroppedFilePaths,
-  normalizePromptMode,
-  setActivePromptMode,
-  renderChatHeader,
-  renderChatList,
-  renderSearchChatResults,
-  renderMessages,
-  renderMessageInPlace,
-  setThinkingIndicatorVisible,
-  syncThinkingIndicatorPosition,
-  nextMessageOutputOrder,
-  normalizeToolName,
-  parseToolNameFromToolCallRaw,
-  formatToolResultOutput,
-  formatToolCallSummary,
-  syncSendButtonState,
-} = chatDomain;
-
-const workspaceDomain = createWorkspaceDomain({
-  state,
-  t,
-  setStatus,
-  syncControlState,
-  asWorkspaceErrorMessage,
-  requestJSON,
-  normalizeWorkspacePathKey,
-  isSystemPromptWorkspacePath,
-  invalidateSystemPromptTokensCacheAndReload,
-  appendEmptyItem,
   setWorkspaceEditorModalOpen,
   setWorkspaceImportModalOpen,
-  DEFAULT_WORKSPACE_CARD_ENABLED,
-  WORKSPACE_CARD_KEYS,
-  WORKSPACE_CODEX_PREFIX,
-  WORKSPACE_CLAUDE_PREFIX,
-  TRASH_ICON_SVG,
-  workspaceEntryList,
-  workspaceLevel1View,
-  workspaceLevel2ConfigView,
-  workspaceLevel2PromptView,
-  workspaceLevel2CodexView,
-  workspaceLevel2ClaudeView,
+  refreshWorkspaceButton,
   workspaceSettingsSection,
+  workspaceImportOpenButton,
+  workspaceEditorModal,
+  workspaceEditorModalCloseButton,
+  workspaceImportModal,
+  workspaceImportModalCloseButton,
   workspaceFilesBody,
   workspacePromptsBody,
-  workspaceCodexTreeBody,
   workspaceClaudeBody,
-  workspaceFilePathInput,
-  workspaceFileContentInput,
-  workspaceSaveFileButton,
+  workspaceCodexTreeBody,
+  workspaceEditorForm,
   workspaceDeleteFileButton,
-  workspaceJSONInput,
+  workspaceFilePathInput,
+  workspaceImportForm,
+  domainContext: {
+    state,
+    t,
+    setStatus,
+    syncControlState,
+    asWorkspaceErrorMessage,
+    requestJSON,
+    normalizeWorkspacePathKey,
+    isSystemPromptWorkspacePath,
+    invalidateSystemPromptTokensCacheAndReload,
+    appendEmptyItem,
+    setWorkspaceEditorModalOpen,
+    setWorkspaceImportModalOpen,
+    DEFAULT_WORKSPACE_CARD_ENABLED,
+    WORKSPACE_CARD_KEYS,
+    WORKSPACE_CODEX_PREFIX,
+    WORKSPACE_CLAUDE_PREFIX,
+    TRASH_ICON_SVG,
+    workspaceEntryList,
+    workspaceLevel1View,
+    workspaceLevel2ConfigView,
+    workspaceLevel2PromptView,
+    workspaceLevel2CodexView,
+    workspaceLevel2ClaudeView,
+    workspaceSettingsSection,
+    workspaceFilesBody,
+    workspacePromptsBody,
+    workspaceCodexTreeBody,
+    workspaceClaudeBody,
+    workspaceFilePathInput,
+    workspaceFileContentInput,
+    workspaceSaveFileButton,
+    workspaceDeleteFileButton,
+    workspaceJSONInput,
+  },
 });
 const {
   setWorkspaceSettingsLevel,
   parseWorkspaceCardEnabled,
-  isWorkspaceCardKey,
-  ensureWorkspaceCardEnabled,
-  setWorkspaceCardEnabled,
   refreshWorkspace,
   renderWorkspacePanel,
-  openWorkspaceFile,
-  saveWorkspaceFile,
-  deleteWorkspaceFile,
-  importWorkspaceJSON,
   clearWorkspaceSelection,
   isWorkspaceSkillPath,
   normalizeWorkspaceInputPath,
-  toggleWorkspaceCodexFolder,
-  toggleWorkspaceClaudeFolder,
   requestWorkspaceFile,
-} = workspaceDomain;
+} = workspaceFeature.actions;
 
-const modelDomain = createModelDomain({
+const modelFeature = createModelFeature({
   state,
-  t,
-  setStatus,
-  asErrorMessage,
-  requestJSON,
-  syncControlState,
-  syncCustomSelect,
-  appendEmptyItem,
-  formatModelEntry,
-  formatCapabilities,
-  formatProviderLabel,
-  normalizeProviders,
-  normalizeDefaults,
-  buildDefaultMapFromProviders,
-  normalizeModelSlot,
-  parseIntegerInput,
-  renderComposerTokenEstimate,
-  toRecord,
-  TRASH_ICON_SVG,
-  QQ_CHANNEL,
-  DEFAULT_QQ_API_BASE,
-  QQ_SANDBOX_API_BASE,
-  DEFAULT_QQ_TOKEN_URL,
-  DEFAULT_QQ_TIMEOUT_SECONDS,
-  DEFAULT_OPENAI_MODEL_IDS,
-  BUILTIN_PROVIDER_IDS,
-  PROVIDER_AUTO_SAVE_DELAY_MS,
-  composerProviderSelect,
-  composerModelSelect,
-  modelsSettingsSection,
-  channelsSettingsSection,
-  channelsEntryList,
-  channelsLevel1View,
-  channelsLevel2View,
-  qqChannelEnabledInput,
-  qqChannelAppIDInput,
-  qqChannelClientSecretInput,
-  qqChannelBotPrefixInput,
-  qqChannelTargetTypeSelect,
-  qqChannelAPIEnvironmentSelect,
-  qqChannelTimeoutSecondsInput,
-  modelsProviderAPIKeyInput,
-  modelsProviderAPIKeyVisibilityButton,
-  modelsProviderBaseURLInput,
-  modelsProviderBaseURLPreview,
-  modelsLevel1View,
-  modelsLevel2View,
-  modelsEditProviderMeta,
-  modelsProviderList,
+  refreshModelsButton,
+  modelsAddProviderButton,
+  modelsProviderForm,
+  modelsProviderHeadersAddButton,
+  modelsProviderAliasesAddButton,
   modelsProviderTypeSelect,
-  modelsProviderNameInput,
-  modelsProviderTimeoutMSInput,
-  modelsProviderReasoningEffortField,
-  modelsProviderReasoningEffortSelect,
-  modelsProviderEnabledInput,
-  modelsProviderStoreField,
-  modelsProviderStoreInput,
+  modelsProviderBaseURLInput,
+  modelsProviderCustomModelsAddButton,
+  modelsProviderCancelButton,
+  modelsProviderList,
   modelsProviderHeadersRows,
   modelsProviderAliasesRows,
-  modelsProviderCustomModelsField,
   modelsProviderCustomModelsRows,
-  modelsProviderCustomModelsAddButton,
-  modelsProviderModalTitle,
+  channelsEntryList,
+  qqChannelForm,
+  qqChannelEnabledInput,
+  domainContext: {
+    state,
+    t,
+    setStatus,
+    asErrorMessage,
+    requestJSON,
+    syncControlState,
+    syncCustomSelect,
+    appendEmptyItem,
+    formatModelEntry,
+    formatCapabilities,
+    formatProviderLabel,
+    normalizeProviders,
+    normalizeDefaults,
+    buildDefaultMapFromProviders,
+    normalizeModelSlot,
+    parseIntegerInput,
+    renderComposerTokenEstimate,
+    toRecord,
+    TRASH_ICON_SVG,
+    QQ_CHANNEL,
+    DEFAULT_QQ_API_BASE,
+    QQ_SANDBOX_API_BASE,
+    DEFAULT_QQ_TOKEN_URL,
+    DEFAULT_QQ_TIMEOUT_SECONDS,
+    DEFAULT_OPENAI_MODEL_IDS,
+    BUILTIN_PROVIDER_IDS,
+    PROVIDER_AUTO_SAVE_DELAY_MS,
+    composerProviderSelect,
+    composerModelSelect,
+    modelsSettingsSection,
+    channelsSettingsSection,
+    channelsEntryList,
+    channelsLevel1View,
+    channelsLevel2View,
+    qqChannelEnabledInput,
+    qqChannelAppIDInput,
+    qqChannelClientSecretInput,
+    qqChannelBotPrefixInput,
+    qqChannelTargetTypeSelect,
+    qqChannelAPIEnvironmentSelect,
+    qqChannelTimeoutSecondsInput,
+    modelsProviderAPIKeyInput,
+    modelsProviderAPIKeyVisibilityButton,
+    modelsProviderBaseURLInput,
+    modelsProviderBaseURLPreview,
+    modelsLevel1View,
+    modelsLevel2View,
+    modelsEditProviderMeta,
+    modelsProviderList,
+    modelsProviderTypeSelect,
+    modelsProviderNameInput,
+    modelsProviderTimeoutMSInput,
+    modelsProviderReasoningEffortField,
+    modelsProviderReasoningEffortSelect,
+    modelsProviderEnabledInput,
+    modelsProviderStoreField,
+    modelsProviderStoreInput,
+    modelsProviderHeadersRows,
+    modelsProviderAliasesRows,
+    modelsProviderCustomModelsField,
+    modelsProviderCustomModelsRows,
+    modelsProviderCustomModelsAddButton,
+    modelsProviderModalTitle,
+  },
 });
 const {
   refreshModels,
@@ -1077,59 +758,166 @@ const {
   defaultQQChannelConfig,
   normalizeQQChannelConfig,
   resolveQQAPIEnvironment,
-} = modelDomain;
+} = modelFeature.actions;
 
-const cronDomain = createCronDomain({
+const chatFeature = createChatFeature({
   state,
   t,
   setStatus,
-  asErrorMessage,
+  renderComposerTokenEstimate,
   syncControlState,
-  syncCustomSelect,
-  requestJSON,
-  reloadChats,
-  compactTime,
-  newSessionID,
-  createDefaultCronWorkflow,
-  validateCronWorkflowSpec,
-  CronWorkflowCanvas,
-  DEFAULT_CRON_JOB_ID,
-  CRON_META_SYSTEM_DEFAULT,
-  parseIntegerInput,
-  cronCreateOpenButton,
-  cronCreateModal,
-  cronCreateModalCloseButton,
-  cronTaskTypeSelect,
-  cronIDInput,
-  cronNameInput,
-  cronIntervalInput,
-  cronSessionIDInput,
-  cronMaxConcurrencyInput,
-  cronTimeoutInput,
-  cronMisfireInput,
-  cronTextInput,
-  cronResetWorkflowButton,
-  cronWorkflowFullscreenButton,
-  refreshCronButton,
-  cronNewSessionButton,
-  cronCreateForm,
-  cronJobsBody,
-  cronDispatchHint,
-  cronCreateModalTitle,
-  cronSubmitButton,
-  cronTextSection,
-  cronWorkflowSection,
-  cronWorkflowViewport,
-  cronWorkflowCanvas,
-  cronWorkflowEdges,
-  cronWorkflowNodes,
-  cronWorkflowNodeEditor,
-  cronWorkflowZoom,
-  cronWorkflowExecutionList,
-  cronWorkbench,
+  getModelActions: () => ({
+    handleComposerProviderSelectChange,
+    handleComposerModelSelectChange,
+  }),
+  reloadChatsButton,
+  newChatButton,
+  chatPromptModeSelect,
+  composerForm,
+  composerMain,
+  messageInput,
+  sendButton,
+  composerAttachButton,
+  composerAttachInput,
+  composerProviderSelect,
+  composerModelSelect,
+  composerSlashPanel,
+  composerSlashList,
+  composerSlashController,
+  domainContext: {
+    state,
+    t,
+    setStatus,
+    asErrorMessage,
+    requestJSON,
+    openStream,
+    logAgentRawRequest,
+    logAgentRawResponse,
+    toViewMessage,
+    compactTime,
+    renderMarkdownToFragment,
+    requestWorkspaceFile: (path: string) => requestWorkspaceFile(path),
+    extractWorkspaceFileText,
+    renderComposerTokenEstimate,
+    syncControlState,
+    appendEmptyItem,
+    newSessionID,
+    setSearchModalOpen,
+    getBootstrapTask: () => bootstrapTask,
+    hideComposerSlashPanel: () => {
+      composerSlashController.hide();
+    },
+    renderComposerSlashPanel: () => {
+      composerSlashController.render();
+    },
+    parsePositiveInteger,
+    resetComposerFileDragDepth: () => {},
+    runtimeFlags,
+    WEB_CHAT_CHANNEL,
+    QQ_CHANNEL,
+    TRASH_ICON_SVG,
+    PROMPT_TEMPLATE_PREFIX,
+    PROMPT_TEMPLATE_NAME_PATTERN,
+    PROMPT_TEMPLATE_ARG_KEY_PATTERN,
+    PROMPT_TEMPLATE_PLACEHOLDER_PATTERN,
+    PROMPT_MODE_META_KEY,
+    chatList,
+    chatTitle,
+    chatSession,
+    chatPromptModeSelect,
+    searchChatInput,
+    searchChatResults,
+    messageList,
+    thinkingIndicator,
+    composerMain,
+    messageInput,
+    sendButton,
+    composerAttachButton,
+    composerAttachInput,
+  },
 });
 const {
-  bindCronEvents,
+  reloadChats,
+  openChat,
+  deleteChat,
+  startDraftSession,
+  sendMessage,
+  pauseReply,
+  isFileDragEvent,
+  clearComposerFileDragState,
+  handleComposerAttachmentFiles,
+  extractDroppedFilePaths,
+  normalizePromptMode,
+  setActivePromptMode,
+  renderChatHeader,
+  renderChatList,
+  renderSearchChatResults,
+  renderMessages,
+  renderMessageInPlace,
+  setThinkingIndicatorVisible,
+  syncThinkingIndicatorPosition,
+  nextMessageOutputOrder,
+  normalizeToolName,
+  parseToolNameFromToolCallRaw,
+  formatToolResultOutput,
+  formatToolCallSummary,
+  syncSendButtonState,
+  hideComposerSlashPanel,
+  renderComposerSlashPanel,
+} = chatFeature.actions;
+
+const cronFeature = createCronFeature({
+  domainContext: {
+    state,
+    t,
+    setStatus,
+    asErrorMessage,
+    syncControlState,
+    syncCustomSelect,
+    requestJSON,
+    reloadChats,
+    compactTime,
+    newSessionID,
+    createDefaultCronWorkflow,
+    validateCronWorkflowSpec,
+    CronWorkflowCanvas,
+    DEFAULT_CRON_JOB_ID,
+    CRON_META_SYSTEM_DEFAULT,
+    parseIntegerInput,
+    cronCreateOpenButton,
+    cronCreateModal,
+    cronCreateModalCloseButton,
+    cronTaskTypeSelect,
+    cronIDInput,
+    cronNameInput,
+    cronIntervalInput,
+    cronSessionIDInput,
+    cronMaxConcurrencyInput,
+    cronTimeoutInput,
+    cronMisfireInput,
+    cronTextInput,
+    cronResetWorkflowButton,
+    cronWorkflowFullscreenButton,
+    refreshCronButton,
+    cronNewSessionButton,
+    cronCreateForm,
+    cronJobsBody,
+    cronDispatchHint,
+    cronCreateModalTitle,
+    cronSubmitButton,
+    cronTextSection,
+    cronWorkflowSection,
+    cronWorkflowViewport,
+    cronWorkflowCanvas,
+    cronWorkflowEdges,
+    cronWorkflowNodes,
+    cronWorkflowNodeEditor,
+    cronWorkflowZoom,
+    cronWorkflowExecutionList,
+    cronWorkbench,
+  },
+});
+const {
   isCronCreateModalOpen,
   setCronCreateModalOpen,
   supportsNativeCronWorkflowFullscreen,
@@ -1155,11 +943,20 @@ const {
   updateCronJobEnabled,
   deleteCronJob,
   runCronJob,
-} = cronDomain;
+} = cronFeature.actions;
 
+const featureModules = [chatFeature, modelFeature, workspaceFeature, cronFeature];
+window.addEventListener("beforeunload", () => {
+  for (const feature of featureModules) {
+    feature.dispose();
+  }
+});
+
+setBootReady(false);
 const bootstrapTask = bootstrap();
 
 async function bootstrap(): Promise<void> {
+  setBootReady(false);
   initLocale();
   restoreSettings();
   await loadRuntimeConfig();
@@ -1188,7 +985,11 @@ async function bootstrap(): Promise<void> {
   syncCronDispatchHint();
   ensureCronSessionID();
   resetProviderModalForm();
-  await syncModelStateOnBoot();
+  try {
+    await syncModelStateOnBoot();
+  } finally {
+    setBootReady(true);
+  }
   ensureChatLiveRefreshLoop();
 
   setStatus(t("status.loadingChats"), "info");
@@ -1200,6 +1001,18 @@ async function bootstrap(): Promise<void> {
   }
   startDraftSession();
   setStatus(t("status.noChatsDraft"), "info");
+}
+
+function setBootReady(ready: boolean): void {
+  const root = document.body ?? document.documentElement;
+  root.setAttribute(BOOT_READY_ATTRIBUTE, ready ? "true" : "false");
+  window.dispatchEvent(
+    new CustomEvent(BOOT_READY_EVENT, {
+      detail: {
+        ready,
+      },
+    }),
+  );
 }
 
 function initAutoHideScrollbars(): void {
@@ -1678,25 +1491,6 @@ function bindSettingsEvents(): void {
   });
 }
 
-function bindChatHeaderEvents(): void {
-  reloadChatsButton.addEventListener("click", async () => {
-    syncControlState();
-    setStatus(t("status.refreshingChats"), "info");
-    await reloadChats();
-    setStatus(t("status.chatsRefreshed"), "info");
-  });
-
-  newChatButton.addEventListener("click", () => {
-    syncControlState();
-    startDraftSession();
-    setStatus(t("status.draftReady"), "info");
-  });
-
-  chatPromptModeSelect.addEventListener("change", () => {
-    setActivePromptMode(normalizePromptMode(chatPromptModeSelect.value), { announce: true });
-  });
-}
-
 function bindConnectionEvents(): void {
   apiBaseInput.addEventListener("change", async () => {
     await handleControlChange(false);
@@ -1722,471 +1516,15 @@ function bindConnectionEvents(): void {
   });
 }
 
-function bindComposerEvents(): void {
-  sendButton.addEventListener("click", (event) => {
-    if (!state.sending) {
-      return;
-    }
-    event.preventDefault();
-    event.stopPropagation();
-    pauseReply();
-  });
-  composerForm.addEventListener("submit", async (event) => {
-    event.preventDefault();
-    await sendMessage();
-  });
-  messageInput.addEventListener("keydown", (event) => {
-    if (handleComposerSlashPanelKeydown(event)) {
-      return;
-    }
-    if (
-      event.key !== "Enter" ||
-      event.shiftKey ||
-      event.ctrlKey ||
-      event.metaKey ||
-      event.altKey ||
-      event.isComposing
-    ) {
-      return;
-    }
-    event.preventDefault();
-    void sendMessage();
-  });
-  messageInput.addEventListener("input", () => {
-    renderComposerTokenEstimate();
-    renderComposerSlashPanel();
-  });
-  messageInput.addEventListener("focus", () => {
-    renderComposerSlashPanel();
-  });
-  composerAttachButton.addEventListener("click", () => {
-    composerAttachInput.click();
-  });
-  composerAttachInput.addEventListener("change", () => {
-    void handleComposerAttachmentFiles(composerAttachInput.files);
-    composerAttachInput.value = "";
-  });
-  composerMain.addEventListener("dragenter", (event) => {
-    if (!isFileDragEvent(event)) {
-      return;
-    }
-    event.preventDefault();
-    composerFileDragDepth += 1;
-    composerMain.classList.add("is-file-drag-over");
-  });
-  composerMain.addEventListener("dragover", (event) => {
-    if (!isFileDragEvent(event)) {
-      return;
-    }
-    event.preventDefault();
-    if (event.dataTransfer) {
-      event.dataTransfer.dropEffect = "copy";
-    }
-    composerMain.classList.add("is-file-drag-over");
-  });
-  composerMain.addEventListener("dragleave", (event) => {
-    if (!composerMain.classList.contains("is-file-drag-over")) {
-      return;
-    }
-    event.preventDefault();
-    composerFileDragDepth = Math.max(0, composerFileDragDepth - 1);
-    if (composerFileDragDepth === 0) {
-      composerMain.classList.remove("is-file-drag-over");
-    }
-  });
-  composerMain.addEventListener("drop", (event) => {
-    if (!isFileDragEvent(event)) {
-      return;
-    }
-    event.preventDefault();
-    clearComposerFileDragState();
-    void handleComposerAttachmentFiles(
-      event.dataTransfer?.files ?? null,
-      extractDroppedFilePaths(event.dataTransfer ?? null),
-    );
-  });
-  window.addEventListener("drop", () => {
-    clearComposerFileDragState();
-  });
-  window.addEventListener("dragend", () => {
-    clearComposerFileDragState();
-  });
-  composerProviderSelect.addEventListener("change", () => {
-    void handleComposerProviderSelectChange();
-  });
-  composerModelSelect.addEventListener("change", () => {
-    void handleComposerModelSelectChange();
-  });
-  composerSlashPanel.addEventListener("mousedown", (event) => {
-    event.preventDefault();
-  });
-  composerSlashList.addEventListener("click", (event) => {
-    composerSlashController.handleListClick(event);
-  });
-  document.addEventListener("click", (event) => {
-    if (!isComposerSlashPanelOpen()) {
-      return;
-    }
-    const target = event.target;
-    if (target instanceof Node && composerMain.contains(target)) {
-      return;
-    }
-    hideComposerSlashPanel();
-  });
-}
-
-function isComposerSlashPanelOpen(): boolean {
-  return composerSlashController.isOpen();
-}
-
-function hideComposerSlashPanel(): void {
-  composerSlashController.hide();
-}
-
-function renderComposerSlashPanel(): void {
-  composerSlashController.render();
-}
-
-function handleComposerSlashPanelKeydown(event: KeyboardEvent): boolean {
-  return composerSlashController.handleKeydown(event);
-}
-
-function bindModelEvents(): void {
-  refreshModelsButton.addEventListener("click", async () => {
-    await refreshModels();
-  });
-  modelsAddProviderButton.addEventListener("click", () => {
-    openProviderModal("create");
-  });
-  modelsProviderForm.addEventListener("submit", async (event) => {
-    event.preventDefault();
-    await upsertProvider();
-  });
-  modelsProviderHeadersAddButton.addEventListener("click", () => {
-    appendProviderKVRow(modelsProviderHeadersRows, "headers");
-    scheduleProviderAutoSave();
-  });
-  modelsProviderAliasesAddButton.addEventListener("click", () => {
-    appendProviderKVRow(modelsProviderAliasesRows, "aliases");
-    scheduleProviderAutoSave();
-  });
-  modelsProviderTypeSelect.addEventListener("change", () => {
-    syncProviderCustomModelsField(modelsProviderTypeSelect.value);
-    scheduleProviderAutoSave();
-  });
-  modelsProviderBaseURLInput.addEventListener("input", () => {
-    renderProviderBaseURLPreview();
-  });
-  modelsProviderCustomModelsAddButton.addEventListener("click", () => {
-    appendCustomModelRow(modelsProviderCustomModelsRows);
-    scheduleProviderAutoSave();
-  });
-  modelsProviderForm.addEventListener("input", () => {
-    scheduleProviderAutoSave();
-  });
-  modelsProviderForm.addEventListener("change", () => {
-    scheduleProviderAutoSave();
-  });
-  modelsProviderForm.addEventListener("click", (event) => {
-    const target = event.target;
-    if (!(target instanceof Element)) {
-      return;
-    }
-    const formActionButton = target.closest<HTMLButtonElement>("button[data-provider-form-action]");
-    if (formActionButton) {
-      const action = formActionButton.dataset.providerFormAction ?? "";
-      if (action === "toggle-api-key-visibility") {
-        setProviderAPIKeyVisibility(!state.providerAPIKeyVisible);
-      }
-      if (action === "focus-base-url") {
-        modelsProviderBaseURLInput.focus();
-      }
-      return;
-    }
-    const kvRemoveButton = target.closest<HTMLButtonElement>("button[data-kv-remove]");
-    if (kvRemoveButton) {
-      const kvRow = kvRemoveButton.closest(".kv-row");
-      if (kvRow) {
-        const container = kvRow.parentElement;
-        kvRow.remove();
-        if (container && container.children.length === 0) {
-          const kind = container.getAttribute("data-kv-kind");
-          if (kind === "headers" || kind === "aliases") {
-            appendProviderKVRow(container, kind);
-          }
-        }
-        scheduleProviderAutoSave();
-      }
-    }
-
-    const customRemoveButton = target.closest<HTMLButtonElement>("button[data-custom-model-remove]");
-    if (customRemoveButton) {
-      const customRow = customRemoveButton.closest(".custom-model-row");
-      if (!customRow) {
-        return;
-      }
-      const customContainer = customRow.parentElement;
-      customRow.remove();
-      if (customContainer && customContainer.children.length === 0) {
-        appendCustomModelRow(customContainer);
-      }
-      scheduleProviderAutoSave();
-    }
-  });
-  modelsProviderCancelButton.addEventListener("click", () => {
-    closeProviderModal();
-  });
-  modelsProviderList.addEventListener("click", async (event) => {
-    const target = event.target;
-    if (!(target instanceof Element)) {
-      return;
-    }
-    const button = target.closest<HTMLButtonElement>("button[data-provider-action]");
-    if (!button) {
-      return;
-    }
-    const providerID = button.dataset.providerId ?? "";
-    if (providerID === "") {
-      return;
-    }
-    const action = button.dataset.providerAction;
-    if (action === "select") {
-      state.selectedProviderID = providerID;
-      openProviderModal("edit", providerID);
-      return;
-    }
-    if (action === "edit") {
-      openProviderModal("edit", providerID);
-      return;
-    }
-    if (action === "delete") {
-      await deleteProvider(providerID);
-      return;
-    }
-  });
-}
-
-function bindChannelEvents(): void {
-  channelsEntryList.addEventListener("click", (event) => {
-    const target = event.target;
-    if (!(target instanceof Element)) {
-      return;
-    }
-    const button = target.closest<HTMLButtonElement>("button[data-channel-action]");
-    if (!button) {
-      return;
-    }
-    const action = button.dataset.channelAction;
-    if (action !== "open") {
-      return;
-    }
-    setChannelsSettingsLevel("edit");
-    renderChannelsPanel();
-    qqChannelEnabledInput.focus();
-  });
-  qqChannelForm.addEventListener("submit", async (event) => {
-    event.preventDefault();
-    await saveQQChannelConfig();
-  });
-}
-
-function bindWorkspaceEvents(): void {
-  refreshWorkspaceButton.addEventListener("click", async () => {
-    await refreshWorkspace();
-  });
-  workspaceSettingsSection.addEventListener("click", (event) => {
-    const target = event.target;
-    if (!(target instanceof Element)) {
-      return;
-    }
-    handleWorkspaceNavigationClick(target);
-  });
-  bindWorkspaceModalEvents();
-  bindWorkspaceFileListEvents();
-  bindWorkspaceEditorEvents();
-  bindWorkspaceEscapeEvents();
-}
-
-function handleWorkspaceNavigationClick(target: Element): void {
-  const toggleButton = target.closest<HTMLButtonElement>("button[data-workspace-toggle-card]");
-  if (toggleButton) {
-    const card = toggleButton.dataset.workspaceToggleCard;
-    if (!isWorkspaceCardKey(card)) {
-      return;
-    }
-    const enabled = state.workspaceCardEnabled[card] !== false;
-    setWorkspaceCardEnabled(card, !enabled);
-    return;
-  }
-  const button = target.closest<HTMLButtonElement>("button[data-workspace-action]");
-  if (!button) {
-    return;
-  }
-  const action = button.dataset.workspaceAction;
-  if (action === "open-config") {
-    openWorkspaceSettingsCard("config");
-    return;
-  }
-  if (action === "open-prompt") {
-    openWorkspaceSettingsCard("prompt");
-    return;
-  }
-  if (action === "open-codex") {
-    openWorkspaceSettingsCard("codex");
-    return;
-  }
-  if (action === "open-claude") {
-    openWorkspaceSettingsCard("claude");
-    return;
-  }
-  if (action === "back") {
-    setWorkspaceSettingsLevel("list");
-    renderWorkspacePanel();
-  }
-}
-
-function openWorkspaceSettingsCard(card: WorkspaceCardKey): void {
-  if (!ensureWorkspaceCardEnabled(card)) {
-    return;
-  }
-  setWorkspaceSettingsLevel(card);
-  renderWorkspacePanel();
-}
-
-function bindWorkspaceModalEvents(): void {
-  workspaceImportOpenButton.addEventListener("click", () => {
-    setWorkspaceImportModalOpen(true);
-  });
-  workspaceEditorModal.addEventListener("click", (event) => {
-    const target = event.target;
-    if (target instanceof Element && target.closest("[data-workspace-editor-close=\"true\"]")) {
-      setWorkspaceEditorModalOpen(false);
-      return;
-    }
-    event.stopPropagation();
-  });
-  workspaceEditorModalCloseButton.addEventListener("click", () => {
-    setWorkspaceEditorModalOpen(false);
-  });
-  workspaceImportModal.addEventListener("click", (event) => {
-    const target = event.target;
-    if (target instanceof Element && target.closest("[data-workspace-import-close=\"true\"]")) {
-      setWorkspaceImportModalOpen(false);
-      return;
-    }
-    event.stopPropagation();
-  });
-  workspaceImportModalCloseButton.addEventListener("click", () => {
-    setWorkspaceImportModalOpen(false);
-  });
-}
-
-function bindWorkspaceFileListEvents(): void {
-  workspaceFilesBody.addEventListener("click", (event) => {
-    void handleWorkspaceFileListClick(event);
-  });
-  workspacePromptsBody.addEventListener("click", (event) => {
-    void handleWorkspaceFileListClick(event);
-  });
-  workspaceClaudeBody.addEventListener("click", (event) => {
-    const target = event.target;
-    if (target instanceof Element) {
-      const folderToggle = target.closest<HTMLButtonElement>("button[data-workspace-claude-folder-toggle]");
-      if (folderToggle) {
-        const folderPath = folderToggle.dataset.workspaceClaudeFolderToggle ?? "";
-        if (folderPath !== "") {
-          toggleWorkspaceClaudeFolder(folderPath);
-        }
-        return;
-      }
-    }
-    void handleWorkspaceFileListClick(event);
-  });
-  workspaceCodexTreeBody.addEventListener("click", (event) => {
-    const target = event.target;
-    if (target instanceof Element) {
-      const folderToggle = target.closest<HTMLButtonElement>("button[data-workspace-folder-toggle]");
-      if (folderToggle) {
-        const folderPath = folderToggle.dataset.workspaceFolderToggle ?? "";
-        if (folderPath !== "") {
-          toggleWorkspaceCodexFolder(folderPath);
-        }
-        return;
-      }
-    }
-    void handleWorkspaceFileListClick(event);
-  });
-}
-
-async function handleWorkspaceFileListClick(event: Event): Promise<void> {
-  const target = event.target;
-  if (!(target instanceof Element)) {
-    return;
-  }
-  const openButton = target.closest<HTMLButtonElement>("button[data-workspace-open]");
-  if (openButton) {
-    const path = openButton.dataset.workspaceOpen ?? "";
-    if (path !== "") {
-      await openWorkspaceFile(path);
-    }
-    return;
-  }
-  const deleteButton = target.closest<HTMLButtonElement>("button[data-workspace-delete]");
-  if (!deleteButton) {
-    return;
-  }
-  const path = deleteButton.dataset.workspaceDelete ?? "";
-  if (path === "") {
-    return;
-  }
-  await deleteWorkspaceFile(path);
-}
-
-function bindWorkspaceEditorEvents(): void {
-  workspaceEditorForm.addEventListener("submit", async (event) => {
-    event.preventDefault();
-    await saveWorkspaceFile();
-  });
-  workspaceDeleteFileButton.addEventListener("click", async () => {
-    const path = workspaceFilePathInput.value.trim();
-    if (path === "") {
-      setStatus(t("error.workspacePathRequired"), "error");
-      return;
-    }
-    await deleteWorkspaceFile(path);
-  });
-  workspaceImportForm.addEventListener("submit", async (event) => {
-    event.preventDefault();
-    await importWorkspaceJSON();
-  });
-}
-
-function bindWorkspaceEscapeEvents(): void {
-  document.addEventListener("keydown", (event) => {
-    if (event.key !== "Escape" || !isWorkspaceEditorModalOpen()) {
-      return;
-    }
-    setWorkspaceEditorModalOpen(false);
-  });
-  document.addEventListener("keydown", (event) => {
-    if (event.key !== "Escape" || !isWorkspaceImportModalOpen()) {
-      return;
-    }
-    setWorkspaceImportModalOpen(false);
-  });
-}
-
 function bindEvents(): void {
   bindTabEvents();
   bindSearchEvents();
   bindSettingsEvents();
-  bindChatHeaderEvents();
   bindConnectionEvents();
-  bindComposerEvents();
-  bindModelEvents();
-  bindChannelEvents();
-  bindWorkspaceEvents();
-  bindCronEvents();
+  chatFeature.init();
+  modelFeature.init();
+  workspaceFeature.init();
+  cronFeature.init();
 }
 
 function isSettingsPopoverOpen(): boolean {
@@ -2768,7 +2106,7 @@ function parsePersistedToolCallNotices(
 
 function toViewMessage(message: RuntimeMessage): ViewMessage {
   const joined = (message.content ?? [])
-    .map((item) => item.text ?? "")
+    .map((item: RuntimeContent) => item.text ?? "")
     .join("")
     .trim();
   const metadata = toRecord(message.metadata);
