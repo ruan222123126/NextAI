@@ -125,8 +125,16 @@ type TurnResult struct {
 	ResponseID string
 }
 
+type ProviderCapabilities struct {
+	Stream      bool
+	ToolCall    bool
+	Attachments bool
+	Reasoning   bool
+}
+
 type ProviderAdapter interface {
 	ID() string
+	Capabilities() ProviderCapabilities
 	GenerateTurn(ctx context.Context, req domain.AgentProcessRequest, cfg GenerateConfig, tools []ToolDefinition, runner *Runner) (TurnResult, error)
 }
 
@@ -136,8 +144,9 @@ type StreamProviderAdapter interface {
 }
 
 type Runner struct {
-	httpClient *http.Client
-	adapters   map[string]ProviderAdapter
+	httpClient          *http.Client
+	adapters            map[string]ProviderAdapter
+	adapterCapabilities map[string]ProviderCapabilities
 }
 
 func New() *Runner {
@@ -149,8 +158,9 @@ func NewWithHTTPClient(client *http.Client) *Runner {
 		client = &http.Client{}
 	}
 	r := &Runner{
-		httpClient: client,
-		adapters:   map[string]ProviderAdapter{},
+		httpClient:          client,
+		adapters:            map[string]ProviderAdapter{},
+		adapterCapabilities: map[string]ProviderCapabilities{},
 	}
 	r.registerAdapter(&demoAdapter{})
 	r.registerAdapter(&openAICompatibleAdapter{})
@@ -167,6 +177,7 @@ func (r *Runner) registerAdapter(adapter ProviderAdapter) {
 		return
 	}
 	r.adapters[id] = adapter
+	r.adapterCapabilities[id] = adapter.Capabilities()
 }
 
 func (r *Runner) GenerateTurn(ctx context.Context, req domain.AgentProcessRequest, cfg GenerateConfig, tools []ToolDefinition) (TurnResult, error) {
@@ -197,7 +208,12 @@ func (r *Runner) GenerateTurn(ctx context.Context, req domain.AgentProcessReques
 			Message: fmt.Sprintf("adapter %q is not supported", adapterID),
 		}
 	}
-	return adapter.GenerateTurn(ctx, req, cfg, tools, r)
+	capabilities := r.capabilitiesForAdapter(adapterID)
+	preparedReq, preparedCfg, preparedTools, prepErr := prepareTurnInputsByCapabilities(req, cfg, tools, capabilities)
+	if prepErr != nil {
+		return TurnResult{}, prepErr
+	}
+	return adapter.GenerateTurn(ctx, preparedReq, preparedCfg, preparedTools, r)
 }
 
 func (r *Runner) GenerateReply(ctx context.Context, req domain.AgentProcessRequest, cfg GenerateConfig) (string, error) {
@@ -249,12 +265,24 @@ func (r *Runner) GenerateTurnStream(
 			Message: fmt.Sprintf("adapter %q is not supported", adapterID),
 		}
 	}
-
-	if streamAdapter, ok := adapter.(StreamProviderAdapter); ok {
-		return streamAdapter.GenerateTurnStream(ctx, req, cfg, tools, r, onDelta)
+	capabilities := r.capabilitiesForAdapter(adapterID)
+	preparedReq, preparedCfg, preparedTools, prepErr := prepareTurnInputsByCapabilities(req, cfg, tools, capabilities)
+	if prepErr != nil {
+		return TurnResult{}, prepErr
 	}
 
-	turn, err := adapter.GenerateTurn(ctx, req, cfg, tools, r)
+	if capabilities.Stream {
+		streamAdapter, supportsStream := adapter.(StreamProviderAdapter)
+		if !supportsStream {
+			return TurnResult{}, &RunnerError{
+				Code:    ErrorCodeProviderNotSupported,
+				Message: fmt.Sprintf("adapter %q declares stream capability but does not implement stream adapter", adapterID),
+			}
+		}
+		return streamAdapter.GenerateTurnStream(ctx, preparedReq, preparedCfg, preparedTools, r, onDelta)
+	}
+
+	turn, err := adapter.GenerateTurn(ctx, preparedReq, preparedCfg, preparedTools, r)
 	if err != nil {
 		return TurnResult{}, err
 	}
@@ -264,10 +292,68 @@ func (r *Runner) GenerateTurnStream(
 	return turn, nil
 }
 
+func (r *Runner) capabilitiesForAdapter(adapterID string) ProviderCapabilities {
+	if r == nil || len(r.adapterCapabilities) == 0 {
+		return ProviderCapabilities{}
+	}
+	if capabilities, ok := r.adapterCapabilities[strings.TrimSpace(adapterID)]; ok {
+		return capabilities
+	}
+	return ProviderCapabilities{}
+}
+
+func prepareTurnInputsByCapabilities(
+	req domain.AgentProcessRequest,
+	cfg GenerateConfig,
+	tools []ToolDefinition,
+	capabilities ProviderCapabilities,
+) (domain.AgentProcessRequest, GenerateConfig, []ToolDefinition, *RunnerError) {
+	if !capabilities.Attachments && requestContainsAttachment(req) {
+		return domain.AgentProcessRequest{}, GenerateConfig{}, nil, &RunnerError{
+			Code:    ErrorCodeProviderNotSupported,
+			Message: "provider does not support attachments",
+		}
+	}
+
+	preparedCfg := cfg
+	if !capabilities.Reasoning {
+		preparedCfg.ReasoningEffort = ""
+	}
+
+	preparedTools := tools
+	if !capabilities.ToolCall {
+		preparedTools = nil
+	}
+
+	return req, preparedCfg, preparedTools, nil
+}
+
+func requestContainsAttachment(req domain.AgentProcessRequest) bool {
+	for _, msg := range req.Input {
+		for _, part := range msg.Content {
+			partType := strings.ToLower(strings.TrimSpace(part.Type))
+			if partType == "" || partType == "text" {
+				continue
+			}
+			return true
+		}
+	}
+	return false
+}
+
 type demoAdapter struct{}
 
 func (a *demoAdapter) ID() string {
 	return provider.AdapterDemo
+}
+
+func (a *demoAdapter) Capabilities() ProviderCapabilities {
+	return ProviderCapabilities{
+		Stream:      false,
+		ToolCall:    false,
+		Attachments: false,
+		Reasoning:   false,
+	}
 }
 
 func (a *demoAdapter) GenerateTurn(_ context.Context, req domain.AgentProcessRequest, _ GenerateConfig, _ []ToolDefinition, _ *Runner) (TurnResult, error) {
@@ -278,6 +364,15 @@ type openAICompatibleAdapter struct{}
 
 func (a *openAICompatibleAdapter) ID() string {
 	return provider.AdapterOpenAICompatible
+}
+
+func (a *openAICompatibleAdapter) Capabilities() ProviderCapabilities {
+	return ProviderCapabilities{
+		Stream:      true,
+		ToolCall:    true,
+		Attachments: false,
+		Reasoning:   true,
+	}
 }
 
 func (a *openAICompatibleAdapter) GenerateTurn(ctx context.Context, req domain.AgentProcessRequest, cfg GenerateConfig, tools []ToolDefinition, runner *Runner) (TurnResult, error) {
@@ -299,6 +394,15 @@ type codexCompatibleAdapter struct{}
 
 func (a *codexCompatibleAdapter) ID() string {
 	return provider.AdapterCodexCompatible
+}
+
+func (a *codexCompatibleAdapter) Capabilities() ProviderCapabilities {
+	return ProviderCapabilities{
+		Stream:      true,
+		ToolCall:    true,
+		Attachments: false,
+		Reasoning:   true,
+	}
 }
 
 func (a *codexCompatibleAdapter) GenerateTurn(ctx context.Context, req domain.AgentProcessRequest, cfg GenerateConfig, tools []ToolDefinition, runner *Runner) (TurnResult, error) {

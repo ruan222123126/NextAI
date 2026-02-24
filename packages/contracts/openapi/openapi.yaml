@@ -19,6 +19,25 @@ paths:
       responses:
         '200':
           description: health
+  /runtime-config:
+    get:
+      security: []
+      responses:
+        '200':
+          description: runtime config
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  features:
+                    type: object
+                    properties:
+                      prompt_templates: { type: boolean }
+                      prompt_context_introspect: { type: boolean }
+                      codex_mode_v2: { type: boolean }
+                    required: [prompt_templates, prompt_context_introspect, codex_mode_v2]
+                required: [features]
   /chats:
     get:
       parameters:
@@ -82,6 +101,48 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/AgentProcessResponse' }
+  /agent/system-layers:
+    get:
+      parameters:
+        - in: query
+          name: prompt_mode
+          schema:
+            type: string
+            enum: [default, codex, claude]
+        - in: query
+          name: task_command
+          schema: { type: string }
+        - in: query
+          name: session_id
+          schema: { type: string }
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  version: { type: string }
+                  mode_variant: { type: string }
+                  estimated_tokens_total: { type: integer }
+                  layers:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        name: { type: string }
+                        role: { type: string }
+                        source: { type: string }
+                        content_preview: { type: string }
+                        layer_hash: { type: string }
+                        estimated_tokens: { type: integer }
+                      required: [name, role, estimated_tokens]
+                required: [version, layers, estimated_tokens_total]
+        '400':
+          description: invalid request
+        '404':
+          description: feature disabled
   /v1/messages:
     post:
       summary: Claude-compatible messages API adapter
@@ -497,6 +558,32 @@ paths:
     delete:
       responses:
         '200': { description: ok }
+  /workspace/uploads:
+    post:
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                file:
+                  type: string
+                  format: binary
+              required: [file]
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  uploaded: { type: boolean }
+                  path: { type: string }
+                  name: { type: string }
+                  size: { type: integer, format: int64 }
+                required: [uploaded, path, name, size]
   /workspace/export:
     get:
       responses:

@@ -1,109 +1,23 @@
-type ModelsSettingsLevel = "list" | "edit";
-type ChannelsSettingsLevel = "list" | "edit";
-type ProviderKVKind = "headers" | "aliases";
-type QQTargetType = "c2c" | "group" | "guild";
-type QQAPIEnvironment = "production" | "sandbox";
+import type {
+  ActiveModelsInfo,
+  ChannelsSettingsLevel,
+  ComposerModelOption,
+  DeleteResult,
+  ModelDomainContext,
+  ModelCatalogInfo,
+  ModelInfo,
+  ModelSlotConfig,
+  ModelsSettingsLevel,
+  ProviderInfo,
+  ProviderKVKind,
+  ProviderTypeInfo,
+  QQAPIEnvironment,
+  QQChannelConfig,
+  QQTargetType,
+  UpsertProviderOptions,
+} from "./types.js";
 
-interface ModelModalities {
-  text: boolean;
-  audio: boolean;
-  image: boolean;
-  video: boolean;
-  pdf: boolean;
-}
-
-interface ModelCapabilities {
-  temperature: boolean;
-  reasoning: boolean;
-  attachment: boolean;
-  tool_call: boolean;
-  input?: ModelModalities;
-  output?: ModelModalities;
-}
-
-interface ModelLimit {
-  context?: number;
-  input?: number;
-  output?: number;
-}
-
-interface ModelInfo {
-  id: string;
-  name: string;
-  status?: string;
-  alias_of?: string;
-  capabilities?: ModelCapabilities;
-  limit?: ModelLimit;
-}
-
-interface ProviderInfo {
-  id: string;
-  name: string;
-  display_name: string;
-  openai_compatible?: boolean;
-  api_key_prefix?: string;
-  models: ModelInfo[];
-  reasoning_effort?: string;
-  store?: boolean;
-  headers?: Record<string, string>;
-  timeout_ms?: number;
-  model_aliases?: Record<string, string>;
-  allow_custom_base_url?: boolean;
-  enabled?: boolean;
-  has_api_key: boolean;
-  current_api_key?: string;
-  current_base_url?: string;
-}
-
-interface ProviderTypeInfo {
-  id: string;
-  display_name: string;
-}
-
-interface ComposerModelOption {
-  value: string;
-  canonical: string;
-  label: string;
-}
-
-interface ModelSlotConfig {
-  provider_id: string;
-  model: string;
-}
-
-interface ModelCatalogInfo {
-  providers: ProviderInfo[];
-  provider_types?: ProviderTypeInfo[];
-  defaults: Record<string, string>;
-  active_llm?: ModelSlotConfig;
-}
-
-interface ActiveModelsInfo {
-  active_llm?: ModelSlotConfig;
-}
-
-interface DeleteResult {
-  deleted: boolean;
-}
-
-interface UpsertProviderOptions {
-  closeAfterSave?: boolean;
-  notifyStatus?: boolean;
-}
-
-interface QQChannelConfig {
-  enabled: boolean;
-  app_id: string;
-  client_secret: string;
-  bot_prefix: string;
-  target_type: QQTargetType;
-  target_id: string;
-  api_base: string;
-  token_url: string;
-  timeout_seconds: number;
-}
-
-export function createModelDomain(ctx: any) {
+export function createModelDomain(ctx: ModelDomainContext) {
   const {
     state,
     t,
@@ -238,7 +152,7 @@ async function maybeAutoActivateModel(
     return null;
   }
   try {
-    const out = await requestJSON("/models/active", {
+    const out = await requestJSON<ActiveModelsInfo>("/models/active", {
       method: "PUT",
       body: {
         provider_id: candidate.providerID,
@@ -295,7 +209,7 @@ async function loadModelCatalog(): Promise<{
   source: "catalog" | "legacy";
 }> {
   try {
-    const catalog = await requestJSON("/models/catalog");
+    const catalog = await requestJSON<ModelCatalogInfo>("/models/catalog");
     const providers = normalizeProviders(catalog.providers);
     const providerTypes = normalizeProviderTypes(catalog.provider_types);
     return {
@@ -306,9 +220,9 @@ async function loadModelCatalog(): Promise<{
       source: "catalog",
     };
   } catch {
-    const providersRaw = await requestJSON("/models");
+    const providersRaw = await requestJSON<ProviderInfo[]>("/models");
     const providers = normalizeProviders(providersRaw);
-    const activeResult = await requestJSON("/models/active");
+    const activeResult = await requestJSON<ActiveModelsInfo>("/models/active");
     return {
       providers,
       providerTypes: fallbackProviderTypes(providers),
@@ -539,7 +453,7 @@ async function setActiveModel(providerID: string, modelID: string): Promise<bool
   }
   syncControlState();
   try {
-    const out = await requestJSON("/models/active", {
+    const out = await requestJSON<ActiveModelsInfo>("/models/active", {
       method: "PUT",
       body: {
         provider_id: normalizedProviderID,
@@ -1287,7 +1201,7 @@ async function upsertProvider(options: UpsertProviderOptions = {}): Promise<bool
   payload.model_aliases = mergedAliases;
 
   try {
-    const out = await requestJSON(`/models/${encodeURIComponent(providerID)}/config`, {
+    const out = await requestJSON<ProviderInfo>(`/models/${encodeURIComponent(providerID)}/config`, {
       method: "PUT",
       body: payload,
     });
@@ -1323,7 +1237,7 @@ async function deleteProvider(providerID: string): Promise<void> {
   }
   syncControlState();
   try {
-    const out = await requestJSON(`/models/${encodeURIComponent(providerID)}`, {
+    const out = await requestJSON<DeleteResult>(`/models/${encodeURIComponent(providerID)}`, {
       method: "DELETE",
     });
     await refreshModels();

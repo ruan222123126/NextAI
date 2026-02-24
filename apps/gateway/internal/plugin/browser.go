@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -30,6 +29,25 @@ type browserToolRunFunc func(ctx context.Context, agentDir, task string, timeout
 type browserTaskItem struct {
 	Task    string
 	Timeout time.Duration
+}
+
+type browserInvocationResult struct {
+	OK         bool   `json:"ok"`
+	Task       string `json:"task"`
+	ExitCode   int    `json:"exit_code"`
+	Output     string `json:"output"`
+	DurationMS int64  `json:"duration_ms"`
+	RunID      string `json:"run_id,omitempty"`
+	LogPath    string `json:"log_path,omitempty"`
+	ShotsPath  string `json:"shots_path,omitempty"`
+	Text       string `json:"text"`
+}
+
+type browserBatchResult struct {
+	OK      bool                      `json:"ok"`
+	Count   int                       `json:"count"`
+	Results []browserInvocationResult `json:"results"`
+	Text    string                    `json:"text"`
 }
 
 type BrowserTool struct {
@@ -72,114 +90,96 @@ func (t *BrowserTool) Name() string {
 	return "browser"
 }
 
-func (t *BrowserTool) Invoke(input map[string]interface{}) (map[string]interface{}, error) {
-	items, err := parseBrowserItems(input)
+func (t *BrowserTool) Invoke(command ToolCommand) (ToolResult, error) {
+	items, err := parseBrowserItems(command)
 	if err != nil {
-		return nil, err
+		return ToolResult{}, err
 	}
 
-	results := make([]map[string]interface{}, 0, len(items))
+	results := make([]browserInvocationResult, 0, len(items))
 	allOK := true
 	for _, item := range items {
 		one, oneErr := t.invokeOne(item)
 		if oneErr != nil {
-			return nil, oneErr
+			return ToolResult{}, oneErr
 		}
-		if ok, _ := one["ok"].(bool); !ok {
+		if !one.OK {
 			allOK = false
 		}
 		results = append(results, one)
 	}
 
 	if len(results) == 1 {
-		return results[0], nil
+		return NewToolResult(results[0]), nil
 	}
 
 	texts := make([]string, 0, len(results))
 	for _, item := range results {
-		if text, ok := item["text"].(string); ok {
+		if text := strings.TrimSpace(item.Text); text != "" {
 			texts = append(texts, text)
 		}
 	}
-	return map[string]interface{}{
-		"ok":      allOK,
-		"count":   len(results),
-		"results": results,
-		"text":    strings.Join(texts, "\n\n"),
-	}, nil
+	return NewToolResult(browserBatchResult{
+		OK:      allOK,
+		Count:   len(results),
+		Results: results,
+		Text:    strings.Join(texts, "\n\n"),
+	}), nil
 }
 
-func (t *BrowserTool) invokeOne(item browserTaskItem) (map[string]interface{}, error) {
+func (t *BrowserTool) invokeOne(item browserTaskItem) (browserInvocationResult, error) {
 	startedAt := time.Now()
 	output, exitCode, err := t.runFn(context.Background(), t.agentDir, item.Task, item.Timeout)
 	ok := err == nil
 
-	result := map[string]interface{}{
-		"ok":          ok,
-		"task":        item.Task,
-		"exit_code":   exitCode,
-		"output":      output,
-		"duration_ms": time.Since(startedAt).Milliseconds(),
-		"text":        formatBrowserToolText(item.Task, ok, exitCode, output),
+	result := browserInvocationResult{
+		OK:         ok,
+		Task:       item.Task,
+		ExitCode:   exitCode,
+		Output:     output,
+		DurationMS: time.Since(startedAt).Milliseconds(),
+		Text:       formatBrowserToolText(item.Task, ok, exitCode, output),
 	}
 
 	meta := extractBrowserRunMeta(output)
 	if runID := meta["run_id"]; runID != "" {
-		result["run_id"] = runID
+		result.RunID = runID
 	}
 	if logPath := meta["log"]; logPath != "" {
-		result["log_path"] = logPath
+		result.LogPath = logPath
 	}
 	if shotsPath := meta["shots"]; shotsPath != "" {
-		result["shots_path"] = shotsPath
+		result.ShotsPath = shotsPath
 	}
 	return result, nil
 }
 
-func parseBrowserItems(input map[string]interface{}) ([]browserTaskItem, error) {
-	rawItems, ok := input["items"]
-	if !ok || rawItems == nil {
-		return nil, ErrBrowserToolItemsInvalid
-	}
-	entries, ok := rawItems.([]interface{})
-	if !ok || len(entries) == 0 {
+func parseBrowserItems(command ToolCommand) ([]browserTaskItem, error) {
+	if len(command.Items) == 0 {
 		return nil, ErrBrowserToolItemsInvalid
 	}
 
-	out := make([]browserTaskItem, 0, len(entries))
-	for _, item := range entries {
-		entry, ok := item.(map[string]interface{})
-		if !ok {
-			return nil, ErrBrowserToolItemsInvalid
-		}
-		task := strings.TrimSpace(stringValue(entry["task"]))
+	out := make([]browserTaskItem, 0, len(command.Items))
+	for _, item := range command.Items {
+		task := strings.TrimSpace(item.Task)
 		if task == "" {
-			task = strings.TrimSpace(stringValue(entry["query"]))
+			task = strings.TrimSpace(item.Query)
 		}
 		if task == "" {
 			return nil, ErrBrowserToolTaskMissing
 		}
 		out = append(out, browserTaskItem{
 			Task:    task,
-			Timeout: parseBrowserTimeout(entry["timeout_seconds"]),
+			Timeout: parseBrowserTimeout(item.TimeoutSeconds),
 		})
 	}
 	return out, nil
 }
 
-func parseBrowserTimeout(raw interface{}) time.Duration {
+func parseBrowserTimeout(rawSeconds int) time.Duration {
 	seconds := int64(browserToolDefaultTimeout / time.Second)
-	switch value := raw.(type) {
-	case float64:
-		seconds = int64(value)
-	case int:
-		seconds = int64(value)
-	case int64:
-		seconds = value
-	case string:
-		if parsed, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64); err == nil {
-			seconds = parsed
-		}
+	if rawSeconds > 0 {
+		seconds = int64(rawSeconds)
 	}
 	if seconds <= 0 {
 		seconds = int64(browserToolDefaultTimeout / time.Second)

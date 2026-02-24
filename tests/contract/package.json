@@ -4,9 +4,9 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "test": "node --test *.test.mjs",
+    "test": "pnpm run lint && node --test *.test.mjs",
     "build": "node -e \"console.log('no build for contract tests')\"",
-    "lint": "node openapi.lint.mjs"
+    "lint": "node openapi.lint.mjs && pnpm --dir ../../packages/sdk-ts run generate:check"
   },
   "dependencies": {
     "yaml": "^2.8.1"

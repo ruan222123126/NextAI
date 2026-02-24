@@ -75,6 +75,25 @@ type searchResult struct {
 	Source  string `json:"source"`
 }
 
+type searchInvocationResult struct {
+	OK         bool           `json:"ok"`
+	Provider   string         `json:"provider"`
+	Query      string         `json:"query"`
+	Count      int            `json:"count"`
+	Total      int            `json:"total,omitempty"`
+	Results    []searchResult `json:"results,omitempty"`
+	DurationMS int64          `json:"duration_ms"`
+	Error      string         `json:"error,omitempty"`
+	Text       string         `json:"text"`
+}
+
+type searchBatchResult struct {
+	OK      bool                     `json:"ok"`
+	Count   int                      `json:"count"`
+	Results []searchInvocationResult `json:"results"`
+	Text    string                   `json:"text"`
+}
+
 func NewSearchToolFromEnv() (*SearchTool, error) {
 	providers := map[string]searchProviderConfig{}
 	if cfg, ok := searchProviderFromEnv(searchProviderSerpAPI, searchSerpAPIKeyEnv, searchSerpAPIBaseEnv, searchSerpAPIDefaultURL); ok {
@@ -112,54 +131,54 @@ func (t *SearchTool) Name() string {
 	return "search"
 }
 
-func (t *SearchTool) Invoke(input map[string]interface{}) (map[string]interface{}, error) {
-	items, err := parseSearchItems(input, t.defaultProvider)
+func (t *SearchTool) Invoke(command ToolCommand) (ToolResult, error) {
+	items, err := parseSearchItems(command, t.defaultProvider)
 	if err != nil {
-		return nil, err
+		return ToolResult{}, err
 	}
 
-	results := make([]map[string]interface{}, 0, len(items))
+	results := make([]searchInvocationResult, 0, len(items))
 	allOK := true
 	for _, item := range items {
 		one, oneErr := t.invokeOne(item)
 		if oneErr != nil {
-			return nil, oneErr
+			return ToolResult{}, oneErr
 		}
-		if ok, _ := one["ok"].(bool); !ok {
+		if !one.OK {
 			allOK = false
 		}
 		results = append(results, one)
 	}
 
 	if len(results) == 1 {
-		return results[0], nil
+		return NewToolResult(results[0]), nil
 	}
 
 	texts := make([]string, 0, len(results))
 	for _, item := range results {
-		if text, ok := item["text"].(string); ok {
+		if text := strings.TrimSpace(item.Text); text != "" {
 			texts = append(texts, text)
 		}
 	}
-	return map[string]interface{}{
-		"ok":      allOK,
-		"count":   len(results),
-		"results": results,
-		"text":    strings.Join(texts, "\n\n"),
-	}, nil
+	return NewToolResult(searchBatchResult{
+		OK:      allOK,
+		Count:   len(results),
+		Results: results,
+		Text:    strings.Join(texts, "\n\n"),
+	}), nil
 }
 
-func (t *SearchTool) invokeOne(item searchItem) (map[string]interface{}, error) {
+func (t *SearchTool) invokeOne(item searchItem) (searchInvocationResult, error) {
 	providerName := strings.ToLower(strings.TrimSpace(item.Provider))
 	if providerName == "" {
 		providerName = t.defaultProvider
 	}
 	if !isSupportedSearchProvider(providerName) {
-		return nil, fmt.Errorf("%w: %s", ErrSearchToolProviderUnsupported, providerName)
+		return searchInvocationResult{}, fmt.Errorf("%w: %s", ErrSearchToolProviderUnsupported, providerName)
 	}
 	providerCfg, ok := t.providers[providerName]
 	if !ok {
-		return nil, fmt.Errorf("%w: %s", ErrSearchToolProviderUnconfigured, providerName)
+		return searchInvocationResult{}, fmt.Errorf("%w: %s", ErrSearchToolProviderUnconfigured, providerName)
 	}
 
 	startedAt := time.Now()
@@ -170,26 +189,26 @@ func (t *SearchTool) invokeOne(item searchItem) (map[string]interface{}, error) 
 	durationMs := time.Since(startedAt).Milliseconds()
 
 	if err != nil {
-		return map[string]interface{}{
-			"ok":          false,
-			"provider":    providerName,
-			"query":       item.Query,
-			"count":       item.Count,
-			"duration_ms": durationMs,
-			"error":       err.Error(),
-			"text":        formatSearchFailureText(providerName, item.Query, err),
+		return searchInvocationResult{
+			OK:         false,
+			Provider:   providerName,
+			Query:      item.Query,
+			Count:      item.Count,
+			DurationMS: durationMs,
+			Error:      err.Error(),
+			Text:       formatSearchFailureText(providerName, item.Query, err),
 		}, nil
 	}
 
-	return map[string]interface{}{
-		"ok":          true,
-		"provider":    providerName,
-		"query":       item.Query,
-		"count":       item.Count,
-		"total":       len(searchResults),
-		"results":     searchResults,
-		"duration_ms": durationMs,
-		"text":        formatSearchSuccessText(providerName, item.Query, searchResults),
+	return searchInvocationResult{
+		OK:         true,
+		Provider:   providerName,
+		Query:      item.Query,
+		Count:      item.Count,
+		Total:      len(searchResults),
+		Results:    searchResults,
+		DurationMS: durationMs,
+		Text:       formatSearchSuccessText(providerName, item.Query, searchResults),
 	}, nil
 }
 
@@ -397,31 +416,22 @@ func (t *SearchTool) sendRequest(ctx context.Context, method, endpoint string, h
 	return respBody, resp.StatusCode, nil
 }
 
-func parseSearchItems(input map[string]interface{}, defaultProvider string) ([]searchItem, error) {
-	rawItems, ok := input["items"]
-	if !ok || rawItems == nil {
-		return nil, ErrSearchToolItemsInvalid
-	}
-	entries, ok := rawItems.([]interface{})
-	if !ok || len(entries) == 0 {
+func parseSearchItems(command ToolCommand, defaultProvider string) ([]searchItem, error) {
+	if len(command.Items) == 0 {
 		return nil, ErrSearchToolItemsInvalid
 	}
 
-	out := make([]searchItem, 0, len(entries))
-	for _, raw := range entries {
-		entry, ok := raw.(map[string]interface{})
-		if !ok {
-			return nil, ErrSearchToolItemsInvalid
-		}
-		query := strings.TrimSpace(stringValue(entry["query"]))
+	out := make([]searchItem, 0, len(command.Items))
+	for _, entry := range command.Items {
+		query := strings.TrimSpace(entry.Query)
 		if query == "" {
-			query = strings.TrimSpace(stringValue(entry["q"]))
+			query = strings.TrimSpace(entry.Q)
 		}
 		if query == "" {
 			return nil, ErrSearchToolQueryMissing
 		}
 
-		provider := strings.ToLower(strings.TrimSpace(stringValue(entry["provider"])))
+		provider := strings.ToLower(strings.TrimSpace(entry.Provider))
 		if provider == "" {
 			provider = defaultProvider
 		}
@@ -429,26 +439,17 @@ func parseSearchItems(input map[string]interface{}, defaultProvider string) ([]s
 		out = append(out, searchItem{
 			Query:    query,
 			Provider: provider,
-			Count:    parseSearchCount(entry["count"]),
-			Timeout:  parseSearchTimeout(entry["timeout_seconds"]),
+			Count:    parseSearchCount(entry.Count),
+			Timeout:  parseSearchTimeout(entry.TimeoutSeconds),
 		})
 	}
 	return out, nil
 }
 
-func parseSearchTimeout(raw interface{}) time.Duration {
+func parseSearchTimeout(rawSeconds int) time.Duration {
 	seconds := int64(searchToolDefaultTimeout / time.Second)
-	switch value := raw.(type) {
-	case float64:
-		seconds = int64(value)
-	case int:
-		seconds = int64(value)
-	case int64:
-		seconds = value
-	case string:
-		if parsed, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64); err == nil {
-			seconds = parsed
-		}
+	if rawSeconds > 0 {
+		seconds = int64(rawSeconds)
 	}
 	if seconds <= 0 {
 		seconds = int64(searchToolDefaultTimeout / time.Second)
@@ -460,19 +461,10 @@ func parseSearchTimeout(raw interface{}) time.Duration {
 	return time.Duration(seconds) * time.Second
 }
 
-func parseSearchCount(raw interface{}) int {
+func parseSearchCount(rawCount int) int {
 	count := searchToolDefaultCount
-	switch value := raw.(type) {
-	case float64:
-		count = int(value)
-	case int:
-		count = value
-	case int64:
-		count = int(value)
-	case string:
-		if parsed, err := strconv.Atoi(strings.TrimSpace(value)); err == nil {
-			count = parsed
-		}
+	if rawCount > 0 {
+		count = rawCount
 	}
 	if count <= 0 {
 		count = searchToolDefaultCount

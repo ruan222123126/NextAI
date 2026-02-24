@@ -7,10 +7,11 @@
     "lint": "pnpm -r lint",
     "test": "pnpm -r test",
     "build": "pnpm -r build",
-    "contracts:check": "pnpm --dir tests/contract test",
+    "ci:maintainability": "node packages/tooling/scripts/maintainability-budget.mjs --warn-threshold 1200 --block-threshold 1800 --top 15",
+    "contracts:check": "pnpm run test:contract",
     "test:go": "cd apps/gateway && go test ./...",
     "test:ts": "pnpm -C apps/cli lint && pnpm -C apps/cli test && pnpm -C apps/web lint && pnpm -C apps/web test",
-    "test:contract": "pnpm --dir tests/contract lint && pnpm --dir tests/contract test",
+    "test:contract": "pnpm --dir tests/contract test",
     "test:smoke": "pnpm --dir tests/smoke test",
     "test:all": "pnpm run test:go && pnpm run test:ts && pnpm run test:contract && pnpm run test:smoke"
   },

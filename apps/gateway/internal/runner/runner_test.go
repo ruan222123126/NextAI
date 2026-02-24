@@ -975,3 +975,135 @@ func assertRunnerCode(t *testing.T, err error, want string) {
 		t.Fatalf("unexpected error code: got=%s want=%s", rerr.Code, want)
 	}
 }
+
+func TestGenerateTurnFiltersToolCallsAndReasoningByCapability(t *testing.T) {
+	t.Parallel()
+
+	adapter := &capabilityProbeAdapter{
+		id: "cap-probe-no-tool",
+		capabilities: ProviderCapabilities{
+			Stream:      false,
+			ToolCall:    false,
+			Attachments: false,
+			Reasoning:   false,
+		},
+		reply: "ok",
+	}
+
+	r := New()
+	r.registerAdapter(adapter)
+
+	_, err := r.GenerateTurn(context.Background(), domain.AgentProcessRequest{
+		Input: []domain.AgentInputMessage{{
+			Role:    "user",
+			Type:    "message",
+			Content: []domain.RuntimeContent{{Type: "text", Text: "hello"}},
+		}},
+	}, GenerateConfig{
+		ProviderID:      "custom-no-tool",
+		Model:           "m1",
+		AdapterID:       adapter.id,
+		ReasoningEffort: "high",
+	}, []ToolDefinition{{Name: "view"}})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(adapter.lastTools) != 0 {
+		t.Fatalf("expected tool definitions to be filtered, got=%d", len(adapter.lastTools))
+	}
+	if adapter.lastCfg.ReasoningEffort != "" {
+		t.Fatalf("expected reasoning effort stripped by capability, got=%q", adapter.lastCfg.ReasoningEffort)
+	}
+}
+
+func TestGenerateTurnStreamFallsBackWhenStreamCapabilityDisabled(t *testing.T) {
+	t.Parallel()
+
+	adapter := &capabilityProbeAdapter{
+		id: "cap-probe-no-stream",
+		capabilities: ProviderCapabilities{
+			Stream:      false,
+			ToolCall:    true,
+			Attachments: false,
+			Reasoning:   true,
+		},
+		reply: "stream fallback",
+	}
+
+	r := New()
+	r.registerAdapter(adapter)
+
+	streamed := make([]string, 0, 1)
+	turn, err := r.GenerateTurnStream(context.Background(), domain.AgentProcessRequest{
+		Input: []domain.AgentInputMessage{{
+			Role:    "user",
+			Type:    "message",
+			Content: []domain.RuntimeContent{{Type: "text", Text: "hello"}},
+		}},
+	}, GenerateConfig{
+		ProviderID: "custom-no-stream",
+		Model:      "m1",
+		AdapterID:  adapter.id,
+	}, nil, func(delta string) {
+		streamed = append(streamed, delta)
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if turn.Text != "stream fallback" {
+		t.Fatalf("unexpected turn text: %q", turn.Text)
+	}
+	if got := strings.Join(streamed, ""); got != "stream fallback" {
+		t.Fatalf("unexpected fallback streamed delta: %q", got)
+	}
+}
+
+func TestGenerateTurnRejectsAttachmentsWhenCapabilityDisabled(t *testing.T) {
+	t.Parallel()
+
+	r := New()
+	_, err := r.GenerateTurn(context.Background(), domain.AgentProcessRequest{
+		Input: []domain.AgentInputMessage{{
+			Role:    "user",
+			Type:    "message",
+			Content: []domain.RuntimeContent{{Type: "image", Text: "inline-image"}},
+		}},
+	}, GenerateConfig{
+		ProviderID: ProviderDemo,
+		Model:      "demo-chat",
+	}, nil)
+	assertRunnerCode(t, err, ErrorCodeProviderNotSupported)
+}
+
+type capabilityProbeAdapter struct {
+	id           string
+	capabilities ProviderCapabilities
+	reply        string
+
+	lastCfg   GenerateConfig
+	lastTools []ToolDefinition
+}
+
+func (a *capabilityProbeAdapter) ID() string {
+	return a.id
+}
+
+func (a *capabilityProbeAdapter) Capabilities() ProviderCapabilities {
+	return a.capabilities
+}
+
+func (a *capabilityProbeAdapter) GenerateTurn(
+	_ context.Context,
+	_ domain.AgentProcessRequest,
+	cfg GenerateConfig,
+	tools []ToolDefinition,
+	_ *Runner,
+) (TurnResult, error) {
+	a.lastCfg = cfg
+	if len(tools) == 0 {
+		a.lastTools = nil
+	} else {
+		a.lastTools = append([]ToolDefinition{}, tools...)
+	}
+	return TurnResult{Text: a.reply}, nil
+}

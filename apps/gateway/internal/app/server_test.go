@@ -119,11 +119,19 @@ func (p *stubToolPlugin) Name() string {
 	return p.name
 }
 
-func (p *stubToolPlugin) Invoke(input map[string]interface{}) (map[string]interface{}, error) {
-	if p.invoke == nil {
-		return map[string]interface{}{"ok": true}, nil
+func (p *stubToolPlugin) Invoke(command plugin.ToolCommand) (plugin.ToolResult, error) {
+	input, err := command.ToMap()
+	if err != nil {
+		return plugin.ToolResult{}, err
 	}
-	return p.invoke(input)
+	if p.invoke == nil {
+		return plugin.NewToolResult(map[string]interface{}{"ok": true}), nil
+	}
+	out, err := p.invoke(input)
+	if err != nil {
+		return plugin.ToolResult{}, err
+	}
+	return plugin.NewToolResult(out), nil
 }
 
 type stubCodexInstructionResolver struct {

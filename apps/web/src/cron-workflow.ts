@@ -1,37 +1,19 @@
 import { t } from "./i18n.js";
+import type {
+  CronWorkflowEdge,
+  CronWorkflowNode,
+  CronWorkflowNodeType,
+  CronWorkflowSpec,
+  CronWorkflowViewport,
+} from "./main/types.js";
 
-export type CronWorkflowNodeType = "start" | "text_event" | "delay" | "if_event";
-
-export interface CronWorkflowNode {
-  id: string;
-  type: CronWorkflowNodeType;
-  title?: string;
-  x: number;
-  y: number;
-  text?: string;
-  delay_seconds?: number;
-  if_condition?: string;
-  continue_on_error?: boolean;
-}
-
-export interface CronWorkflowEdge {
-  id: string;
-  source: string;
-  target: string;
-}
-
-export interface CronWorkflowViewport {
-  pan_x?: number;
-  pan_y?: number;
-  zoom?: number;
-}
-
-export interface CronWorkflowSpec {
-  version: "v1";
-  viewport?: CronWorkflowViewport;
-  nodes: CronWorkflowNode[];
-  edges: CronWorkflowEdge[];
-}
+export type {
+  CronWorkflowEdge,
+  CronWorkflowNode,
+  CronWorkflowNodeType,
+  CronWorkflowSpec,
+  CronWorkflowViewport,
+};
 
 interface CronWorkflowCanvasOptions {
   viewport: HTMLElement;

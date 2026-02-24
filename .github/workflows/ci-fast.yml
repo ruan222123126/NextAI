@@ -11,6 +11,8 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-go@v5
         with:
           go-version: '1.22'
@@ -43,6 +45,13 @@ jobs:
           done
           echo "pnpm install failed after retries" >&2
           exit 1
+      - name: Check sdk-ts generated files
+        run: pnpm --dir packages/sdk-ts run generate:check
+      - name: Maintainability budget gate
+        env:
+          MAINTAINABILITY_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          pnpm run ci:maintainability -- --base-ref "${MAINTAINABILITY_BASE_SHA}"
       - name: Gateway coverage gate
         run: make gateway-coverage
       - name: Smoke e2e tests

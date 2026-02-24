@@ -49,23 +49,28 @@ func TestSearchToolInvokeSerpAPI(t *testing.T) {
 		t.Fatalf("new search tool failed: %v", err)
 	}
 
-	out, invokeErr := tool.Invoke(map[string]interface{}{
-		"items": []interface{}{
-			map[string]interface{}{"query": "nextai", "count": 3},
+	out, invokeErr := tool.Invoke(ToolCommand{
+		Items: []ToolCommandItem{
+			{Query: "nextai", Count: 3},
 		},
 	})
 	if invokeErr != nil {
 		t.Fatalf("invoke failed: %v", invokeErr)
 	}
-	if ok, _ := out["ok"].(bool); !ok {
-		t.Fatalf("expected ok=true, got=%#v", out["ok"])
+	result, err := out.ToMap()
+	if err != nil {
+		t.Fatalf("convert result failed: %v", err)
 	}
-	results, _ := out["results"].([]searchResult)
+	if ok, _ := result["ok"].(bool); !ok {
+		t.Fatalf("expected ok=true, got=%#v", result["ok"])
+	}
+	results, _ := result["results"].([]interface{})
 	if len(results) != 1 {
 		t.Fatalf("expected 1 result, got=%d", len(results))
 	}
-	if results[0].URL != "https://example.com" {
-		t.Fatalf("unexpected url: %q", results[0].URL)
+	first, _ := results[0].(map[string]interface{})
+	if got, _ := first["url"].(string); got != "https://example.com" {
+		t.Fatalf("unexpected url: %q", got)
 	}
 }
 
@@ -102,22 +107,27 @@ func TestSearchToolInvokeTavilyWithProviderOverride(t *testing.T) {
 		t.Fatalf("new search tool failed: %v", err)
 	}
 
-	out, invokeErr := tool.Invoke(map[string]interface{}{
-		"items": []interface{}{
-			map[string]interface{}{
-				"query":    "multi provider",
-				"provider": "tavily",
+	out, invokeErr := tool.Invoke(ToolCommand{
+		Items: []ToolCommandItem{
+			{
+				Query:    "multi provider",
+				Provider: "tavily",
 			},
 		},
 	})
 	if invokeErr != nil {
 		t.Fatalf("invoke failed: %v", invokeErr)
 	}
-	if got, _ := out["provider"].(string); got != "tavily" {
+	result, err := out.ToMap()
+	if err != nil {
+		t.Fatalf("convert result failed: %v", err)
+	}
+	if got, _ := result["provider"].(string); got != "tavily" {
 		t.Fatalf("expected provider=tavily, got=%q", got)
 	}
-	results, _ := out["results"].([]searchResult)
-	if len(results) != 1 || results[0].Title != "Tavily" {
+	results, _ := result["results"].([]interface{})
+	first, _ := results[0].(map[string]interface{})
+	if len(results) != 1 || first["title"] != "Tavily" {
 		t.Fatalf("unexpected results: %#v", results)
 	}
 }
@@ -130,18 +140,18 @@ func TestSearchToolRejectsInvalidInput(t *testing.T) {
 		t.Fatalf("new search tool failed: %v", err)
 	}
 
-	_, invokeErr := tool.Invoke(map[string]interface{}{
-		"items": []interface{}{
-			map[string]interface{}{},
+	_, invokeErr := tool.Invoke(ToolCommand{
+		Items: []ToolCommandItem{
+			{},
 		},
 	})
 	if !errors.Is(invokeErr, ErrSearchToolQueryMissing) {
 		t.Fatalf("expected ErrSearchToolQueryMissing, got=%v", invokeErr)
 	}
 
-	_, invokeErr = tool.Invoke(map[string]interface{}{
-		"items": []interface{}{
-			map[string]interface{}{"query": "nextai", "provider": "duckduckgo"},
+	_, invokeErr = tool.Invoke(ToolCommand{
+		Items: []ToolCommandItem{
+			{Query: "nextai", Provider: "duckduckgo"},
 		},
 	})
 	if !errors.Is(invokeErr, ErrSearchToolProviderUnsupported) {

@@ -1,6 +1,7 @@
 package systemprompt
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"strings"
@@ -8,11 +9,23 @@ import (
 	"nextai/apps/gateway/internal/domain"
 )
 
+const SourceFile = "file"
+
 type Layer struct {
 	Name    string
 	Role    string
 	Source  string
 	Content string
+}
+
+type BuildRequest struct {
+	BaseCandidates      []string
+	ToolGuideCandidates []string
+}
+
+type Source interface {
+	Name() string
+	Build(ctx context.Context, req BuildRequest) ([]Layer, error)
 }
 
 type Dependencies struct {
@@ -23,7 +36,8 @@ type Dependencies struct {
 }
 
 type Service struct {
-	deps Dependencies
+	deps    Dependencies
+	sources map[string]Source
 }
 
 func NewService(deps Dependencies) *Service {
@@ -33,39 +47,51 @@ func NewService(deps Dependencies) *Service {
 	if deps.LookupEnv == nil {
 		deps.LookupEnv = os.Getenv
 	}
-	return &Service{deps: deps}
+	svc := &Service{
+		deps:    deps,
+		sources: map[string]Source{},
+	}
+	svc.RegisterSource(NewFileSource(deps.LoadRequiredLayer))
+	return svc
 }
 
 func (s *Service) BuildLayers(baseCandidates, toolGuideCandidates []string) ([]Layer, error) {
-	if s == nil || s.deps.LoadRequiredLayer == nil {
-		return nil, fmt.Errorf("system prompt layer loader is unavailable")
-	}
+	return s.BuildLayersForSource(context.Background(), SourceFile, BuildRequest{
+		BaseCandidates:      baseCandidates,
+		ToolGuideCandidates: toolGuideCandidates,
+	})
+}
 
-	layers := make([]Layer, 0, 5)
-	basePath, baseContent, err := s.deps.LoadRequiredLayer(baseCandidates)
+func (s *Service) RegisterSource(source Source) {
+	if s == nil || source == nil {
+		return
+	}
+	name := strings.ToLower(strings.TrimSpace(source.Name()))
+	if name == "" {
+		return
+	}
+	if s.sources == nil {
+		s.sources = map[string]Source{}
+	}
+	s.sources[name] = source
+}
+
+func (s *Service) BuildLayersForSource(ctx context.Context, sourceName string, req BuildRequest) ([]Layer, error) {
+	if s == nil {
+		return nil, fmt.Errorf("system prompt service is unavailable")
+	}
+	resolvedName := strings.ToLower(strings.TrimSpace(sourceName))
+	if resolvedName == "" {
+		resolvedName = SourceFile
+	}
+	source, ok := s.sources[resolvedName]
+	if !ok {
+		return nil, fmt.Errorf("system prompt source %q is unavailable", resolvedName)
+	}
+	layers, err := source.Build(ctx, req)
 	if err != nil {
 		return nil, err
 	}
-	layers = append(layers, Layer{
-		Name:    "base_system",
-		Role:    "system",
-		Source:  basePath,
-		Content: FormatLayerSourceContent(basePath, baseContent),
-	})
-
-	toolGuidePath, toolGuideContent, err := s.deps.LoadRequiredLayer(toolGuideCandidates)
-	if err != nil {
-		return nil, err
-	}
-	layers = append(layers, Layer{
-		Name:    "tool_guide_system",
-		Role:    "system",
-		Source:  toolGuidePath,
-		Content: FormatLayerSourceContent(toolGuidePath, toolGuideContent),
-	})
-
-	layers = AppendLayerIfPresent(layers, Layer{Name: "workspace_policy_system", Role: "system"})
-	layers = AppendLayerIfPresent(layers, Layer{Name: "session_policy_system", Role: "system"})
 
 	if s.deps.EnableEnvironmentContext {
 		layers = append(layers, BuildEnvironmentContextLayer(s.deps.WorkingDirectory, s.deps.LookupEnv))

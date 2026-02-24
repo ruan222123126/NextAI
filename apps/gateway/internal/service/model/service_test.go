@@ -7,13 +7,14 @@ import (
 
 	"nextai/apps/gateway/internal/domain"
 	"nextai/apps/gateway/internal/repo"
+	"nextai/apps/gateway/internal/service/adapters"
 )
 
 func TestConfigureProviderRejectsInvalidTimeout(t *testing.T) {
 	t.Parallel()
 
 	store := newTestStore(t)
-	svc := NewService(Dependencies{Store: store})
+	svc := NewService(Dependencies{Store: adapters.NewRepoStateStore(store)})
 
 	timeout := -1
 	_, err := svc.ConfigureProvider(ConfigureProviderInput{
@@ -33,7 +34,7 @@ func TestSetActiveModelsMapsProviderErrors(t *testing.T) {
 	t.Parallel()
 
 	store := newTestStore(t)
-	svc := NewService(Dependencies{Store: store})
+	svc := NewService(Dependencies{Store: adapters.NewRepoStateStore(store)})
 
 	_, err := svc.SetActiveModels(domain.ModelSlotConfig{
 		ProviderID: "ghost",
@@ -92,7 +93,7 @@ func TestDeleteProviderClearsActiveModel(t *testing.T) {
 		t.Fatalf("seed active model failed: %v", err)
 	}
 
-	svc := NewService(Dependencies{Store: store})
+	svc := NewService(Dependencies{Store: adapters.NewRepoStateStore(store)})
 	deleted, err := svc.DeleteProvider("openai")
 	if err != nil {
 		t.Fatalf("delete provider failed: %v", err)
@@ -114,7 +115,7 @@ func TestConfigureProviderSupportsStoreFlag(t *testing.T) {
 	t.Parallel()
 
 	store := newTestStore(t)
-	svc := NewService(Dependencies{Store: store})
+	svc := NewService(Dependencies{Store: adapters.NewRepoStateStore(store)})
 
 	enableStore := true
 	provider, err := svc.ConfigureProvider(ConfigureProviderInput{
@@ -153,7 +154,7 @@ func TestConfigureProviderSupportsReasoningEffort(t *testing.T) {
 	t.Parallel()
 
 	store := newTestStore(t)
-	svc := NewService(Dependencies{Store: store})
+	svc := NewService(Dependencies{Store: adapters.NewRepoStateStore(store)})
 
 	effort := "HIGH"
 	provider, err := svc.ConfigureProvider(ConfigureProviderInput{
@@ -180,7 +181,7 @@ func TestConfigureProviderRejectsInvalidReasoningEffort(t *testing.T) {
 	t.Parallel()
 
 	store := newTestStore(t)
-	svc := NewService(Dependencies{Store: store})
+	svc := NewService(Dependencies{Store: adapters.NewRepoStateStore(store)})
 
 	effort := "extreme"
 	_, err := svc.ConfigureProvider(ConfigureProviderInput{

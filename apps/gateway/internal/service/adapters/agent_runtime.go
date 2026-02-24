@@ -111,3 +111,21 @@ func defaultErrorMessage(err error, fallback string) string {
 	}
 	return msg
 }
+
+type AgentProcessor struct {
+	ProcessFunc func(context.Context, domain.AgentProcessRequest) (domain.AgentProcessResponse, *ports.AgentProcessError)
+}
+
+func (a AgentProcessor) Process(
+	ctx context.Context,
+	req domain.AgentProcessRequest,
+) (domain.AgentProcessResponse, *ports.AgentProcessError) {
+	if a.ProcessFunc == nil {
+		return domain.AgentProcessResponse{}, &ports.AgentProcessError{
+			Status:  500,
+			Code:    "agent_process_unavailable",
+			Message: "agent process port is unavailable",
+		}
+	}
+	return a.ProcessFunc(ctx, req)
+}

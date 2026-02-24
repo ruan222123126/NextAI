@@ -267,8 +267,8 @@ func (s *Service) SetSessionModel(input SetSessionModelInput) (SetSessionModelOu
 
 	out := SetSessionModelOutput{}
 	now := nowISO(s.deps.Now())
-	err := s.deps.Store.Write(func(st *repo.State) error {
-		chatID, chat, found := findChatBySession(st, sessionID, userID, channel)
+	err := s.deps.Store.WriteSession(func(st *ports.SessionAggregate) error {
+		chatID, chat, found := findChatBySession(st.Chats, sessionID, userID, channel)
 		if !found {
 			return &ServiceError{
 				Code:    "session_not_found",
@@ -281,7 +281,7 @@ func (s *Service) SetSessionModel(input SetSessionModelInput) (SetSessionModelOu
 			}
 		}
 
-		resolved, validationErr := resolveAndValidateModel(st, providerID, modelID)
+		resolved, validationErr := resolveAndValidateModel(st.Providers, providerID, modelID)
 		if validationErr != nil {
 			return validationErr
 		}
@@ -335,17 +335,17 @@ func (s *Service) ResolveSessionModel(sessionID, userID, channel string) (domain
 		Model:      demoModelID,
 	}
 
-	s.deps.Store.Read(func(st *repo.State) {
-		_, chat, found := findChatBySession(st, sessionID, userID, channel)
+	s.deps.Store.ReadSession(func(st ports.SessionAggregate) {
+		_, chat, found := findChatBySession(st.Chats, sessionID, userID, channel)
 		if found {
 			if override, ok := parseChatActiveLLMOverride(chat.Meta); ok {
-				if resolved, err := resolveAndValidateModel(st, override.ProviderID, override.Model); err == nil {
+				if resolved, err := resolveAndValidateModel(st.Providers, override.ProviderID, override.Model); err == nil {
 					slot = resolved
 					return
 				}
 			}
 		}
-		if resolved, err := resolveAndValidateModel(st, st.ActiveLLM.ProviderID, st.ActiveLLM.Model); err == nil {
+		if resolved, err := resolveAndValidateModel(st.Providers, st.ActiveLLM.ProviderID, st.ActiveLLM.Model); err == nil {
 			slot = resolved
 		}
 	})
@@ -359,8 +359,8 @@ func (s *Service) readChatAndAppliedModel(sessionID, userID, channel string) (do
 		found        bool
 	)
 
-	s.deps.Store.Read(func(st *repo.State) {
-		_, matchedChat, ok := findChatBySession(st, sessionID, userID, channel)
+	s.deps.Store.ReadSession(func(st ports.SessionAggregate) {
+		_, matchedChat, ok := findChatBySession(st.Chats, sessionID, userID, channel)
 		if !ok {
 			return
 		}
@@ -368,12 +368,12 @@ func (s *Service) readChatAndAppliedModel(sessionID, userID, channel string) (do
 		chat = matchedChat
 
 		if override, ok := parseChatActiveLLMOverride(chat.Meta); ok {
-			if resolved, err := resolveAndValidateModel(st, override.ProviderID, override.Model); err == nil {
+			if resolved, err := resolveAndValidateModel(st.Providers, override.ProviderID, override.Model); err == nil {
 				appliedModel = resolved
 				return
 			}
 		}
-		if resolved, err := resolveAndValidateModel(st, st.ActiveLLM.ProviderID, st.ActiveLLM.Model); err == nil {
+		if resolved, err := resolveAndValidateModel(st.Providers, st.ActiveLLM.ProviderID, st.ActiveLLM.Model); err == nil {
 			appliedModel = resolved
 			return
 		}
@@ -416,11 +416,11 @@ func normalizeChannel(raw string) string {
 	return normalized
 }
 
-func findChatBySession(st *repo.State, sessionID, userID, channel string) (string, domain.ChatSpec, bool) {
-	if st == nil {
+func findChatBySession(chats map[string]domain.ChatSpec, sessionID, userID, channel string) (string, domain.ChatSpec, bool) {
+	if chats == nil {
 		return "", domain.ChatSpec{}, false
 	}
-	for id, chat := range st.Chats {
+	for id, chat := range chats {
 		if chat.SessionID != sessionID || chat.UserID != userID || chat.Channel != channel {
 			continue
 		}
@@ -463,7 +463,7 @@ func parseChatActiveLLMOverride(meta map[string]interface{}) (domain.ChatActiveL
 	}
 }
 
-func resolveAndValidateModel(st *repo.State, providerID, modelID string) (domain.ModelSlotConfig, error) {
+func resolveAndValidateModel(providers map[string]repo.ProviderSetting, providerID, modelID string) (domain.ModelSlotConfig, error) {
 	providerID = normalizeProviderID(providerID)
 	modelID = strings.TrimSpace(modelID)
 	if providerID == "" || modelID == "" {
@@ -472,7 +472,7 @@ func resolveAndValidateModel(st *repo.State, providerID, modelID string) (domain
 			Message: "provider_id and model are required",
 		}
 	}
-	setting, ok := findProviderSettingByID(st, providerID)
+	setting, ok := findProviderSettingByID(providers, providerID)
 	if !ok {
 		return domain.ModelSlotConfig{}, &ServiceError{
 			Code:    "session_model_invalid",
@@ -505,14 +505,14 @@ func resolveAndValidateModel(st *repo.State, providerID, modelID string) (domain
 	}, nil
 }
 
-func findProviderSettingByID(st *repo.State, providerID string) (repo.ProviderSetting, bool) {
-	if st == nil {
+func findProviderSettingByID(providers map[string]repo.ProviderSetting, providerID string) (repo.ProviderSetting, bool) {
+	if providers == nil {
 		return repo.ProviderSetting{}, false
 	}
-	if setting, ok := st.Providers[providerID]; ok {
+	if setting, ok := providers[providerID]; ok {
 		return setting, true
 	}
-	for key, setting := range st.Providers {
+	for key, setting := range providers {
 		if normalizeProviderID(key) == providerID {
 			return setting, true
 		}

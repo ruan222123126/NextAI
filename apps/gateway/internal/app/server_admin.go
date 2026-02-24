@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
@@ -22,6 +23,7 @@ import (
 	"nextai/apps/gateway/internal/provider"
 	"nextai/apps/gateway/internal/repo"
 	"nextai/apps/gateway/internal/runner"
+	adminservice "nextai/apps/gateway/internal/service/admin"
 	codexpromptservice "nextai/apps/gateway/internal/service/codexprompt"
 	modelservice "nextai/apps/gateway/internal/service/model"
 	systempromptservice "nextai/apps/gateway/internal/service/systemprompt"
@@ -137,13 +139,11 @@ func (s *Server) setActiveModels(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) listEnvs(w http.ResponseWriter, _ *http.Request) {
-	out := make([]domain.EnvVar, 0)
-	s.store.Read(func(st *repo.State) {
-		for k, v := range st.Envs {
-			out = append(out, domain.EnvVar{Key: k, Value: v})
-		}
-	})
-	sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
+	out, err := s.getAdminService().ListEnvs()
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "store_error", err.Error(), nil)
+		return
+	}
 	writeJSON(w, http.StatusOK, out)
 }
 
@@ -153,35 +153,21 @@ func (s *Server) putEnvs(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "invalid_json", "invalid request body", nil)
 		return
 	}
-	for k := range body {
-		if strings.TrimSpace(k) == "" {
-			writeErr(w, http.StatusBadRequest, "invalid_env_key", "env key cannot be empty", nil)
+	out, err := s.getAdminService().ReplaceEnvs(body)
+	if err != nil {
+		if validation := (*adminservice.ValidationError)(nil); errors.As(err, &validation) {
+			writeErr(w, http.StatusBadRequest, validation.Code, validation.Message, nil)
 			return
 		}
-	}
-	if err := s.store.Write(func(st *repo.State) error {
-		st.Envs = map[string]string{}
-		for k, v := range body {
-			st.Envs[strings.TrimSpace(k)] = v
-		}
-		return nil
-	}); err != nil {
 		writeErr(w, http.StatusInternalServerError, "store_error", err.Error(), nil)
 		return
 	}
-	s.listEnvs(w, r)
+	writeJSON(w, http.StatusOK, out)
 }
 
 func (s *Server) deleteEnv(w http.ResponseWriter, r *http.Request) {
-	key := chi.URLParam(r, "key")
-	exists := false
-	if err := s.store.Write(func(st *repo.State) error {
-		if _, ok := st.Envs[key]; ok {
-			exists = true
-			delete(st.Envs, key)
-		}
-		return nil
-	}); err != nil {
+	out, exists, err := s.getAdminService().DeleteEnv(chi.URLParam(r, "key"))
+	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "store_error", err.Error(), nil)
 		return
 	}
@@ -189,30 +175,24 @@ func (s *Server) deleteEnv(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, "not_found", "env key not found", nil)
 		return
 	}
-	s.listEnvs(w, r)
+	writeJSON(w, http.StatusOK, out)
 }
 
 func (s *Server) listSkills(w http.ResponseWriter, _ *http.Request) {
-	out := make([]domain.SkillSpec, 0)
-	s.store.Read(func(st *repo.State) {
-		for _, spec := range st.Skills {
-			out = append(out, spec)
-		}
-	})
-	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	out, err := s.getAdminService().ListSkills(false)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "store_error", err.Error(), nil)
+		return
+	}
 	writeJSON(w, http.StatusOK, out)
 }
 
 func (s *Server) listAvailableSkills(w http.ResponseWriter, _ *http.Request) {
-	out := make([]domain.SkillSpec, 0)
-	s.store.Read(func(st *repo.State) {
-		for _, spec := range st.Skills {
-			if spec.Enabled {
-				out = append(out, spec)
-			}
-		}
-	})
-	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	out, err := s.getAdminService().ListSkills(true)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "store_error", err.Error(), nil)
+		return
+	}
 	writeJSON(w, http.StatusOK, out)
 }
 
@@ -230,17 +210,7 @@ func (s *Server) batchSetSkillEnabled(w http.ResponseWriter, r *http.Request, en
 		writeErr(w, http.StatusBadRequest, "invalid_json", "invalid request body", nil)
 		return
 	}
-	if err := s.store.Write(func(st *repo.State) error {
-		for _, name := range names {
-			v, ok := st.Skills[name]
-			if !ok {
-				continue
-			}
-			v.Enabled = enabled
-			st.Skills[name] = v
-		}
-		return nil
-	}); err != nil {
+	if err := s.getAdminService().BatchSetSkillEnabled(names, enabled); err != nil {
 		writeErr(w, http.StatusInternalServerError, "store_error", err.Error(), nil)
 		return
 	}
@@ -258,25 +228,17 @@ func (s *Server) createSkill(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "invalid_json", "invalid request body", nil)
 		return
 	}
-	if strings.TrimSpace(body.Name) == "" || strings.TrimSpace(body.Content) == "" {
-		writeErr(w, http.StatusBadRequest, "invalid_skill", "name and content are required", nil)
-		return
-	}
-	created := false
-	if err := s.store.Write(func(st *repo.State) error {
-		name := strings.TrimSpace(body.Name)
-		st.Skills[name] = domain.SkillSpec{
-			Name:       name,
-			Content:    body.Content,
-			Source:     "customized",
-			Path:       filepath.Join(s.cfg.DataDir, "skills", name),
-			References: safeMap(body.References),
-			Scripts:    safeMap(body.Scripts),
-			Enabled:    true,
+	created, err := s.getAdminService().CreateSkill(adminservice.CreateSkillInput{
+		Name:       body.Name,
+		Content:    body.Content,
+		References: body.References,
+		Scripts:    body.Scripts,
+	})
+	if err != nil {
+		if validation := (*adminservice.ValidationError)(nil); errors.As(err, &validation) {
+			writeErr(w, http.StatusBadRequest, validation.Code, validation.Message, nil)
+			return
 		}
-		created = true
-		return nil
-	}); err != nil {
 		writeErr(w, http.StatusInternalServerError, "store_error", err.Error(), nil)
 		return
 	}
@@ -292,17 +254,8 @@ func (s *Server) enableSkill(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) setSkillEnabled(w http.ResponseWriter, name string, enabled bool) {
-	exists := false
-	if err := s.store.Write(func(st *repo.State) error {
-		v, ok := st.Skills[name]
-		if !ok {
-			return nil
-		}
-		exists = true
-		v.Enabled = enabled
-		st.Skills[name] = v
-		return nil
-	}); err != nil {
+	exists, err := s.getAdminService().SetSkillEnabled(name, enabled)
+	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "store_error", err.Error(), nil)
 		return
 	}
@@ -318,15 +271,8 @@ func (s *Server) setSkillEnabled(w http.ResponseWriter, name string, enabled boo
 }
 
 func (s *Server) deleteSkill(w http.ResponseWriter, r *http.Request) {
-	name := chi.URLParam(r, "skill_name")
-	deleted := false
-	if err := s.store.Write(func(st *repo.State) error {
-		if _, ok := st.Skills[name]; ok {
-			delete(st.Skills, name)
-			deleted = true
-		}
-		return nil
-	}); err != nil {
+	deleted, err := s.getAdminService().DeleteSkill(chi.URLParam(r, "skill_name"))
+	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "store_error", err.Error(), nil)
 		return
 	}
@@ -334,17 +280,14 @@ func (s *Server) deleteSkill(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) loadSkillFile(w http.ResponseWriter, r *http.Request) {
-	name := chi.URLParam(r, "skill_name")
-	filePath := chi.URLParam(r, "file_path")
-	var content string
-	found := false
-	s.store.Read(func(st *repo.State) {
-		skill, ok := st.Skills[name]
-		if !ok {
-			return
-		}
-		content, found = readSkillVirtualFile(skill, filePath)
-	})
+	content, found, err := s.getAdminService().LoadSkillFile(
+		chi.URLParam(r, "skill_name"),
+		chi.URLParam(r, "file_path"),
+	)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "store_error", err.Error(), nil)
+		return
+	}
 	if !found {
 		writeErr(w, http.StatusNotFound, "not_found", "skill file not found", nil)
 		return
@@ -1017,20 +960,16 @@ func jsonSize(v interface{}) int {
 }
 
 func (s *Server) listChannels(w http.ResponseWriter, _ *http.Request) {
-	var out domain.ChannelConfigMap
-	s.store.Read(func(st *repo.State) {
-		out = st.Channels
-	})
+	out, err := s.getAdminService().ListChannels()
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "store_error", err.Error(), nil)
+		return
+	}
 	writeJSON(w, http.StatusOK, out)
 }
 
 func (s *Server) listChannelTypes(w http.ResponseWriter, _ *http.Request) {
-	out := make([]string, 0, len(s.channels))
-	for name := range s.channels {
-		out = append(out, name)
-	}
-	sort.Strings(out)
-	writeJSON(w, http.StatusOK, out)
+	writeJSON(w, http.StatusOK, s.getAdminService().ListChannelTypes())
 }
 
 func (s *Server) putChannels(w http.ResponseWriter, r *http.Request) {
@@ -1039,34 +978,24 @@ func (s *Server) putChannels(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "invalid_json", "invalid request body", nil)
 		return
 	}
-	for name := range body {
-		normalized := strings.ToLower(strings.TrimSpace(name))
-		if _, ok := s.channels[normalized]; !ok {
-			writeErr(w, http.StatusBadRequest, "channel_not_supported", fmt.Sprintf("channel %q is not supported", name), nil)
+	out, err := s.getAdminService().ReplaceChannels(body)
+	if err != nil {
+		if validation := (*adminservice.ValidationError)(nil); errors.As(err, &validation) {
+			writeErr(w, http.StatusBadRequest, validation.Code, validation.Message, nil)
 			return
 		}
-	}
-	if err := s.store.Write(func(st *repo.State) error {
-		st.Channels = domain.ChannelConfigMap{}
-		for name, cfg := range body {
-			st.Channels[strings.ToLower(strings.TrimSpace(name))] = cfg
-		}
-		return nil
-	}); err != nil {
 		writeErr(w, http.StatusInternalServerError, "store_error", err.Error(), nil)
 		return
 	}
-	writeJSON(w, http.StatusOK, body)
+	writeJSON(w, http.StatusOK, out)
 }
 
 func (s *Server) getChannel(w http.ResponseWriter, r *http.Request) {
-	name := chi.URLParam(r, "channel_name")
-	normalized := strings.ToLower(strings.TrimSpace(name))
-	found := false
-	var out map[string]interface{}
-	s.store.Read(func(st *repo.State) {
-		out, found = st.Channels[normalized]
-	})
+	out, found, err := s.getAdminService().GetChannel(chi.URLParam(r, "channel_name"))
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "store_error", err.Error(), nil)
+		return
+	}
 	if !found {
 		writeErr(w, http.StatusNotFound, "not_found", "channel not found", nil)
 		return
@@ -1076,23 +1005,16 @@ func (s *Server) getChannel(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) putChannel(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "channel_name")
-	normalized := strings.ToLower(strings.TrimSpace(name))
-	if _, ok := s.channels[normalized]; !ok {
-		writeErr(w, http.StatusBadRequest, "channel_not_supported", fmt.Sprintf("channel %q is not supported", name), nil)
-		return
-	}
 	var body map[string]interface{}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid_json", "invalid request body", nil)
 		return
 	}
-	if err := s.store.Write(func(st *repo.State) error {
-		if st.Channels == nil {
-			st.Channels = domain.ChannelConfigMap{}
+	if err := s.getAdminService().PutChannel(name, body); err != nil {
+		if validation := (*adminservice.ValidationError)(nil); errors.As(err, &validation) {
+			writeErr(w, http.StatusBadRequest, validation.Code, validation.Message, nil)
+			return
 		}
-		st.Channels[normalized] = body
-		return nil
-	}); err != nil {
 		writeErr(w, http.StatusInternalServerError, "store_error", err.Error(), nil)
 		return
 	}
@@ -1487,13 +1409,17 @@ func (s *Server) buildSystemLayersForModeWithOptions(mode string, options codexL
 	if normalizedMode == promptModeClaude {
 		return s.buildClaudeSystemLayers()
 	}
-	return s.getSystemPromptService().BuildLayers(
-		[]string{aiToolsGuideRelativePath},
-		[]string{
-			aiToolsGuideLegacyRelativePath,
-			aiToolsGuideLegacyV0RelativePath,
-			aiToolsGuideLegacyV1RelativePath,
-			aiToolsGuideLegacyV2RelativePath,
+	return s.getSystemPromptService().BuildLayersForSource(
+		context.Background(),
+		systempromptservice.SourceFile,
+		systempromptservice.BuildRequest{
+			BaseCandidates: []string{aiToolsGuideRelativePath},
+			ToolGuideCandidates: []string{
+				aiToolsGuideLegacyRelativePath,
+				aiToolsGuideLegacyV0RelativePath,
+				aiToolsGuideLegacyV1RelativePath,
+				aiToolsGuideLegacyV2RelativePath,
+			},
 		},
 	)
 }

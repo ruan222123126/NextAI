@@ -1,5 +1,7 @@
 import { Command } from "commander";
+import { appendQuery, fillPath } from "@nextai/sdk-ts";
 import { ApiClient, ApiClientError } from "../client/api-client.js";
+import { DEFAULT_CHANNEL } from "../constants.js";
 import { printResult } from "../io/output.js";
 import { t } from "../i18n.js";
 
@@ -11,18 +13,17 @@ export function registerChatsCommand(program: Command, client: ApiClient): void 
     .option("--user-id <userId>")
     .option("--channel <channel>")
     .action(async (opts: { userId?: string; channel?: string }) => {
-      const qs = new URLSearchParams();
-      if (opts.userId) qs.set("user_id", opts.userId);
-      if (opts.channel) qs.set("channel", opts.channel);
-      const suffix = qs.toString() ? `?${qs.toString()}` : "";
-      printResult(await client.get(`/chats${suffix}`));
+      printResult(await client.get(appendQuery("/chats", {
+        user_id: opts.userId,
+        channel: opts.channel,
+      })));
     });
 
   chats
     .command("create")
     .requiredOption("--session-id <sid>")
     .requiredOption("--user-id <uid>")
-    .option("--channel <channel>", "console")
+    .option("--channel <channel>", DEFAULT_CHANNEL)
     .option("--name <name>", t("chats.default_name"))
     .action(async (opts: { sessionId: string; userId: string; channel: string; name: string }) => {
       const payload = {
@@ -39,21 +40,21 @@ export function registerChatsCommand(program: Command, client: ApiClient): void 
     .command("delete")
     .argument("<chatId>")
     .action(async (chatId: string) => {
-      printResult(await client.delete(`/chats/${encodeURIComponent(chatId)}`));
+      printResult(await client.delete(fillPath("/chats/{chat_id}", { chat_id: chatId })));
     });
 
   chats
     .command("get")
     .argument("<chatId>")
     .action(async (chatId: string) => {
-      printResult(await client.get(`/chats/${encodeURIComponent(chatId)}`));
+      printResult(await client.get(fillPath("/chats/{chat_id}", { chat_id: chatId })));
     });
 
   chats
     .command("send")
     .requiredOption("--chat-session <sid>")
     .requiredOption("--user-id <uid>")
-    .option("--channel <channel>", "console")
+    .option("--channel <channel>", DEFAULT_CHANNEL)
     .requiredOption("--message <message>")
     .option("--stream")
     .action(async (opts: { chatSession: string; userId: string; channel: string; message: string; stream: boolean }) => {
@@ -68,31 +69,21 @@ export function registerChatsCommand(program: Command, client: ApiClient): void 
         printResult(await client.post("/agent/process", payload));
         return;
       }
-      const request = client.buildRequest("/agent/process", {
+      const response = await client.openStream("/agent/process", {
         method: "POST",
-        body: JSON.stringify(payload),
+        body: payload,
+        accept: "text/event-stream,application/json",
       });
-      const res = await fetch(request.url, request.init);
-      if (!res.ok || !res.body) {
-        const text = await res.text();
-        let parsed: unknown = {};
-        try {
-          parsed = text ? JSON.parse(text) : {};
-        } catch {
-          parsed = { raw: text };
-        }
-        const code = (parsed as { error?: { code?: string } })?.error?.code ?? "stream_request_failed";
-        const message = (parsed as { error?: { message?: string } })?.error?.message ?? `stream request failed: ${res.status}`;
-        const details = (parsed as { error?: { details?: unknown } })?.error?.details;
+      if (!response.body) {
         throw new ApiClientError({
-          status: res.status,
-          code,
-          message,
-          details,
-          payload: parsed,
+          status: 500,
+          code: "stream_unsupported",
+          message: "stream unsupported",
+          payload: {},
         });
       }
-      const reader = res.body.getReader();
+
+      const reader = response.body.getReader();
       const decoder = new TextDecoder();
       while (true) {
         const { done, value } = await reader.read();

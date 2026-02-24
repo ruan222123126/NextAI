@@ -3,14 +3,25 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
+  "main": "./lib/index.js",
+  "types": "./lib/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "import": "./lib/index.js"
+    }
+  },
   "scripts": {
     "generate": "node scripts/generate-from-openapi.mjs",
     "generate:check": "node scripts/generate-from-openapi.mjs --check",
-    "build": "pnpm run generate && node -e \"console.log('sdk build placeholder')\"",
+    "build": "pnpm run generate && pnpm exec tsc -p tsconfig.json",
     "test": "node --test test/*.test.mjs",
     "lint": "pnpm run generate:check"
   },
   "dependencies": {
     "yaml": "^2.8.1"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3"
   }
 }

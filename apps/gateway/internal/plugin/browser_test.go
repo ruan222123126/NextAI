@@ -33,24 +33,28 @@ func TestBrowserToolInvokeParsesRunMeta(t *testing.T) {
 		return "=== 任务结果 ===\n完成\nrun_id: run-1\nlog: /tmp/run-1.jsonl\nshots: /tmp/shots\n", 0, nil
 	}
 
-	out, invokeErr := tool.Invoke(map[string]interface{}{
-		"items": []interface{}{
-			map[string]interface{}{"task": "打开 bing 搜索 nextai"},
+	out, invokeErr := tool.Invoke(ToolCommand{
+		Items: []ToolCommandItem{
+			{Task: "打开 bing 搜索 nextai"},
 		},
 	})
 	if invokeErr != nil {
 		t.Fatalf("invoke failed: %v", invokeErr)
 	}
-	if ok, _ := out["ok"].(bool); !ok {
-		t.Fatalf("expected ok=true, got=%#v", out["ok"])
+	result, err := out.ToMap()
+	if err != nil {
+		t.Fatalf("convert result failed: %v", err)
 	}
-	if got, _ := out["run_id"].(string); got != "run-1" {
+	if ok, _ := result["ok"].(bool); !ok {
+		t.Fatalf("expected ok=true, got=%#v", result["ok"])
+	}
+	if got, _ := result["run_id"].(string); got != "run-1" {
 		t.Fatalf("unexpected run_id: %q", got)
 	}
-	if got, _ := out["log_path"].(string); got != "/tmp/run-1.jsonl" {
+	if got, _ := result["log_path"].(string); got != "/tmp/run-1.jsonl" {
 		t.Fatalf("unexpected log_path: %q", got)
 	}
-	if got, _ := out["shots_path"].(string); got != "/tmp/shots" {
+	if got, _ := result["shots_path"].(string); got != "/tmp/shots" {
 		t.Fatalf("unexpected shots_path: %q", got)
 	}
 }
@@ -66,9 +70,9 @@ func TestBrowserToolInvokeRejectsMissingTask(t *testing.T) {
 		t.Fatalf("new browser tool failed: %v", err)
 	}
 
-	_, invokeErr := tool.Invoke(map[string]interface{}{
-		"items": []interface{}{
-			map[string]interface{}{},
+	_, invokeErr := tool.Invoke(ToolCommand{
+		Items: []ToolCommandItem{
+			{},
 		},
 	})
 	if !errors.Is(invokeErr, ErrBrowserToolTaskMissing) {
