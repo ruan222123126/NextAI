@@ -23,7 +23,6 @@ NextAI - 个人 AI 助手控制平面（Gateway + CLI + Web + TUI），v1 聚焦
 - 密钥只从 env/secret store 取
 - 路径穿越校验，最小权限
 
-## AI 接手流程
-1. 先读 `docs/TODO.md` 和 `/home/ruan/.codex/handoff/latest.md`
-2. 按未完成项顺序执行
-3. 任务结束后更新 `docs/TODO.md`
+
+##重启
+- 修改后端请重启后端，修改前端重新编译
