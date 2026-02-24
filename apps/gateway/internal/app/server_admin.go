@@ -1,7 +1,6 @@
 package app
 
 import (
-	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
@@ -12,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -1050,12 +1050,64 @@ func mapToolError(err error) (status int, code string, message string) {
 			return http.StatusBadRequest, te.Code, te.Message
 		case "tool_invoke_failed":
 			switch {
+			case errors.Is(te.Err, errRequestUserInputUnavailableMode):
+				return http.StatusBadRequest, "tool_not_available", "request_user_input is only available in Plan mode"
+			case errors.Is(te.Err, errRequestUserInputQuestionsInvalid):
+				return http.StatusBadRequest, "invalid_tool_input", "request_user_input questions are invalid"
+			case errors.Is(te.Err, errRequestUserInputTimeout):
+				return http.StatusGatewayTimeout, "tool_timeout", "request_user_input timed out waiting for answer"
+			case errors.Is(te.Err, errRequestUserInputConflict):
+				return http.StatusConflict, "tool_conflict", "request_user_input request_id is already pending"
+			case errors.Is(te.Err, errUpdatePlanInvalid):
+				return http.StatusBadRequest, "invalid_tool_input", "update_plan payload is invalid"
+			case errors.Is(te.Err, errUpdatePlanChatNotFound):
+				return http.StatusBadRequest, "invalid_request", "update_plan target chat not found"
+			case errors.Is(te.Err, errApplyPatchPayloadMissing):
+				return http.StatusBadRequest, "invalid_tool_input", "apply_patch patch payload is required"
+			case errors.Is(te.Err, errApplyPatchBinaryMissing):
+				return http.StatusBadGateway, "tool_runtime_unavailable", "apply_patch runtime is unavailable on current host"
+			case errors.Is(te.Err, errMultiAgentIDRequired):
+				return http.StatusBadRequest, "invalid_tool_input", "id or agent_id is required"
+			case errors.Is(te.Err, errMultiAgentIDsInvalid):
+				return http.StatusBadRequest, "invalid_tool_input", "ids must be a non-empty array of agent ids"
+			case errors.Is(te.Err, errMultiAgentTaskRequired):
+				return http.StatusBadRequest, "invalid_tool_input", "spawn_agent task is required"
+			case errors.Is(te.Err, errMultiAgentInputRequired), errors.Is(te.Err, errMultiAgentEmptyAgentInput):
+				return http.StatusBadRequest, "invalid_tool_input", "agent input is required"
+			case errors.Is(te.Err, errMultiAgentItemsInvalid):
+				return http.StatusBadRequest, "invalid_tool_input", "items must be a non-empty array"
+			case errors.Is(te.Err, errMultiAgentInputConflict):
+				return http.StatusBadRequest, "invalid_tool_input", "provide either message/input or items, but not both"
+			case errors.Is(te.Err, errMultiAgentPromptMode), errors.Is(te.Err, errMultiAgentCollabMode):
+				return http.StatusBadRequest, "invalid_tool_input", "multi-agent mode payload is invalid"
+			case errors.Is(te.Err, errMultiAgentDepthExceeded):
+				return http.StatusBadRequest, "tool_not_available", "sub-agent nesting depth is exceeded"
+			case errors.Is(te.Err, errMultiAgentNotFound):
+				return http.StatusNotFound, "invalid_request", "managed sub-agent not found"
+			case errors.Is(te.Err, errMultiAgentClosed):
+				return http.StatusConflict, "invalid_request", "managed sub-agent is closed"
+			case errors.Is(te.Err, errMultiAgentConflict):
+				return http.StatusConflict, "tool_conflict", "managed sub-agent already exists"
+			case errors.Is(te.Err, errMultiAgentBusy):
+				return http.StatusConflict, "tool_conflict", "managed sub-agent is running"
+			case errors.Is(te.Err, errMultiAgentNoPendingInput):
+				return http.StatusBadRequest, "invalid_request", "managed sub-agent has no pending input"
 			case errors.Is(te.Err, plugin.ErrShellToolCommandMissing):
 				return http.StatusBadRequest, "invalid_tool_input", "tool input command is required"
 			case errors.Is(te.Err, plugin.ErrShellToolItemsInvalid):
 				return http.StatusBadRequest, "invalid_tool_input", "tool input items must be a non-empty array of objects"
 			case errors.Is(te.Err, plugin.ErrShellToolExecutorUnavailable):
 				return http.StatusBadGateway, "tool_runtime_unavailable", "shell executor is unavailable on current host"
+			case errors.Is(te.Err, plugin.ErrShellToolSessionIDInvalid):
+				return http.StatusBadRequest, "invalid_tool_input", "tool input session_id is required and must be > 0"
+			case errors.Is(te.Err, plugin.ErrShellToolSessionNotFound):
+				return http.StatusBadRequest, "invalid_tool_input", "shell session not found or already closed"
+			case errors.Is(te.Err, plugin.ErrShellToolStdinUnsupported):
+				return http.StatusBadRequest, "invalid_tool_input", "shell session does not accept stdin writes"
+			case errors.Is(te.Err, plugin.ErrShellToolSessionLimitReached):
+				return http.StatusBadGateway, "tool_runtime_unavailable", "shell session limit reached"
+			case errors.Is(te.Err, plugin.ErrShellToolEscalationDenied):
+				return http.StatusBadRequest, "tool_permission_denied", "shell escalation requires approval policy on-request"
 			case errors.Is(te.Err, plugin.ErrFileLinesToolPathMissing):
 				return http.StatusBadRequest, "invalid_tool_input", "tool input path is required"
 			case errors.Is(te.Err, plugin.ErrFileLinesToolPathInvalid):
@@ -1371,129 +1423,7 @@ func safeMap(v map[string]interface{}) map[string]interface{} {
 	return v
 }
 
-type systemPromptLayer = systempromptservice.Layer
-
-type codexLayerBuildOptions struct {
-	ModelSlug         string
-	Personality       string
-	SessionID         string
-	ReviewTask        bool
-	CompactTask       bool
-	MemoryTask        bool
-	CollaborationMode string
-}
-
-func prependSystemLayers(input []domain.AgentInputMessage, layers []systemPromptLayer) []domain.AgentInputMessage {
-	return systempromptservice.PrependLayers(input, layers)
-}
-
-func (s *Server) buildSystemLayers() ([]systemPromptLayer, error) {
-	return s.buildSystemLayersForModeWithOptions(promptModeDefault, codexLayerBuildOptions{})
-}
-
-func (s *Server) buildSystemLayersForMode(mode string) ([]systemPromptLayer, error) {
-	return s.buildSystemLayersForModeWithOptions(mode, codexLayerBuildOptions{})
-}
-
-func (s *Server) buildSystemLayersForModeWithOptions(mode string, options codexLayerBuildOptions) ([]systemPromptLayer, error) {
-	normalizedMode, ok := normalizePromptMode(mode)
-	if !ok {
-		return nil, fmt.Errorf("invalid prompt mode: %s", mode)
-	}
-	if normalizedMode == promptModeCodex {
-		if s.cfg.EnableCodexModeV2 {
-			return s.buildCodexSystemLayersV2(options)
-		}
-		return s.buildCodexSystemLayers(options)
-	}
-	if normalizedMode == promptModeClaude {
-		return s.buildClaudeSystemLayers()
-	}
-	return s.getSystemPromptService().BuildLayersForSource(
-		context.Background(),
-		systempromptservice.SourceFile,
-		systempromptservice.BuildRequest{
-			BaseCandidates: []string{aiToolsGuideRelativePath},
-			ToolGuideCandidates: []string{
-				aiToolsGuideLegacyRelativePath,
-				aiToolsGuideLegacyV0RelativePath,
-				aiToolsGuideLegacyV1RelativePath,
-				aiToolsGuideLegacyV2RelativePath,
-			},
-		},
-	)
-}
-
-func (s *Server) buildCodexSystemLayersV2(options codexLayerBuildOptions) ([]systemPromptLayer, error) {
-	source, content, err := loadRequiredSystemLayer([]string{codexBasePromptRelativePath})
-	if err != nil {
-		return nil, err
-	}
-
-	layers := []systemPromptLayer{
-		{
-			Name:    "codex_base_system",
-			Role:    "system",
-			Source:  source,
-			Content: systempromptservice.FormatLayerSourceContent(source, content),
-		},
-	}
-
-	if layers, err = appendCodexOptionalLayer(layers, "codex_orchestrator_system", codexOrchestratorRelativePath, nil); err != nil {
-		return nil, err
-	}
-	if layers, err = s.appendCodexModelInstructionsLayer(layers, options); err != nil {
-		return nil, err
-	}
-	if layers, err = appendCodexReviewPromptLayerIfNeeded(layers, options); err != nil {
-		return nil, err
-	}
-	if layers, err = appendCodexReviewHistoryLayersIfNeeded(layers, options); err != nil {
-		return nil, err
-	}
-	if layers, err = appendCodexCollaborationLayer(layers, options); err != nil {
-		return nil, err
-	}
-	if layers, err = appendCodexCompactLayersIfNeeded(layers, options); err != nil {
-		return nil, err
-	}
-	if layers, err = appendCodexMemoryLayersIfNeeded(layers, options); err != nil {
-		return nil, err
-	}
-	if layers, err = appendCodexOptionalLayer(layers, "codex_experimental_collab_system", codexExperimentalRelativePath, nil); err != nil {
-		return nil, err
-	}
-	if layers, err = appendCodexSearchToolLayer(layers); err != nil {
-		return nil, err
-	}
-	if layers, err = appendCodexOptionalLayer(layers, "codex_local_policy_system", codexLocalPolicyRelativePath, nil); err != nil {
-		return nil, err
-	}
-	if layers, err = appendCodexOptionalLayerFromCandidates(
-		layers,
-		"codex_tool_guide_system",
-		[]string{
-			codexToolGuideRelativePath,
-			aiToolsGuideLegacyV1RelativePath,
-			aiToolsGuideLegacyV2RelativePath,
-		},
-		nil,
-	); err != nil {
-		return nil, err
-	}
-
-	return dedupeLayersByNormalizedContent(layers), nil
-}
-
-func buildCodexTemplateVars(modeName string) map[string]string {
-	normalizedMode := normalizeCollaborationModeName(modeName)
-	return map[string]string{
-		"KNOWN_MODE_NAMES":                knownCollaborationModeNames(),
-		"REQUEST_USER_INPUT_AVAILABILITY": requestUserInputAvailability(normalizedMode),
-	}
-}
-
-func (s *Server) buildCodexSystemLayers(options codexLayerBuildOptions) ([]systemPromptLayer, error) {
+func (s *Server) buildCodexSystemLayers(runtime TurnRuntimeSnapshot) ([]systemPromptLayer, error) {
 	source, content, err := loadRequiredSystemLayer([]string{codexBasePromptRelativePath})
 	if err != nil {
 		return nil, err
@@ -1508,7 +1438,7 @@ func (s *Server) buildCodexSystemLayers(options codexLayerBuildOptions) ([]syste
 		},
 	}
 	if !s.cfg.EnablePromptTemplates {
-		if layers, err = appendCodexReviewPromptLayerIfNeeded(layers, options); err != nil {
+		if layers, err = appendCodexReviewPromptLayerIfNeeded(layers, runtime); err != nil {
 			return nil, err
 		}
 		return appendCodexOptionalLayer(layers, "codex_local_policy_system", codexLocalPolicyRelativePath, nil)
@@ -1517,28 +1447,28 @@ func (s *Server) buildCodexSystemLayers(options codexLayerBuildOptions) ([]syste
 	if layers, err = appendCodexOptionalLayer(layers, "codex_orchestrator_system", codexOrchestratorRelativePath, nil); err != nil {
 		return nil, err
 	}
-	if layers, err = s.appendCodexModelInstructionsLayer(layers, options); err != nil {
+	if layers, err = s.appendCodexModelInstructionsLayer(layers, runtime); err != nil {
 		return nil, err
 	}
-	if layers, err = appendCodexReviewPromptLayerIfNeeded(layers, options); err != nil {
+	if layers, err = appendCodexReviewPromptLayerIfNeeded(layers, runtime); err != nil {
 		return nil, err
 	}
-	if layers, err = appendCodexReviewHistoryLayersIfNeeded(layers, options); err != nil {
+	if layers, err = appendCodexReviewHistoryLayersIfNeeded(layers, runtime); err != nil {
 		return nil, err
 	}
-	if layers, err = appendCodexCollaborationLayer(layers, options); err != nil {
+	if layers, err = appendCodexCollaborationLayer(layers, runtime); err != nil {
 		return nil, err
 	}
-	if layers, err = appendCodexCompactLayersIfNeeded(layers, options); err != nil {
+	if layers, err = appendCodexCompactLayersIfNeeded(layers, runtime); err != nil {
 		return nil, err
 	}
-	if layers, err = appendCodexMemoryLayersIfNeeded(layers, options); err != nil {
+	if layers, err = appendCodexMemoryLayersIfNeeded(layers, runtime); err != nil {
 		return nil, err
 	}
 	if layers, err = appendCodexOptionalLayer(layers, "codex_experimental_collab_system", codexExperimentalRelativePath, nil); err != nil {
 		return nil, err
 	}
-	if layers, err = appendCodexSearchToolLayer(layers); err != nil {
+	if layers, err = appendCodexSearchToolLayer(layers, runtime); err != nil {
 		return nil, err
 	}
 	if layers, err = appendCodexOptionalLayer(layers, "codex_local_policy_system", codexLocalPolicyRelativePath, nil); err != nil {
@@ -1549,9 +1479,9 @@ func (s *Server) buildCodexSystemLayers(options codexLayerBuildOptions) ([]syste
 
 func appendCodexCollaborationLayer(
 	layers []systemPromptLayer,
-	options codexLayerBuildOptions,
+	runtime TurnRuntimeSnapshot,
 ) ([]systemPromptLayer, error) {
-	modeName := normalizeCollaborationModeName(options.CollaborationMode)
+	modeName := normalizeCollaborationModeName(runtime.Mode.CollaborationMode)
 	if modeName == collaborationModePlanName {
 		return appendCodexOptionalLayer(layers, "codex_collaboration_plan_system", codexCollabPlanRelativePath, nil)
 	}
@@ -1567,21 +1497,21 @@ func appendCodexCollaborationLayer(
 		)
 	}
 
-	templateVars := buildCodexTemplateVars(modeName)
+	templateVars := buildCodexTemplateVars(runtime)
 	return appendCodexOptionalTemplateLayer(
 		layers,
 		"codex_collaboration_default_system",
 		codexCollabDefaultRelativePath,
 		templateVars,
-		[]string{"KNOWN_MODE_NAMES", "REQUEST_USER_INPUT_AVAILABILITY"},
+		[]string{"KNOWN_MODE_NAMES", "TURN_MODE", "REQUEST_USER_INPUT_AVAILABLE"},
 	)
 }
 
 func appendCodexReviewPromptLayerIfNeeded(
 	layers []systemPromptLayer,
-	options codexLayerBuildOptions,
+	runtime TurnRuntimeSnapshot,
 ) ([]systemPromptLayer, error) {
-	if !options.ReviewTask {
+	if !runtime.Mode.ReviewTask {
 		return layers, nil
 	}
 	source, content, err := loadRequiredSystemLayer([]string{codexReviewPromptRelativePath})
@@ -1598,9 +1528,9 @@ func appendCodexReviewPromptLayerIfNeeded(
 
 func appendCodexReviewHistoryLayersIfNeeded(
 	layers []systemPromptLayer,
-	options codexLayerBuildOptions,
+	runtime TurnRuntimeSnapshot,
 ) ([]systemPromptLayer, error) {
-	if !options.ReviewTask {
+	if !runtime.Mode.ReviewTask {
 		return layers, nil
 	}
 	var err error
@@ -1615,9 +1545,9 @@ func appendCodexReviewHistoryLayersIfNeeded(
 
 func appendCodexCompactLayersIfNeeded(
 	layers []systemPromptLayer,
-	options codexLayerBuildOptions,
+	runtime TurnRuntimeSnapshot,
 ) ([]systemPromptLayer, error) {
-	if !options.CompactTask {
+	if !runtime.Mode.CompactTask {
 		return layers, nil
 	}
 	var err error
@@ -1632,13 +1562,13 @@ func appendCodexCompactLayersIfNeeded(
 
 func appendCodexMemoryLayersIfNeeded(
 	layers []systemPromptLayer,
-	options codexLayerBuildOptions,
+	runtime TurnRuntimeSnapshot,
 ) ([]systemPromptLayer, error) {
-	if !options.MemoryTask {
+	if !runtime.Mode.MemoryTask {
 		return layers, nil
 	}
 
-	memoryVars := buildCodexMemoryTemplateVars(options.SessionID)
+	memoryVars := buildCodexMemoryTemplateVars(runtime.SessionID)
 	requiredKeysForReadPath := []string{"base_path", "memory_summary"}
 	requiredKeysForStageOneInput := []string{"rollout_path", "rollout_cwd", "rollout_contents"}
 	requiredKeysForConsolidation := []string{"memory_root"}
@@ -1677,26 +1607,26 @@ func appendCodexMemoryLayersIfNeeded(
 	return layers, nil
 }
 
-func appendCodexSearchToolLayer(layers []systemPromptLayer) ([]systemPromptLayer, error) {
+func appendCodexSearchToolLayer(layers []systemPromptLayer, runtime TurnRuntimeSnapshot) ([]systemPromptLayer, error) {
 	return appendCodexOptionalTemplateLayer(
 		layers,
 		"codex_search_tool_system",
 		codexSearchToolDescriptionPath,
-		buildCodexSearchToolTemplateVars(),
+		buildCodexSearchToolTemplateVars(runtime),
 		[]string{"app_names"},
 	)
 }
 
 func (s *Server) appendCodexModelInstructionsLayer(
 	layers []systemPromptLayer,
-	options codexLayerBuildOptions,
+	runtime TurnRuntimeSnapshot,
 ) ([]systemPromptLayer, error) {
 	_, personalityContent, personalityLoaded, err := loadOptionalSystemLayer(codexPersonalityRelativePath)
 	if err != nil {
 		return nil, err
 	}
-	personality := s.resolveCodexPersonality(options.Personality)
-	modelSlug := s.resolveCodexModelSlug(options.ModelSlug)
+	personality := s.resolveCodexPersonality(runtime.Personality)
+	modelSlug := s.resolveCodexModelSlug(runtime.ModelSlug)
 	sourceMode := normalizeCodexPromptSource(s.cfg.CodexPromptSource)
 
 	fileSource, fileContent, fileOK, err := resolveCodexModelInstructionsFromFile(personalityContent, personalityLoaded)
@@ -1715,7 +1645,7 @@ func (s *Server) appendCodexModelInstructionsLayer(
 		catalogSource, catalogContent, catalogMeta, catalogErr = s.resolveCodexModelInstructionsFromCatalog(modelSlug, personality)
 	}
 	if sourceMode == codexPromptSourceFile && s.cfg.EnableCodexPromptShadowCompare {
-		logCodexPromptShadowDiff(options.SessionID, modelSlug, fileContent, catalogContent, catalogMeta, catalogErr)
+		logCodexPromptShadowDiff(runtime.SessionID, modelSlug, fileContent, catalogContent, catalogMeta, catalogErr)
 	}
 
 	selectedSource, selectedContent, selectedOK := "", "", false
@@ -1761,6 +1691,13 @@ func resolveCodexModelInstructionsFromFile(personalityContent string, personalit
 	}
 	if personalityLoaded {
 		content = replaceTemplateVariable(content, "personality", personalityContent)
+	}
+	if unresolved := templatePlaceholderKeys(content); len(unresolved) > 0 {
+		log.Printf(
+			"warning: skip codex model instructions from file due to unresolved template vars: %s",
+			strings.Join(unresolved, ", "),
+		)
+		return "", "", false, nil
 	}
 	content = strings.TrimSpace(content)
 	if content == "" {
@@ -1902,56 +1839,6 @@ func normalizeCodexPromptSource(raw string) string {
 	}
 }
 
-func (s *Server) buildClaudeSystemLayers() ([]systemPromptLayer, error) {
-	requiredLayers := []struct {
-		Name string
-		Path string
-	}{
-		{
-			Name: "claude_identity_system",
-			Path: claudeIdentityPromptRelativePath,
-		},
-		{
-			Name: "claude_workflow_system",
-			Path: claudeWorkflowPromptRelativePath,
-		},
-		{
-			Name: "claude_reminder_start_system",
-			Path: claudeReminderStartRelativePath,
-		},
-		{
-			Name: "claude_reminder_end_system",
-			Path: claudeReminderEndRelativePath,
-		},
-	}
-
-	layers := make([]systemPromptLayer, 0, len(requiredLayers)+1)
-	for _, layer := range requiredLayers {
-		source, content, err := loadRequiredSystemLayer([]string{layer.Path})
-		if err != nil {
-			return nil, err
-		}
-		layers = append(layers, systemPromptLayer{
-			Name:    layer.Name,
-			Role:    "system",
-			Source:  source,
-			Content: systempromptservice.FormatLayerSourceContent(source, content),
-		})
-	}
-
-	var err error
-	if layers, err = appendCodexOptionalLayer(
-		layers,
-		"claude_nextai_tool_adapter_system",
-		claudeNextAIToolAdapterRelativePath,
-		nil,
-	); err != nil {
-		return nil, err
-	}
-
-	return dedupeLayersByNormalizedContent(layers), nil
-}
-
 func appendCodexOptionalLayer(
 	layers []systemPromptLayer,
 	layerName string,
@@ -2021,26 +1908,31 @@ func appendCodexOptionalTemplateLayer(
 		return layers, nil
 	}
 
-	missingKeys := make([]string, 0, len(requiredKeys))
-	for _, key := range requiredKeys {
+	expectedKeys := expectedTemplateKeys(content, requiredKeys)
+	missingKeys := make([]string, 0, len(expectedKeys))
+	for _, key := range expectedKeys {
 		if strings.TrimSpace(vars[key]) == "" {
 			missingKeys = append(missingKeys, key)
 		}
 	}
 	if len(missingKeys) > 0 {
-		log.Printf("warning: skip codex layer %s due to missing template vars: %s", layerName, strings.Join(missingKeys, ", "))
-		return layers, nil
+		return nil, fmt.Errorf(
+			"codex layer %s missing template vars: %s",
+			layerName,
+			strings.Join(missingKeys, ", "),
+		)
 	}
 
 	rendered := strings.TrimSpace(renderTemplate(content, vars))
 	if rendered == "" {
 		return layers, nil
 	}
-	for _, key := range requiredKeys {
-		if hasTemplatePlaceholder(rendered, key) {
-			log.Printf("warning: skip codex layer %s due to unresolved template var: %s", layerName, key)
-			return layers, nil
-		}
+	if unresolved := templatePlaceholderKeys(rendered); len(unresolved) > 0 {
+		return nil, fmt.Errorf(
+			"codex layer %s has unresolved template vars after render: %s",
+			layerName,
+			strings.Join(unresolved, ", "),
+		)
 	}
 
 	return append(layers, systemPromptLayer{
@@ -2135,6 +2027,57 @@ func hasTemplatePlaceholder(content, key string) bool {
 	return strings.Contains(content, "{{"+key+"}}") || strings.Contains(content, "{{ "+key+" }}")
 }
 
+var templatePlaceholderPattern = regexp.MustCompile(`\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}`)
+
+func templatePlaceholderKeys(content string) []string {
+	matches := templatePlaceholderPattern.FindAllStringSubmatch(content, -1)
+	if len(matches) == 0 {
+		return []string{}
+	}
+	seen := map[string]struct{}{}
+	keys := make([]string, 0, len(matches))
+	for _, match := range matches {
+		if len(match) < 2 {
+			continue
+		}
+		key := strings.TrimSpace(match[1])
+		if key == "" {
+			continue
+		}
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func expectedTemplateKeys(content string, requiredKeys []string) []string {
+	seen := map[string]struct{}{}
+	keys := make([]string, 0, len(requiredKeys))
+	appendKey := func(raw string) {
+		key := strings.TrimSpace(raw)
+		if key == "" {
+			return
+		}
+		if _, ok := seen[key]; ok {
+			return
+		}
+		seen[key] = struct{}{}
+		keys = append(keys, key)
+	}
+	for _, key := range requiredKeys {
+		appendKey(key)
+	}
+	for _, key := range templatePlaceholderKeys(content) {
+		appendKey(key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
 func knownCollaborationModeNames() string {
 	names := supportedCollaborationModeNames()
 	switch len(names) {
@@ -2175,44 +2118,59 @@ func buildCodexMemoryTemplateVars(sessionID string) map[string]string {
 		"memory_summary":   readCodexMemorySummaryForPrompt(),
 		"rollout_path":     rolloutPath,
 		"rollout_cwd":      filepath.ToSlash(repoRoot),
-		"rollout_contents": "Rollout contents are populated by the codex memory phase-1 pipeline.",
+		"rollout_contents": readCodexMemoryRolloutForPrompt(rolloutPath),
 	}
 }
 
-func buildCodexSearchToolTemplateVars() map[string]string {
+func readCodexMemoryRolloutForPrompt(rolloutPath string) string {
+	path := strings.TrimSpace(rolloutPath)
+	if path == "" {
+		return "(none)"
+	}
+	content, err := os.ReadFile(filepath.FromSlash(path))
+	if err != nil {
+		return "(none)"
+	}
+	trimmed := strings.TrimSpace(string(content))
+	if trimmed == "" {
+		return "(none)"
+	}
+	return truncateCodexMemoryTextByTokenLimit(trimmed, codexMemoryDefaultStageOneRolloutTokenLimit)
+}
+
+func buildCodexSearchToolTemplateVars(runtime TurnRuntimeSnapshot) map[string]string {
 	return map[string]string{
-		"app_names": "configured search providers",
+		"app_names": joinOrNone(codexSearchAppNamesFromRuntime(runtime)),
 	}
 }
 
-func normalizeCollaborationModeName(modeName string) string {
-	switch strings.ToLower(strings.TrimSpace(modeName)) {
-	case strings.ToLower(collaborationModePlanName):
-		return collaborationModePlanName
-	case strings.ToLower(collaborationModeExecuteName):
-		return collaborationModeExecuteName
-	case strings.ToLower(collaborationModePairProgrammingName), "pair_programming", "pair-programming":
-		return collaborationModePairProgrammingName
-	case strings.ToLower(collaborationModeDefaultName):
-		fallthrough
-	default:
-		return collaborationModeDefaultName
+func codexSearchAppNamesFromRuntime(runtime TurnRuntimeSnapshot) []string {
+	tools := normalizeTurnRuntimeToolNames(runtime.AvailableTools)
+	if len(tools) == 0 {
+		return []string{}
 	}
-}
-
-func requestUserInputAvailability(modeName string) string {
-	switch normalizeCollaborationModeName(modeName) {
-	case collaborationModePlanName:
-		return "The `request_user_input` tool is available in Plan mode."
-	case collaborationModeExecuteName:
-		return "The `request_user_input` tool is unavailable in Execute mode. If you call it while in Execute mode, it will return an error."
-	case collaborationModePairProgrammingName:
-		return "The `request_user_input` tool is unavailable in PairProgramming mode. If you call it while in PairProgramming mode, it will return an error."
-	case collaborationModeDefaultName:
-		fallthrough
-	default:
-		return "The `request_user_input` tool is unavailable in Default mode. If you call it while in Default mode, it will return an error."
+	seen := map[string]struct{}{}
+	appNames := make([]string, 0, len(tools))
+	for _, tool := range tools {
+		if !strings.HasPrefix(tool, "mcp__") {
+			continue
+		}
+		parts := strings.Split(tool, "__")
+		if len(parts) < 3 {
+			continue
+		}
+		appName := strings.TrimSpace(parts[1])
+		if appName == "" {
+			continue
+		}
+		if _, exists := seen[appName]; exists {
+			continue
+		}
+		seen[appName] = struct{}{}
+		appNames = append(appNames, appName)
 	}
+	sort.Strings(appNames)
+	return appNames
 }
 
 func dedupeLayersByNormalizedContent(layers []systemPromptLayer) []systemPromptLayer {
@@ -2309,9 +2267,6 @@ func (s *Server) resolvePromptModeVariant(mode string) string {
 	normalizedMode, ok := normalizePromptMode(mode)
 	if !ok || normalizedMode == promptModeDefault {
 		return promptModeVariantDefault
-	}
-	if normalizedMode == promptModeClaude {
-		return promptModeVariantClaudeV1
 	}
 	if s != nil && s.cfg.EnableCodexModeV2 {
 		return promptModeVariantCodexV2

@@ -94,6 +94,11 @@ func (s *Server) processAgentCore(
 		}
 	}
 	effectivePromptMode := requestPromptMode
+	sessionRuntimeToolSet := turnRuntimeToolSet{
+		MCPTools:     []turnRuntimeToolSpec{},
+		DynamicTools: []turnRuntimeToolSpec{},
+	}
+	sessionCollaborationMode := collaborationModeDefaultName
 	if !hasRequestPromptMode {
 		effectivePromptMode = promptModeDefault
 		s.store.Read(func(state *repo.State) {
@@ -102,35 +107,50 @@ func (s *Server) processAgentCore(
 					continue
 				}
 				effectivePromptMode = resolvePromptModeFromChatMeta(chat.Meta)
+				sessionRuntimeToolSet = parseTurnRuntimeToolSetFromChatMeta(chat.Meta)
+				sessionCollaborationMode = resolveCollaborationModeFromChatMeta(chat.Meta)
+				return
+			}
+		})
+	} else {
+		s.store.Read(func(state *repo.State) {
+			for _, chat := range state.Chats {
+				if chat.SessionID != req.SessionID || chat.UserID != req.UserID || chat.Channel != req.Channel {
+					continue
+				}
+				sessionRuntimeToolSet = parseTurnRuntimeToolSetFromChatMeta(chat.Meta)
+				sessionCollaborationMode = resolveCollaborationModeFromChatMeta(chat.Meta)
 				return
 			}
 		})
 	}
 
-	reviewTaskRequested := effectivePromptMode == promptModeCodex && isReviewTaskCommand(req.Input)
-	compactTaskRequested := effectivePromptMode == promptModeCodex && isCompactTaskCommand(req.Input)
-	memoryTaskRequested := effectivePromptMode == promptModeCodex && isMemoryTaskCommand(req.Input)
-	collaborationMode := collaborationModeDefaultName
-	if effectivePromptMode == promptModeCodex {
-		switch {
-		case isPlanTaskCommand(req.Input):
-			collaborationMode = collaborationModePlanName
-		case isExecuteTaskCommand(req.Input):
-			collaborationMode = collaborationModeExecuteName
-		case isPairTaskCommand(req.Input):
-			collaborationMode = collaborationModePairProgrammingName
+	resolvedCollaborationMode, collaborationTransition, err := resolveTurnCollaborationMode(
+		effectivePromptMode,
+		sessionCollaborationMode,
+		req.BizParams,
+	)
+	if err != nil {
+		return domain.AgentProcessResponse{}, &ports.AgentProcessError{
+			Status:  http.StatusBadRequest,
+			Code:    "invalid_request",
+			Message: err.Error(),
 		}
 	}
 
-	systemLayers, err := s.buildSystemLayersForModeWithOptions(effectivePromptMode, codexLayerBuildOptions{
-		SessionID:         req.SessionID,
-		ReviewTask:        reviewTaskRequested,
-		CompactTask:       compactTaskRequested,
-		MemoryTask:        memoryTaskRequested,
-		CollaborationMode: collaborationMode,
-	})
+	runtimeSnapshot := s.buildTurnRuntimeSnapshotForInput(
+		effectivePromptMode,
+		req.Input,
+		req.SessionID,
+		resolvedCollaborationMode,
+		collaborationTransition.Event,
+	)
+	turnRuntimeToolSet := parseTurnRuntimeToolSetFromBizParams(req.BizParams)
+	runtimeSnapshot = s.applyRuntimeToolSetToSnapshot(runtimeSnapshot, sessionRuntimeToolSet, turnRuntimeToolSet)
+
+	systemLayers, err := s.buildSystemLayersForTurnRuntime(runtimeSnapshot)
 	if err != nil {
-		errorCode, errorMessage := promptUnavailableErrorForMode(effectivePromptMode)
+		errorCode, errorMessage := promptUnavailableErrorForMode(runtimeSnapshot.Mode.PromptMode)
 		return domain.AgentProcessResponse{}, &ports.AgentProcessError{
 			Status:  http.StatusInternalServerError,
 			Code:    errorCode,
@@ -176,6 +196,19 @@ func (s *Server) processAgentCore(
 			}
 			state.Chats[chatID] = chat
 		}
+		if runtimeSnapshot.Mode.PromptMode == promptModeCodex {
+			chat := state.Chats[chatID]
+			if chat.Meta == nil {
+				chat.Meta = map[string]interface{}{}
+			}
+			chat.Meta[chatMetaCollaborationModeKey] = runtimeSnapshot.Mode.CollaborationMode
+			if collaborationTransition.Event != "" {
+				chat.Meta[chatMetaCollaborationLastEventKey] = collaborationTransition.Event
+				chat.Meta[chatMetaCollaborationEventSourceKey] = collaborationTransition.Source
+				chat.Meta[chatMetaCollaborationUpdatedAtKey] = nowISO()
+			}
+			state.Chats[chatID] = chat
+		}
 		for _, input := range req.Input {
 			state.Histories[chatID] = append(state.Histories[chatID], domain.RuntimeMessage{
 				ID:      newID("msg"),
@@ -201,7 +234,12 @@ func (s *Server) processAgentCore(
 	if toolRawRequest == nil {
 		toolRawRequest = map[string]interface{}{}
 	}
-	requestedToolCall, hasToolCall, err := parseToolCall(req.BizParams, toolRawRequest, effectivePromptMode)
+	requestedToolCall, hasToolCall, err := parseToolCall(
+		req.BizParams,
+		toolRawRequest,
+		runtimeSnapshot.Mode.PromptMode,
+		runtimeSnapshot.AvailableTools,
+	)
 	if err != nil {
 		return domain.AgentProcessResponse{}, &ports.AgentProcessError{
 			Status:  http.StatusBadRequest,
@@ -264,28 +302,31 @@ func (s *Server) processAgentCore(
 		}
 	}
 
-	completedEventMeta := buildCompletedModelRequestMeta(effectivePromptMode, systemLayers, effectiveInput, generateConfig)
+	completedEventMeta := buildCompletedModelRequestMeta(runtimeSnapshot.Mode.PromptMode, systemLayers, effectiveInput, generateConfig)
 	emitEvent := func(evt domain.AgentEvent) {
 		evt = withCompletedEventMeta(evt, completedEventMeta)
 		if emit != nil {
 			emit(evt)
 		}
 	}
+	toolDefinitions := s.listToolDefinitionsForTurnRuntime(runtimeSnapshot)
 
 	processResult, processErr := s.getAgentService().Process(
-		ctx,
+		withTurnRuntimeToolContext(ctx, runtimeSnapshot),
 		agentservice.ProcessParams{
 			Request: req,
 			RequestedToolCall: agentservice.ToolCall{
 				Name:  requestedToolCall.Name,
 				Input: requestedToolCall.Input,
 			},
-			HasToolCall:    hasToolCall,
-			Streaming:      streaming,
-			ReplyChunkSize: replyChunkSizeDefault,
-			GenerateConfig: generateConfig,
-			EffectiveInput: effectiveInput,
-			PromptMode:     effectivePromptMode,
+			HasToolCall:       hasToolCall,
+			Streaming:         streaming,
+			ReplyChunkSize:    replyChunkSizeDefault,
+			GenerateConfig:    generateConfig,
+			EffectiveInput:    effectiveInput,
+			PromptMode:        runtimeSnapshot.Mode.PromptMode,
+			CollaborationMode: runtimeSnapshot.Mode.CollaborationMode,
+			ToolDefinitions:   toolDefinitions,
 		},
 		emitEvent,
 	)
@@ -319,7 +360,7 @@ func (s *Server) processAgentCore(
 
 	_ = s.store.Write(func(state *repo.State) error {
 		state.Histories[chatID] = append(state.Histories[chatID], assistant)
-		if memoryTaskRequested && !hasToolCall {
+		if runtimeSnapshot.Mode.MemoryTask && !hasToolCall {
 			memoryRolloutContents = serializeCodexMemoryRollout(state.Histories[chatID])
 		}
 		chat := state.Chats[chatID]
@@ -352,7 +393,7 @@ func (s *Server) processAgentCore(
 		}
 	}
 
-	if memoryTaskRequested && !hasToolCall {
+	if runtimeSnapshot.Mode.MemoryTask && !hasToolCall {
 		s.startCodexMemoryPipeline(req.SessionID, generateConfig, memoryRolloutContents)
 	}
 

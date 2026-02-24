@@ -101,6 +101,26 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/AgentProcessResponse' }
+  /agent/tool-input-answer:
+    post:
+      summary: Submit answer payload for a pending request_user_input tool call
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AgentToolInputAnswerRequest' }
+      responses:
+        '200':
+          description: accepted
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AgentToolInputAnswerResponse' }
+        '400':
+          description: invalid request
+        '404':
+          description: pending request not found
+        '409':
+          description: pending request ownership mismatch
   /agent/system-layers:
     get:
       parameters:
@@ -108,10 +128,25 @@ paths:
           name: prompt_mode
           schema:
             type: string
-            enum: [default, codex, claude]
+            enum: [default, codex]
         - in: query
           name: task_command
-          schema: { type: string }
+          schema:
+            type: string
+            enum: [review, compact, memory]
+          description: codex mode only
+        - in: query
+          name: collaboration_mode
+          schema:
+            type: string
+            enum: [default, plan, execute, pair_programming]
+          description: codex mode only
+        - in: query
+          name: collaboration_event
+          schema:
+            type: string
+            enum: [set_default, set_plan, set_execute, set_pair_programming]
+          description: codex mode only
         - in: query
           name: session_id
           schema: { type: string }
@@ -143,46 +178,6 @@ paths:
           description: invalid request
         '404':
           description: feature disabled
-  /v1/messages:
-    post:
-      summary: Claude-compatible messages API adapter
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: { $ref: '#/components/schemas/ClaudeCompatMessagesRequest' }
-      responses:
-        '200':
-          description: ok
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/ClaudeCompatMessageResponse' }
-            text/event-stream:
-              schema: { type: string }
-        '400':
-          description: invalid request
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/ClaudeCompatErrorResponse' }
-  /v1/messages/count_tokens:
-    post:
-      summary: Claude-compatible count tokens adapter
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: { $ref: '#/components/schemas/ClaudeCompatMessagesRequest' }
-      responses:
-        '200':
-          description: ok
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/ClaudeCompatCountTokensResponse' }
-        '400':
-          description: invalid request
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/ClaudeCompatErrorResponse' }
   /agent/self/sessions/bootstrap:
     post:
       requestBody:
@@ -765,81 +760,31 @@ components:
           type: array
           items: { $ref: '#/components/schemas/AgentEvent' }
       required: [reply]
-    ClaudeCompatMessage:
+    AgentToolInputAnswer:
       type: object
       properties:
-        role: { type: string, enum: [user, assistant, system, tool] }
-        content:
-          oneOf:
-            - type: string
-            - type: array
-              items:
-                type: object
-                additionalProperties: true
-      required: [role, content]
-    ClaudeCompatMessagesRequest:
+        answers:
+          type: array
+          items: { type: string }
+      required: [answers]
+    AgentToolInputAnswerRequest:
       type: object
       properties:
-        model: { type: string, minLength: 1 }
-        max_tokens: { type: integer, minimum: 1 }
-        messages:
-          type: array
-          minItems: 1
-          items: { $ref: '#/components/schemas/ClaudeCompatMessage' }
-        system:
-          nullable: true
-        tools:
-          type: array
-          items:
-            type: object
-            additionalProperties: true
-        metadata:
+        request_id: { type: string, minLength: 1 }
+        session_id: { type: string }
+        user_id: { type: string }
+        channel: { type: string }
+        answers:
           type: object
-          additionalProperties: true
-        stream: { type: boolean, default: false }
-      required: [model, max_tokens, messages]
-    ClaudeCompatUsage:
+          additionalProperties:
+            $ref: '#/components/schemas/AgentToolInputAnswer'
+      required: [request_id, answers]
+    AgentToolInputAnswerResponse:
       type: object
       properties:
-        input_tokens: { type: integer, minimum: 0 }
-        cache_creation_input_tokens: { type: integer, minimum: 0 }
-        cache_read_input_tokens: { type: integer, minimum: 0 }
-        output_tokens: { type: integer, minimum: 0 }
-        service_tier: { type: string }
-      required: [input_tokens, cache_creation_input_tokens, cache_read_input_tokens, output_tokens, service_tier]
-    ClaudeCompatMessageResponse:
-      type: object
-      properties:
-        id: { type: string, minLength: 1 }
-        type: { type: string, enum: [message] }
-        role: { type: string, enum: [assistant] }
-        model: { type: string, minLength: 1 }
-        content:
-          type: array
-          items:
-            type: object
-            additionalProperties: true
-        stop_reason: { type: string }
-        stop_sequence:
-          nullable: true
-        usage: { $ref: '#/components/schemas/ClaudeCompatUsage' }
-      required: [id, type, role, model, content, stop_reason, usage]
-    ClaudeCompatErrorResponse:
-      type: object
-      properties:
-        type: { type: string, enum: [error] }
-        error:
-          type: object
-          properties:
-            type: { type: string }
-            message: { type: string }
-          required: [type, message]
-      required: [type, error]
-    ClaudeCompatCountTokensResponse:
-      type: object
-      properties:
-        input_tokens: { type: integer, minimum: 0 }
-      required: [input_tokens]
+        accepted: { type: boolean }
+        request_id: { type: string }
+      required: [accepted, request_id]
     ChatActiveLLMOverride:
       type: object
       properties:
@@ -856,7 +801,7 @@ components:
         first_input: { type: string, minLength: 1 }
         prompt_mode:
           type: string
-          enum: [default, codex, claude]
+          enum: [default, codex]
         stream: { type: boolean, default: false }
       required: [user_id, first_input]
     SelfBootstrapResponse:

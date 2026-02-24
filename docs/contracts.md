@@ -5,8 +5,6 @@
 - `/runtime-config`
 - `/chats`, `/chats/{chat_id}`, `/chats/batch-delete`
 - `/agent/process`
-- `/v1/messages`（Claude-compatible 适配入口）
-- `/v1/messages/count_tokens`（Claude-compatible token 预估）
 - `/agent/system-layers`
 - `/agent/self/sessions/bootstrap`
 - `/agent/self/sessions/{session_id}/model`
@@ -90,7 +88,7 @@
 | Model Provider | 对接模型 API，返回文本与工具调用 | `apps/gateway/internal/runner/runner.go` | `domain.AgentProcessRequest + runner.GenerateConfig + []runner.ToolDefinition` | `runner.TurnResult` | `runner.RunnerError{code=provider_*}` |
 | Channel | 把最终文本分发到外部渠道 | `apps/gateway/internal/app/server.go` | `ctx + user_id + session_id + text + channel_cfg` | `error` | `channel_not_supported/channel_disabled/channel_dispatch_failed` |
 | Tool | 执行本地工具调用 | `apps/gateway/internal/app/server.go` | `plugin.ToolCommand` | `plugin.ToolResult` | `tool_not_supported/tool_invoke_failed/tool_invalid_result` |
-| Prompt Source | 解析系统层提示词来源（文件/目录/catalog） | `apps/gateway/internal/service/systemprompt`（Codex 由 `service/codexprompt`） | `prompt_mode + task_command + session_id + runtime env` | `[]systemprompt.Layer` | `*_prompt_unavailable` |
+| Prompt Source | 解析系统层提示词来源（文件/目录/catalog） | `apps/gateway/internal/service/systemprompt` | `prompt_mode + session_id + runtime env` | `[]systemprompt.Layer` | `*_prompt_unavailable` |
 | Cron Node | 执行 workflow 节点（`text_event/delay/if_event/...`） | `apps/gateway/internal/service/cron/service.go` | `ctx + CronJobSpec + CronWorkflowNode` | `CronNodeResult` | `unsupported workflow node type`/节点执行错误 |
 
 ### 1) Model Provider
@@ -329,7 +327,6 @@ func (s *FileSource) Build(_ context.Context, _ BuildRequest) ([]Layer, error) {
 ```
 
 接入建议：
-- `NEXTAI_CODEX_PROMPT_SOURCE=file|catalog` 作为 source selector。
 - source 内部失败返回 error；上层统一映射到 `{ error: { code, message, details } }`。
 
 ### 5) Cron Node
@@ -506,9 +503,8 @@ func (h *TextNodeHandler) Execute(
 - New read-only endpoint:
   - `GET /agent/system-layers`
   - 可选 query：
-    - `prompt_mode=default|codex|claude`（默认 `default`）
-    - `task_command=review|compact|memory|plan|execute|pair_programming`（仅 `prompt_mode=codex` 生效，用于对齐 slash 命令场景的系统层估算）
-    - `session_id=<chat-session-id>`（可选，主要用于 `task_command=memory` 的模板变量对齐）
+    - `prompt_mode=default|codex`（默认 `default`）
+    - `session_id=<chat-session-id>`（可选）
   - Purpose: return effective injected layers and token estimate used for this runtime.
 
 Sample response:
@@ -536,16 +532,11 @@ Sample response:
 - 若 `prompt_mode` 非法，返回：
   - `400 invalid_request`
   - `message=invalid prompt_mode`
-- 若 `task_command` 非法（仅 codex 模式校验），返回：
-  - `400 invalid_request`
-  - `message=invalid task_command`
 
 ### Feature flags
 - `NEXTAI_ENABLE_PROMPT_TEMPLATES` (default: `false`).
 - `NEXTAI_ENABLE_PROMPT_CONTEXT_INTROSPECT` (default: `false`).
-- `NEXTAI_ENABLE_CODEX_MODE_V2` (default: `false`).
-- `NEXTAI_CODEX_PROMPT_SOURCE` (default: `file`，可选 `file|catalog`)。
-- `NEXTAI_CODEX_PROMPT_SHADOW_COMPARE` (default: `false`，仅 `file` 主路径时启用并行对比日志)。
+- `NEXTAI_ENABLE_CODEX_MODE_V2` / `NEXTAI_CODEX_PROMPT_SOURCE` / `NEXTAI_CODEX_PROMPT_SHADOW_COMPARE`：历史兼容字段，当前版本不影响 `prompt_mode` 行为。
 
 ## Runtime Config Endpoint (2026-02)
 - Gateway 提供公开只读接口（不含敏感信息）：`GET /runtime-config`。
@@ -564,12 +555,12 @@ Sample response:
 - 字段来源：
   - `features.prompt_templates` <- `NEXTAI_ENABLE_PROMPT_TEMPLATES`
   - `features.prompt_context_introspect` <- `NEXTAI_ENABLE_PROMPT_CONTEXT_INTROSPECT`
-  - `features.codex_mode_v2` <- `NEXTAI_ENABLE_CODEX_MODE_V2`
+  - `features.codex_mode_v2` <- 历史兼容位（保留返回，当前不驱动运行时注入路径）
 - Web 侧特性开关优先级：`query > localStorage > runtime-config > false`。
 
 ## Prompt Mode（会话级，2026-02）
 - `POST /agent/process` 支持可选字段：`biz_params.prompt_mode`。
-- 枚举值：`default` | `codex` | `claude`。
+- 枚举值：`default` | `codex`。
 - 非法值（包含非字符串或不在枚举内）返回：
   - `400 invalid_request`
   - `message=invalid prompt_mode`
@@ -582,68 +573,27 @@ Sample response:
   2. 会话 `meta.prompt_mode`
   3. `default`
 
+## Collaboration Mode（历史兼容）
+- 当前版本不支持 `prompt_mode=codex`。
+- 显式携带 `biz_params.collaboration_mode` / `biz_params.collaboration_event` / `biz_params.collaboration.{mode|event}` 时，返回：
+  - `400 invalid_request`
+  - `message=collaboration mode is only supported when prompt_mode=codex`
+
 ### 系统层注入规则
 - `prompt_mode=default`：
   - 维持原行为（`AGENTS + ai-tools` 分层注入）。
-- `prompt_mode=codex`：
-  - 必选注入 `prompts/codex/codex-rs/core/prompt.md`（codex base）。
-  - 当 `NEXTAI_ENABLE_CODEX_MODE_V2=false`（`mode_variant=codex_v1`）：
-    - 注入 `codex_local_policy_system`（`prompts/AGENTS.md`）以覆盖本地身份与策略约束。
-    - 仅当 `NEXTAI_ENABLE_PROMPT_TEMPLATES=true` 时追加 codex 模板层。
-  - 当 `NEXTAI_ENABLE_CODEX_MODE_V2=true`（`mode_variant=codex_v2`）：
-    - 按确定性顺序尝试注入：
-      1. `codex_base_system`（必选）
-      2. `codex_orchestrator_system`（可选）
-      3. `codex_model_instructions_system`（可选，模板渲染）
-      4. `codex_collaboration_default_system`（可选，模板渲染）
-      5. `codex_experimental_collab_system`（可选）
-      6. `codex_local_policy_system`（可选，`prompts/AGENTS.md`）
-      7. `codex_tool_guide_system`（可选，`prompts/ai-tools.md` + legacy fallback）
-    - 模板变量标准化来源：
-      - `personality` <- `prompts/codex/codex-rs/core/templates/personalities/gpt-5.2-codex_pragmatic.md`
-      - `KNOWN_MODE_NAMES` <- 当前支持模式名拼接（非硬编码）
-      - `REQUEST_USER_INPUT_AVAILABILITY` <- 基于 mode 能力生成
-    - V2 在编排末尾执行内容归一化去重（优先级：codex 核心层 > 本地策略层 > 工具层）。
-  - `codex_model_instructions_system` 来源可切换（层顺序不变）：
-    - `NEXTAI_CODEX_PROMPT_SOURCE=file`：使用 `prompts/codex/codex-rs/core/templates/model_instructions/gpt-5.2-codex_instructions_template.md` + personality 渲染（兼容现有行为）。
-    - `NEXTAI_CODEX_PROMPT_SOURCE=catalog`：使用 `prompts/codex/models.runtime.json#<slug>`；`slug` 优先读取当前 active model，缺省回退 `gpt-5.2-codex`；`personality` 默认 `pragmatic`。
-  - 当 `NEXTAI_CODEX_PROMPT_SOURCE=file` 且 `NEXTAI_CODEX_PROMPT_SHADOW_COMPARE=true` 时：
-    - Gateway 并行计算 catalog 结果并比较规范化内容 hash。
-    - 仅记录日志 `codex_prompt_shadow_diff`（含 `session_id/model_slug/file_hash/catalog_hash/diff_reason`），不改变接口响应。
-  - 两个变体都不叠加 default 模式的系统层。
-- `prompt_mode=claude`：
-  - `claude_v1` 现已替换为 reverse 对齐实现（对外 `mode_variant` 不变）。
-  - 必选按顺序注入（四层）：
-    1. `claude_identity_system`（`prompts/claude/claude-code-reverse/results/prompts/system-identity.prompt.md`）
-    2. `claude_workflow_system`（`prompts/claude/claude-code-reverse/results/prompts/system-workflow.prompt.md`）
-    3. `claude_reminder_start_system`（`prompts/claude/claude-code-reverse/results/prompts/system-reminder-start.prompt.md`）
-    4. `claude_reminder_end_system`（`prompts/claude/claude-code-reverse/results/prompts/system-reminder-end.prompt.md`）
-  - 可选追加：
-    - `claude_nextai_tool_adapter_system`（`prompts/claude/claude-code-reverse/tool-adapter-nextai.md`），用于 Claude 工具术语到 NextAI 工具名映射。
-  - `mode_variant=claude_v1`，并在编排末尾执行内容归一化去重。
-  - 不叠加 default/codex 的系统层。
 
 ### 可观测字段
 - `GET /agent/system-layers` 保持原结构兼容，并新增可选字段：
-  - 顶层 `mode_variant`: `default` | `codex_v1` | `codex_v2` | `claude_v1`
+  - 顶层 `mode_variant`: `default` | `codex_v1` | `codex_v2`
   - `layers[].layer_hash`: 每层归一化内容 hash（用于漂移排查）
 
 ### 错误语义
-- `prompt_mode=codex` 且 codex base 文件缺失或为空时返回：
-  - `500 codex_prompt_unavailable`
-  - `message=codex prompt is unavailable`
-- `prompt_mode=claude` 且 Claude 必选层文件缺失或为空时返回：
-  - `500 claude_prompt_unavailable`
-  - `message=claude prompt is unavailable`
 - `prompt_mode=default` 继续沿用既有系统层错误语义（如 `ai_tool_guide_unavailable`）。
-- V2 可选层（local policy/tool guide/模板层）缺失或渲染失败仅 warning + 跳过，不阻塞主请求。
-
-### 回滚语义
-- 关闭 `NEXTAI_ENABLE_CODEX_MODE_V2` 可立即回退到 `codex_v1` 行为，无需变更前端协议。
 
 ## Provider Tool Routing（2026-02 A 档进阶集）
 
-- 生效范围：provider tool-call 执行路径（`prompt_mode=default|codex|claude`）。
+- 生效范围：provider tool-call 执行路径（`prompt_mode=default|codex`）。
 - 手工入口（`biz_params.tool` 与顶层快捷键）仍保持严格 `items` 契约，不放宽格式校验。
 
 ### 注册表能力声明（Capability-Driven）
@@ -758,18 +708,7 @@ curl -sS -X PUT http://127.0.0.1:8088/models/active \
   -d '{"provider_id":"openai","model":"gpt-4o-mini"}'
 ```
 
-### 4) 提示词模式不可用（`codex_prompt_unavailable` / `claude_prompt_unavailable`）
-- 典型现象：
-  - `500 codex_prompt_unavailable`
-  - `500 claude_prompt_unavailable`
-- 快速排查：
-  - 检查对应提示词文件是否存在且非空：
-    - `prompts/codex/codex-rs/core/prompt.md`
-    - `prompts/claude/claude-code-reverse/results/prompts/system-identity.prompt.md`
-- 修复动作：
-  - 补齐文件后重启网关。
-
-### 5) 重启时请求中断
+### 4) 重启时请求中断
 - 现象：重启窗口内个别长请求失败。
 - 原因：请求耗时超过优雅停机窗口，被强制关闭。
 - 修复动作：

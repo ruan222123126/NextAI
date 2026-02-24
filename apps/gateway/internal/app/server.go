@@ -67,12 +67,6 @@ const (
 	aiToolsGuideLegacyV0RelativePath     = "docs/AI/AGENTS.md"
 	aiToolsGuideLegacyV1RelativePath     = "docs/AI/ai-tools.md"
 	aiToolsGuideLegacyV2RelativePath     = "docs/ai-tools.md"
-	claudeReversePromptRootRelativePath  = "prompts/claude/claude-code-reverse/results/prompts"
-	claudeIdentityPromptRelativePath     = claudeReversePromptRootRelativePath + "/system-identity.prompt.md"
-	claudeWorkflowPromptRelativePath     = claudeReversePromptRootRelativePath + "/system-workflow.prompt.md"
-	claudeReminderStartRelativePath      = claudeReversePromptRootRelativePath + "/system-reminder-start.prompt.md"
-	claudeReminderEndRelativePath        = claudeReversePromptRootRelativePath + "/system-reminder-end.prompt.md"
-	claudeNextAIToolAdapterRelativePath  = "prompts/claude/claude-code-reverse/tool-adapter-nextai.md"
 	codexBasePromptRelativePath          = "prompts/codex/codex-rs/core/prompt.md"
 	codexOrchestratorRelativePath        = "prompts/codex/codex-rs/core/templates/agents/orchestrator.md"
 	codexModelTemplateRelativePath       = "prompts/codex/codex-rs/core/templates/model_instructions/gpt-5.2-codex_instructions_template.md"
@@ -101,11 +95,9 @@ const (
 	defaultCodexPersonality              = codexpromptservice.PersonalityPragmatic
 	promptModeDefault                    = "default"
 	promptModeCodex                      = "codex"
-	promptModeClaude                     = "claude"
 	promptModeVariantDefault             = "default"
 	promptModeVariantCodexV1             = "codex_v1"
 	promptModeVariantCodexV2             = "codex_v2"
-	promptModeVariantClaudeV1            = "claude_v1"
 	collaborationModeDefaultName         = "Default"
 	collaborationModePlanName            = "Plan"
 	collaborationModeExecuteName         = "Execute"
@@ -124,9 +116,6 @@ const (
 	reviewTaskCommand     = "/review"
 	compactTaskCommand    = "/compact"
 	memoryTaskCommand     = "/memory"
-	planTaskCommand       = "/plan"
-	executeTaskCommand    = "/execute"
-	pairTaskCommand       = "/pair_programming"
 	contextResetReply     = "上下文已清理，已开始新会话。"
 
 	defaultProcessChannel = "console"
@@ -176,10 +165,14 @@ type Server struct {
 	workspaceService    *workspaceservice.Service
 	codexPromptResolver codexpromptservice.CodexInstructionResolver
 
-	disabledTools map[string]struct{}
-	qqInboundMu   sync.RWMutex
-	memoryMu      sync.Mutex
-	qqInbound     qqInboundRuntimeState
+	disabledTools    map[string]struct{}
+	qqInboundMu      sync.RWMutex
+	memoryMu         sync.Mutex
+	userInputMu      sync.Mutex
+	subAgentMu       sync.Mutex
+	qqInbound        qqInboundRuntimeState
+	pendingUserInput map[string]*pendingUserInputRequest
+	subAgents        map[string]*managedSubAgent
 
 	cronStop chan struct{}
 	cronDone chan struct{}
@@ -187,6 +180,10 @@ type Server struct {
 
 	cronTaskExecutor func(context.Context, domain.CronJobSpec) error
 	closeOnce        sync.Once
+}
+
+func codexPromptModeEnabled() bool {
+	return false
 }
 
 func NewServer(cfg config.Config) (*Server, error) {
@@ -205,11 +202,13 @@ func NewServer(cfg config.Config) (*Server, error) {
 		disabledTools: parseDisabledTools(
 			os.Getenv(disabledToolsEnv),
 		),
-		cronStop: make(chan struct{}),
-		cronDone: make(chan struct{}),
+		pendingUserInput: map[string]*pendingUserInputRequest{},
+		subAgents:        map[string]*managedSubAgent{},
+		cronStop:         make(chan struct{}),
+		cronDone:         make(chan struct{}),
 	}
 	srv.cfg.CodexPromptSource = normalizeCodexPromptSource(srv.cfg.CodexPromptSource)
-	if srv.cfg.CodexPromptSource == codexPromptSourceCatalog || srv.cfg.EnableCodexPromptShadowCompare {
+	if codexPromptModeEnabled() && (srv.cfg.CodexPromptSource == codexPromptSourceCatalog || srv.cfg.EnableCodexPromptShadowCompare) {
 		resolver, resolverErr := codexpromptservice.NewResolver(codexRuntimeCatalogRelativePath)
 		if resolverErr != nil {
 			if srv.cfg.CodexPromptSource == codexPromptSourceCatalog {
@@ -231,7 +230,11 @@ func NewServer(cfg config.Config) (*Server, error) {
 		agentprotocolservice.ToolCapabilityOpenLocal,
 	)
 	srv.registerToolPlugin(plugin.NewEditFileLinesTool(""), agentprotocolservice.ToolCapabilityWrite)
-	srv.registerToolPlugin(plugin.NewFindTool(), agentprotocolservice.ToolCapabilityRead)
+	srv.registerToolPlugin(
+		plugin.NewFindTool(),
+		agentprotocolservice.ToolCapabilityRead,
+		agentprotocolservice.ToolCapabilityFileSearch,
+	)
 	if parseBool(os.Getenv(enableBrowserToolEnv)) {
 		browserTool, toolErr := plugin.NewBrowserTool(strings.TrimSpace(os.Getenv(browserToolAgentDirEnv)))
 		if toolErr != nil {
@@ -243,6 +246,7 @@ func NewServer(cfg config.Config) (*Server, error) {
 			agentprotocolservice.ToolCapabilityOpenURL,
 			agentprotocolservice.ToolCapabilityApproxClick,
 			agentprotocolservice.ToolCapabilityApproxScreenshot,
+			agentprotocolservice.ToolCapabilityWebFetch,
 		)
 	}
 	if parseBool(os.Getenv(enableSearchToolEnv)) {
@@ -250,7 +254,11 @@ func NewServer(cfg config.Config) (*Server, error) {
 		if toolErr != nil {
 			return nil, fmt.Errorf("init search tool failed: %w", toolErr)
 		}
-		srv.registerToolPlugin(searchTool, agentprotocolservice.ToolCapabilityNetwork)
+		srv.registerToolPlugin(
+			searchTool,
+			agentprotocolservice.ToolCapabilityNetwork,
+			agentprotocolservice.ToolCapabilityWebSearch,
+		)
 	}
 	srv.adminService = srv.newAdminService()
 	srv.agentService = srv.newAgentService()
@@ -330,22 +338,21 @@ func (s *Server) Handler() http.Handler {
 				RuntimeConfig: s.handleRuntimeConfig,
 			},
 			Agent: apphttp.AgentHandlers{
-				ListChats:            s.listChats,
-				CreateChat:           s.createChat,
-				BatchDeleteChats:     s.batchDeleteChats,
-				GetChat:              s.getChat,
-				UpdateChat:           s.updateChat,
-				DeleteChat:           s.deleteChat,
-				ClaudeMessages:       s.claudeMessages,
-				ClaudeCountTokens:    s.claudeCountTokens,
-				ProcessAgent:         s.processAgent,
-				GetAgentSystemLayers: s.getAgentSystemLayers,
-				BootstrapSession:     s.bootstrapSession,
-				SetSessionModel:      s.setSessionModel,
-				PreviewMutation:      s.previewMutation,
-				ApplyMutation:        s.applyMutation,
-				ProcessQQInbound:     s.processQQInbound,
-				GetQQInboundState:    s.getQQInboundState,
+				ListChats:             s.listChats,
+				CreateChat:            s.createChat,
+				BatchDeleteChats:      s.batchDeleteChats,
+				GetChat:               s.getChat,
+				UpdateChat:            s.updateChat,
+				DeleteChat:            s.deleteChat,
+				ProcessAgent:          s.processAgent,
+				GetAgentSystemLayers:  s.getAgentSystemLayers,
+				BootstrapSession:      s.bootstrapSession,
+				SetSessionModel:       s.setSessionModel,
+				PreviewMutation:       s.previewMutation,
+				ApplyMutation:         s.applyMutation,
+				SubmitToolInputAnswer: s.submitToolInputAnswer,
+				ProcessQQInbound:      s.processQQInbound,
+				GetQQInboundState:     s.getQQInboundState,
 			},
 			Cron: apphttp.CronHandlers{
 				ListCronJobs:  s.listCronJobs,

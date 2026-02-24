@@ -3,6 +3,7 @@ package plugin
 import (
 	"errors"
 	"os/exec"
+	"strings"
 	"testing"
 )
 
@@ -99,6 +100,84 @@ func TestParseShellItemsRejectsMissingItemsAndLegacyCommand(t *testing.T) {
 	})
 	if !errors.Is(err, ErrShellToolItemsInvalid) {
 		t.Fatalf("expected ErrShellToolItemsInvalid, got=%v", err)
+	}
+}
+
+func TestShellToolSupportsSessionExecAndWriteStdin(t *testing.T) {
+	tool := NewShellTool()
+
+	execResult, err := tool.Invoke(ToolCommand{
+		Cmd:         "cat",
+		TTY:         true,
+		YieldTimeMS: 100,
+	})
+	if err != nil {
+		t.Fatalf("exec invoke failed: %v", err)
+	}
+	execMap, err := execResult.ToMap()
+	if err != nil {
+		t.Fatalf("convert exec result failed: %v", err)
+	}
+	sessionID := intFromAny(execMap["session_id"])
+	if sessionID <= 0 {
+		t.Fatalf("expected session_id > 0, got=%#v", execMap["session_id"])
+	}
+	t.Cleanup(func() { tool.releaseSession(sessionID) })
+
+	writeResult, err := tool.Invoke(ToolCommand{
+		SessionID:   sessionID,
+		Chars:       "hello\n",
+		YieldTimeMS: 600,
+	})
+	if err != nil {
+		t.Fatalf("write_stdin invoke failed: %v", err)
+	}
+	writeMap, err := writeResult.ToMap()
+	if err != nil {
+		t.Fatalf("convert write result failed: %v", err)
+	}
+	if got := strings.TrimSpace(stringFromAny(writeMap["output"])); got != "hello" {
+		t.Fatalf("output=%q want=hello", got)
+	}
+	if got := intFromAny(writeMap["session_id"]); got != sessionID {
+		t.Fatalf("session_id=%v want=%d", writeMap["session_id"], sessionID)
+	}
+}
+
+func TestShellToolWriteStdinRejectsUnknownSession(t *testing.T) {
+	tool := NewShellTool()
+	_, err := tool.Invoke(ToolCommand{SessionID: 99999})
+	if !errors.Is(err, ErrShellToolSessionNotFound) {
+		t.Fatalf("expected ErrShellToolSessionNotFound, got=%v", err)
+	}
+}
+
+func TestShellToolWriteStdinRejectsNonTTYInput(t *testing.T) {
+	tool := NewShellTool()
+	execResult, err := tool.Invoke(ToolCommand{
+		Cmd:         `read line; printf "%s" "$line"`,
+		TTY:         false,
+		YieldTimeMS: 100,
+	})
+	if err != nil {
+		t.Fatalf("exec invoke failed: %v", err)
+	}
+	execMap, err := execResult.ToMap()
+	if err != nil {
+		t.Fatalf("convert exec result failed: %v", err)
+	}
+	sessionID := intFromAny(execMap["session_id"])
+	if sessionID <= 0 {
+		t.Fatalf("expected session_id > 0, got=%#v", execMap["session_id"])
+	}
+	t.Cleanup(func() { tool.releaseSession(sessionID) })
+
+	_, err = tool.Invoke(ToolCommand{
+		SessionID: sessionID,
+		Chars:     "hello\n",
+	})
+	if !errors.Is(err, ErrShellToolStdinUnsupported) {
+		t.Fatalf("expected ErrShellToolStdinUnsupported, got=%v", err)
 	}
 }
 

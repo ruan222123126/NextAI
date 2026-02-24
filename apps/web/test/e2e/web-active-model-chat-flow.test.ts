@@ -64,6 +64,7 @@ describe("web e2e: auto activate model then send chat", () => {
   afterEach(() => {
     vi.restoreAllMocks();
     globalThis.fetch = originalFetch;
+    delete (window as typeof window & { __NEXTAI_STREAM_RETRY_DELAY_MS__?: number }).__NEXTAI_STREAM_RETRY_DELAY_MS__;
     document.documentElement.innerHTML = "<head></head><body></body>";
   });
 
@@ -382,9 +383,7 @@ describe("web e2e: auto activate model then send chat", () => {
     expect(sendButton.getAttribute("aria-label")).toBe("发送消息");
   });
 
-  it("输入 / 会展开 slash 面板并支持键盘选择命令", async () => {
-    let processCalled = false;
-
+  it("协作模式选择器在当前模式下保持隐藏且禁用", async () => {
     globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const rawURL = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
       const url = new URL(rawURL);
@@ -406,48 +405,18 @@ describe("web e2e: auto activate model then send chat", () => {
         });
       }
 
-      if (url.pathname === "/agent/process" && method === "POST") {
-        processCalled = true;
-        return new Response("data: [DONE]\n\n", {
-          status: 200,
-          headers: {
-            "content-type": "text/event-stream",
-          },
-        });
-      }
-
       throw new Error(`unexpected request: ${method} ${url.pathname}`);
     }) as typeof globalThis.fetch;
 
     await import("../../src/main.ts");
 
-    const messageInput = document.getElementById("message-input") as HTMLTextAreaElement;
-    const slashPanel = document.getElementById("composer-slash-panel") as HTMLElement;
-    const slashList = document.getElementById("composer-slash-list") as HTMLUListElement;
-
-    messageInput.focus();
-    messageInput.value = "/";
-    messageInput.dispatchEvent(new Event("input", { bubbles: true }));
-
-    await waitFor(() => !slashPanel.classList.contains("is-hidden"));
-    const options = Array.from(slashList.querySelectorAll<HTMLButtonElement>("button[data-composer-slash-index]"));
-    expect(options.length).toBeGreaterThan(1);
-    const optionTexts = options.map((item) => item.textContent ?? "");
-    expect(optionTexts.some((text) => text.includes("/shell"))).toBe(true);
-    expect(optionTexts.some((text) => text.includes("/compact"))).toBe(true);
-    expect(optionTexts.some((text) => text.includes("/memory"))).toBe(true);
-    expect(optionTexts.some((text) => text.includes("/prompts:human-readable"))).toBe(true);
-    expect(optionTexts.some((text) => text.includes("/execute"))).toBe(true);
-    expect(optionTexts.some((text) => text.includes("/pair_programming"))).toBe(true);
-
-    messageInput.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true, cancelable: true }));
-    messageInput.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
-
-    expect(messageInput.value).toBe("/prompts:check-fix ");
-    expect(slashPanel.classList.contains("is-hidden")).toBe(true);
-
-    await new Promise((resolve) => setTimeout(resolve, 80));
-    expect(processCalled).toBe(false);
+    const promptModeSelect = document.getElementById("chat-prompt-mode-select") as HTMLSelectElement;
+    const collaborationModeSelect = document.getElementById("chat-collaboration-mode-select") as HTMLSelectElement;
+    const collaborationModeLabel = collaborationModeSelect.closest<HTMLElement>(".chat-prompt-mode-toggle");
+    expect(collaborationModeLabel).not.toBeNull();
+    expect(promptModeSelect.value).toBe("default");
+    expect(collaborationModeSelect.disabled).toBe(true);
+    expect(collaborationModeLabel?.hidden).toBe(true);
   });
 
   it("switches active model from composer toolbar provider and model selectors", async () => {
@@ -928,308 +897,6 @@ describe("web e2e: auto activate model then send chat", () => {
       const text = document.getElementById("composer-token-estimate")?.textContent ?? "";
       return text.includes("0.5k/32.0k");
     });
-  });
-
-  it("切换 prompt_mode 后会按新模式重载 system layer token 估算", async () => {
-    const requestedModes: string[] = [];
-    let defaultModeCalls = 0;
-
-    globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-      const rawURL = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
-      const url = new URL(rawURL);
-      const method = (init?.method ?? "GET").toUpperCase();
-
-      if (url.pathname === "/runtime-config" && method === "GET") {
-        return jsonResponse({
-          features: {
-            prompt_templates: false,
-            prompt_context_introspect: true,
-          },
-        });
-      }
-
-      if (url.pathname === "/chats" && method === "GET") {
-        return jsonResponse([]);
-      }
-
-      if (url.pathname === "/models/catalog" && method === "GET") {
-        return jsonResponse({
-          providers: [
-            {
-              id: "openai",
-              name: "OPENAI",
-              display_name: "OpenAI",
-              openai_compatible: true,
-              api_key_prefix: "OPENAI_API_KEY",
-              models: [{ id: "gpt-4o-mini", name: "gpt-4o-mini", limit: { context: 32000 } }],
-              allow_custom_base_url: true,
-              enabled: true,
-              has_api_key: true,
-              current_api_key: "sk-***",
-              current_base_url: "https://api.openai.com/v1",
-            },
-          ],
-          provider_types: [{ id: "openai", display_name: "openai" }],
-          defaults: {
-            openai: "gpt-4o-mini",
-          },
-          active_llm: {
-            provider_id: "openai",
-            model: "gpt-4o-mini",
-          },
-        });
-      }
-
-      if (url.pathname === "/agent/system-layers" && method === "GET") {
-        const promptMode = url.searchParams.get("prompt_mode") ?? "default";
-        requestedModes.push(promptMode);
-        let total = 1000;
-        if (promptMode === "codex") {
-          total = 11000;
-        } else {
-          defaultModeCalls += 1;
-          if (defaultModeCalls >= 2) {
-            total = 2000;
-          }
-        }
-        return jsonResponse({
-          version: "v1",
-          mode_variant: promptMode === "codex" ? "codex_v1" : "default",
-          layers: [],
-          estimated_tokens_total: total,
-        });
-      }
-
-      if (url.pathname.startsWith("/workspace/files/") && method === "GET") {
-        return jsonResponse({ error: { code: "not_found", message: "not found" } }, 404);
-      }
-
-      throw new Error(`unexpected request: ${method} ${url.pathname}`);
-    }) as typeof globalThis.fetch;
-
-    await import("../../src/main.ts");
-
-    await waitFor(() => requestedModes.includes("default"), 4000);
-    await waitFor(() => {
-      const text = document.getElementById("composer-token-estimate")?.textContent ?? "";
-      return text.includes("1.0k/32.0k");
-    });
-
-    const promptModeSelect = document.getElementById("chat-prompt-mode-select") as HTMLSelectElement;
-    promptModeSelect.value = "codex";
-    promptModeSelect.dispatchEvent(new Event("change", { bubbles: true }));
-
-    await waitFor(() => requestedModes.includes("codex"), 4000);
-    await waitFor(() => {
-      const text = document.getElementById("composer-token-estimate")?.textContent ?? "";
-      return text.includes("11.0k/32.0k");
-    });
-
-    promptModeSelect.value = "default";
-    promptModeSelect.dispatchEvent(new Event("change", { bubbles: true }));
-
-    await waitFor(() => defaultModeCalls >= 2, 4000);
-    await waitFor(() => {
-      const text = document.getElementById("composer-token-estimate")?.textContent ?? "";
-      return text.includes("2.0k/32.0k");
-    });
-  });
-
-  it("首个 system layer 请求未完成时切换 prompt_mode 仍会刷新到新模式估算", async () => {
-    let pendingDefaultResolve: ((value: Response) => void) | null = null;
-    let defaultModeCalls = 0;
-    let codexModeCalls = 0;
-
-    globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-      const rawURL = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
-      const url = new URL(rawURL);
-      const method = (init?.method ?? "GET").toUpperCase();
-
-      if (url.pathname === "/runtime-config" && method === "GET") {
-        return jsonResponse({
-          features: {
-            prompt_templates: false,
-            prompt_context_introspect: true,
-          },
-        });
-      }
-
-      if (url.pathname === "/chats" && method === "GET") {
-        return jsonResponse([]);
-      }
-
-      if (url.pathname === "/models/catalog" && method === "GET") {
-        return jsonResponse({
-          providers: [
-            {
-              id: "openai",
-              name: "OPENAI",
-              display_name: "OpenAI",
-              openai_compatible: true,
-              api_key_prefix: "OPENAI_API_KEY",
-              models: [{ id: "gpt-4o-mini", name: "gpt-4o-mini", limit: { context: 32000 } }],
-              allow_custom_base_url: true,
-              enabled: true,
-              has_api_key: true,
-              current_api_key: "sk-***",
-              current_base_url: "https://api.openai.com/v1",
-            },
-          ],
-          provider_types: [{ id: "openai", display_name: "openai" }],
-          defaults: {
-            openai: "gpt-4o-mini",
-          },
-          active_llm: {
-            provider_id: "openai",
-            model: "gpt-4o-mini",
-          },
-        });
-      }
-
-      if (url.pathname === "/agent/system-layers" && method === "GET") {
-        const promptMode = url.searchParams.get("prompt_mode") ?? "default";
-        if (promptMode === "default") {
-          defaultModeCalls += 1;
-          return new Promise<Response>((resolve) => {
-            pendingDefaultResolve = resolve;
-          });
-        }
-        codexModeCalls += 1;
-        return jsonResponse({
-          version: "v1",
-          mode_variant: "codex_v1",
-          layers: [],
-          estimated_tokens_total: 9000,
-        });
-      }
-
-      if (url.pathname.startsWith("/workspace/files/") && method === "GET") {
-        return jsonResponse({ error: { code: "not_found", message: "not found" } }, 404);
-      }
-
-      throw new Error(`unexpected request: ${method} ${url.pathname}`);
-    }) as typeof globalThis.fetch;
-
-    await import("../../src/main.ts");
-    await waitFor(() => pendingDefaultResolve !== null, 4000);
-    expect(defaultModeCalls).toBeGreaterThan(0);
-    const statusLine = document.getElementById("status-line") as HTMLElement;
-    await waitFor(() => (statusLine.textContent ?? "").includes("草稿会话"), 4000);
-
-    const promptModeSelect = document.getElementById("chat-prompt-mode-select") as HTMLSelectElement;
-    promptModeSelect.value = "codex";
-    promptModeSelect.dispatchEvent(new Event("change", { bubbles: true }));
-
-    pendingDefaultResolve?.(
-      jsonResponse({
-        version: "v1",
-        mode_variant: "default",
-        layers: [],
-        estimated_tokens_total: 1000,
-      }),
-    );
-
-    await waitFor(() => codexModeCalls > 0, 4000);
-    await waitFor(() => {
-      const text = document.getElementById("composer-token-estimate")?.textContent ?? "";
-      return text.includes("9.0k/32.0k");
-    }, 4000);
-  });
-
-  it("codex slash 命令会驱动 task_command 级别的 system layer 估算", async () => {
-    const requestedTaskCommands: string[] = [];
-
-    globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-      const rawURL = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
-      const url = new URL(rawURL);
-      const method = (init?.method ?? "GET").toUpperCase();
-
-      if (url.pathname === "/runtime-config" && method === "GET") {
-        return jsonResponse({
-          features: {
-            prompt_templates: false,
-            prompt_context_introspect: true,
-          },
-        });
-      }
-
-      if (url.pathname === "/chats" && method === "GET") {
-        return jsonResponse([]);
-      }
-
-      if (url.pathname === "/models/catalog" && method === "GET") {
-        return jsonResponse({
-          providers: [
-            {
-              id: "openai",
-              name: "OPENAI",
-              display_name: "OpenAI",
-              openai_compatible: true,
-              api_key_prefix: "OPENAI_API_KEY",
-              models: [{ id: "gpt-4o-mini", name: "gpt-4o-mini", limit: { context: 32000 } }],
-              allow_custom_base_url: true,
-              enabled: true,
-              has_api_key: true,
-              current_api_key: "sk-***",
-              current_base_url: "https://api.openai.com/v1",
-            },
-          ],
-          provider_types: [{ id: "openai", display_name: "openai" }],
-          defaults: {
-            openai: "gpt-4o-mini",
-          },
-          active_llm: {
-            provider_id: "openai",
-            model: "gpt-4o-mini",
-          },
-        });
-      }
-
-      if (url.pathname === "/agent/system-layers" && method === "GET") {
-        const taskCommand = url.searchParams.get("task_command") ?? "";
-        requestedTaskCommands.push(taskCommand);
-        const total = taskCommand === "review" ? 7000 : 3000;
-        return jsonResponse({
-          version: "v1",
-          mode_variant: "codex_v1",
-          layers: [],
-          estimated_tokens_total: total,
-        });
-      }
-
-      if (url.pathname.startsWith("/workspace/files/") && method === "GET") {
-        return jsonResponse({ error: { code: "not_found", message: "not found" } }, 404);
-      }
-
-      throw new Error(`unexpected request: ${method} ${url.pathname}`);
-    }) as typeof globalThis.fetch;
-
-    await import("../../src/main.ts");
-
-    const statusLine = document.getElementById("status-line") as HTMLElement;
-    const promptModeSelect = document.getElementById("chat-prompt-mode-select") as HTMLSelectElement;
-    await waitFor(() => (statusLine.textContent ?? "").includes("草稿会话"), 4000);
-
-    const initialRequestCount = requestedTaskCommands.length;
-    promptModeSelect.value = "codex";
-    promptModeSelect.dispatchEvent(new Event("change", { bubbles: true }));
-    await waitFor(() => promptModeSelect.value === "codex", 4000);
-    await waitFor(() => requestedTaskCommands.length > initialRequestCount, 4000);
-
-    await waitFor(() => {
-      const text = document.getElementById("composer-token-estimate")?.textContent ?? "";
-      return text.includes("3.0k/32.0k");
-    }, 4000);
-
-    const messageInput = document.getElementById("message-input") as HTMLTextAreaElement;
-    messageInput.value = "/review check this";
-    messageInput.dispatchEvent(new Event("input", { bubbles: true }));
-
-    await waitFor(() => requestedTaskCommands.includes("review"), 4000);
-    await waitFor(() => {
-      const text = document.getElementById("composer-token-estimate")?.textContent ?? "";
-      return text.includes("7.0k/32.0k");
-    }, 4000);
   });
 
   it("uploads selected files and appends returned paths into composer", async () => {
@@ -2071,7 +1738,7 @@ describe("web e2e: auto activate model then send chat", () => {
     const customModelInput = document.querySelector<HTMLInputElement>('#models-provider-custom-models-rows input[data-custom-model-input="true"]');
     expect(customModelInput).not.toBeNull();
     if (customModelInput) {
-      customModelInput.value = "claude-3-5-sonnet";
+      customModelInput.value = "gpt-4.1-mini";
     }
 
     const aliasRow = document.querySelector<HTMLElement>("#models-provider-aliases-rows .kv-row");
@@ -2127,7 +1794,7 @@ describe("web e2e: auto activate model then send chat", () => {
     const customModelInputs = Array.from(
       document.querySelectorAll<HTMLInputElement>('#models-provider-custom-models-rows input[data-custom-model-input="true"]'),
     );
-    expect(customModelInputs.map((item) => item.value.trim())).toContain("claude-3-5-sonnet");
+    expect(customModelInputs.map((item) => item.value.trim())).toContain("gpt-4.1-mini");
 
     const aliasRows = Array.from(document.querySelectorAll<HTMLElement>("#models-provider-aliases-rows .kv-row"));
     const aliasPairs = aliasRows.map((row) => {

@@ -10,12 +10,15 @@ import (
 )
 
 const (
-	promptModeClaude = "claude"
+	promptModeCodex = "codex"
 
 	ToolCapabilityRead             = "read"
 	ToolCapabilityWrite            = "write"
 	ToolCapabilityExecute          = "execute"
 	ToolCapabilityNetwork          = "network"
+	ToolCapabilityFileSearch       = "file_search"
+	ToolCapabilityWebSearch        = "web_search"
+	ToolCapabilityWebFetch         = "web_fetch"
 	ToolCapabilityOpenLocal        = "open_local"
 	ToolCapabilityOpenURL          = "open_url"
 	ToolCapabilityApproxClick      = "approx_click"
@@ -315,11 +318,16 @@ func ResolvePromptModeFromChatMeta(
 	return mode
 }
 
-func ParseToolCall(bizParams map[string]interface{}, rawRequest map[string]interface{}, promptMode string) (ToolCall, bool, error) {
+func ParseToolCall(
+	bizParams map[string]interface{},
+	rawRequest map[string]interface{},
+	promptMode string,
+	availableToolDefinitionNames []string,
+) (ToolCall, bool, error) {
 	if call, ok, err := ParseBizParamsToolCall(bizParams, promptMode); ok || err != nil {
 		return call, ok, err
 	}
-	return ParseShortcutToolCall(rawRequest, promptMode)
+	return ParseShortcutToolCall(rawRequest, promptMode, availableToolDefinitionNames)
 }
 
 func ParseBizParamsToolCall(bizParams map[string]interface{}, promptMode string) (ToolCall, bool, error) {
@@ -364,21 +372,40 @@ func ParseBizParamsToolCall(bizParams map[string]interface{}, promptMode string)
 	return ToolCall{Name: name, Input: input}, true, nil
 }
 
-func ParseShortcutToolCall(rawRequest map[string]interface{}, promptMode string) (ToolCall, bool, error) {
+func ParseShortcutToolCall(
+	rawRequest map[string]interface{},
+	promptMode string,
+	availableToolDefinitionNames []string,
+) (ToolCall, bool, error) {
 	if len(rawRequest) == 0 {
 		return ToolCall{}, false, nil
 	}
-	shortcuts := []string{
-		"view", "edit", "shell", "browser", "search", "open", "find", "click", "screenshot",
-		"read", "write", "bash", "glob", "grep", "ls", "task", "todowrite", "exitplanmode",
-		"websearch", "webfetch", "multiedit", "notebookread", "notebookedit",
-		"Read", "Write", "Bash", "Glob", "Grep", "LS", "Task", "TodoWrite", "ExitPlanMode",
-		"WebSearch", "WebFetch", "MultiEdit", "NotebookRead", "NotebookEdit", "Edit",
+
+	availableShortcuts := map[string]struct{}{}
+	for _, rawName := range availableToolDefinitionNames {
+		normalized := NormalizeToolNameForPromptMode(rawName, promptMode)
+		if strings.TrimSpace(normalized) == "" {
+			continue
+		}
+		availableShortcuts[normalized] = struct{}{}
 	}
+	if len(availableShortcuts) == 0 {
+		return ToolCall{}, false, nil
+	}
+
+	keys := make([]string, 0, len(rawRequest))
+	for key := range rawRequest {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
 	matched := make([]string, 0, 1)
-	for _, key := range shortcuts {
+	for _, key := range keys {
 		if raw, ok := rawRequest[key]; ok && raw != nil {
-			matched = append(matched, key)
+			normalized := NormalizeToolNameForPromptMode(key, promptMode)
+			if _, allowed := availableShortcuts[normalized]; allowed {
+				matched = append(matched, key)
+			}
 		}
 	}
 	if len(matched) == 0 {
@@ -387,12 +414,12 @@ func ParseShortcutToolCall(rawRequest map[string]interface{}, promptMode string)
 	if len(matched) > 1 {
 		return ToolCall{}, false, errors.New("only one shortcut tool key is allowed")
 	}
-	name := matched[0]
-	input, err := ParseToolPayload(rawRequest[name], name)
+	key := matched[0]
+	input, err := ParseToolPayload(rawRequest[key], key)
 	if err != nil {
 		return ToolCall{}, false, err
 	}
-	return ToolCall{Name: NormalizeToolNameForPromptMode(name, promptMode), Input: input}, true, nil
+	return ToolCall{Name: NormalizeToolNameForPromptMode(key, promptMode), Input: input}, true, nil
 }
 
 func ParseToolPayload(raw interface{}, path string) (map[string]interface{}, error) {
@@ -420,6 +447,8 @@ func NormalizeToolName(name string) string {
 		return "edit"
 	case "exec_command", "functions.exec_command":
 		return "shell"
+	case "write_stdin", "functions.write_stdin":
+		return "shell"
 	case "web_browser", "browser_use", "browser_tool":
 		return "browser"
 	case "web_search", "search_api", "search_tool":
@@ -434,27 +463,105 @@ func NormalizeToolName(name string) string {
 		return "screenshot"
 	case "selfops", "self_ops":
 		return "self_ops"
+	case "spawnagent", "spawn_agent", "functions.spawn_agent":
+		return "spawn_agent"
+	case "sendinput", "send_input", "functions.send_input":
+		return "send_input"
+	case "resumeagent", "resume_agent", "functions.resume_agent":
+		return "resume_agent"
+	case "wait", "functions.wait":
+		return "wait"
+	case "closeagent", "close_agent", "functions.close_agent":
+		return "close_agent"
+	case "requestuserinput", "request_user_input", "functions.request_user_input":
+		return "request_user_input"
+	case "updateplan", "update_plan", "functions.update_plan":
+		return "update_plan"
+	case "applypatch", "apply_patch", "functions.apply_patch":
+		return "apply_patch"
 	default:
 		return name
 	}
 }
 
 func NormalizeToolNameForPromptMode(name string, promptMode string) string {
-	normalized := NormalizeToolName(strings.ToLower(strings.TrimSpace(name)))
-	if !IsClaudePromptMode(promptMode) {
-		return normalized
-	}
-	switch normalized {
-	case "bash", "read", "write", "glob", "grep", "ls", "task", "todowrite", "exitplanmode",
-		"websearch", "webfetch", "multiedit", "notebookread", "notebookedit":
-		return normalized
-	default:
-		return normalized
-	}
+	_ = promptMode
+	return NormalizeToolName(strings.ToLower(strings.TrimSpace(name)))
 }
 
-func IsClaudePromptMode(promptMode string) bool {
-	return strings.EqualFold(strings.TrimSpace(promptMode), promptModeClaude)
+type toolDefinitionBuildSpec struct {
+	Name                    string
+	PromptMode              string
+	RequiredAnyCapabilities []string
+}
+
+var baseToolDefinitionBuildSpecs = []toolDefinitionBuildSpec{
+	{
+		Name:                    "open",
+		RequiredAnyCapabilities: []string{ToolCapabilityOpenLocal, ToolCapabilityOpenURL},
+	},
+	{
+		Name:                    "exec_command",
+		PromptMode:              promptModeCodex,
+		RequiredAnyCapabilities: []string{ToolCapabilityExecute},
+	},
+	{
+		Name:                    "write_stdin",
+		PromptMode:              promptModeCodex,
+		RequiredAnyCapabilities: []string{ToolCapabilityExecute},
+	},
+	{
+		Name:                    "click",
+		RequiredAnyCapabilities: []string{ToolCapabilityApproxClick},
+	},
+	{
+		Name:                    "screenshot",
+		RequiredAnyCapabilities: []string{ToolCapabilityApproxScreenshot},
+	},
+	{
+		Name: "self_ops",
+	},
+	{
+		Name:       "spawn_agent",
+		PromptMode: promptModeCodex,
+	},
+	{
+		Name:       "send_input",
+		PromptMode: promptModeCodex,
+	},
+	{
+		Name:       "resume_agent",
+		PromptMode: promptModeCodex,
+	},
+	{
+		Name:       "wait",
+		PromptMode: promptModeCodex,
+	},
+	{
+		Name:       "close_agent",
+		PromptMode: promptModeCodex,
+	},
+	{
+		Name:       "request_user_input",
+		PromptMode: promptModeCodex,
+	},
+	{
+		Name:       "update_plan",
+		PromptMode: promptModeCodex,
+	},
+	{
+		Name:                    "apply_patch",
+		PromptMode:              promptModeCodex,
+		RequiredAnyCapabilities: []string{ToolCapabilityWrite},
+	},
+}
+
+func (s toolDefinitionBuildSpec) supportsPromptMode(promptMode string) bool {
+	specMode := strings.ToLower(strings.TrimSpace(s.PromptMode))
+	if specMode == "" {
+		return true
+	}
+	return strings.EqualFold(specMode, strings.TrimSpace(promptMode))
 }
 
 func ListToolDefinitionNames(
@@ -474,17 +581,27 @@ func ListToolDefinitionNames(
 			return toolHasCapability(name, capability)
 		}
 		switch capability {
+		case ToolCapabilityExecute:
+			return name == "shell"
+		case ToolCapabilityRead:
+			return name == "view" || name == "find"
+		case ToolCapabilityWrite:
+			return name == "edit"
+		case ToolCapabilityNetwork:
+			return name == "search" || name == "browser"
 		case ToolCapabilityOpenLocal:
 			return name == "view"
 		case ToolCapabilityOpenURL, ToolCapabilityApproxClick, ToolCapabilityApproxScreenshot:
 			return name == "browser"
+		case ToolCapabilityFileSearch:
+			return name == "find"
+		case ToolCapabilityWebSearch:
+			return name == "search"
+		case ToolCapabilityWebFetch:
+			return name == "browser"
 		default:
 			return false
 		}
-	}
-
-	if len(registeredToolNames) == 0 && toolDisabled("self_ops") {
-		return nil
 	}
 
 	nameSet := map[string]struct{}{}
@@ -499,41 +616,34 @@ func ListToolDefinitionNames(
 		nameSet[name] = struct{}{}
 	}
 
-	hasOpenLocal := false
-	hasOpenURL := false
-	hasApproxClick := false
-	hasApproxScreenshot := false
-	for name := range nameSet {
-		if hasCapability(name, ToolCapabilityOpenLocal) {
-			hasOpenLocal = true
+	hasAnyCapability := func(capability string) bool {
+		for name := range nameSet {
+			if hasCapability(name, capability) {
+				return true
+			}
 		}
-		if hasCapability(name, ToolCapabilityOpenURL) {
-			hasOpenURL = true
+		return false
+	}
+	for _, spec := range baseToolDefinitionBuildSpecs {
+		if !spec.supportsPromptMode(promptMode) {
+			continue
 		}
-		if hasCapability(name, ToolCapabilityApproxClick) {
-			hasApproxClick = true
+		if toolDisabled(spec.Name) {
+			continue
 		}
-		if hasCapability(name, ToolCapabilityApproxScreenshot) {
-			hasApproxScreenshot = true
+		if len(spec.RequiredAnyCapabilities) > 0 {
+			enabled := false
+			for _, capability := range spec.RequiredAnyCapabilities {
+				if hasAnyCapability(capability) {
+					enabled = true
+					break
+				}
+			}
+			if !enabled {
+				continue
+			}
 		}
-	}
-
-	if (hasOpenLocal || hasOpenURL) && !toolDisabled("open") {
-		nameSet["open"] = struct{}{}
-	}
-	if hasApproxClick && !toolDisabled("click") {
-		nameSet["click"] = struct{}{}
-	}
-	if hasApproxScreenshot && !toolDisabled("screenshot") {
-		nameSet["screenshot"] = struct{}{}
-	}
-	if !toolDisabled("self_ops") {
-		nameSet["self_ops"] = struct{}{}
-	}
-	if IsClaudePromptMode(promptMode) {
-		for _, name := range ClaudeCompatibleToolDefinitionNames() {
-			nameSet[name] = struct{}{}
-		}
+		nameSet[spec.Name] = struct{}{}
 	}
 
 	out := make([]string, 0, len(nameSet))
@@ -542,26 +652,6 @@ func ListToolDefinitionNames(
 	}
 	sort.Strings(out)
 	return out
-}
-
-func ClaudeCompatibleToolDefinitionNames() []string {
-	return []string{
-		"Bash",
-		"Edit",
-		"ExitPlanMode",
-		"Glob",
-		"Grep",
-		"LS",
-		"MultiEdit",
-		"NotebookEdit",
-		"NotebookRead",
-		"Read",
-		"Task",
-		"TodoWrite",
-		"WebFetch",
-		"WebSearch",
-		"Write",
-	}
 }
 
 func qqMap(raw interface{}) (map[string]interface{}, bool) {

@@ -34,4 +34,10 @@ func TestToolHasDeclaredCapabilityFallsBackToLegacyNameMapping(t *testing.T) {
 	if !srv.toolHasDeclaredCapability("browser", agentprotocolservice.ToolCapabilityApproxClick) {
 		t.Fatalf("expected legacy fallback capability approx_click for browser")
 	}
+	if !srv.toolHasDeclaredCapability("find", agentprotocolservice.ToolCapabilityFileSearch) {
+		t.Fatalf("expected legacy fallback capability file_search for find")
+	}
+	if !srv.toolHasDeclaredCapability("search", agentprotocolservice.ToolCapabilityWebSearch) {
+		t.Fatalf("expected legacy fallback capability web_search for search")
+	}
 }

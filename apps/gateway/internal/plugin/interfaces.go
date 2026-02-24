@@ -24,8 +24,16 @@ type ToolPlugin interface {
 type ToolCommand struct {
 	Items          []ToolCommandItem `json:"items,omitempty"`
 	Command        string            `json:"command,omitempty"`
+	Cmd            string            `json:"cmd,omitempty"`
 	Cwd            string            `json:"cwd,omitempty"`
+	Workdir        string            `json:"workdir,omitempty"`
 	TimeoutSeconds int               `json:"timeout_seconds,omitempty"`
+	YieldTimeMS    int               `json:"yield_time_ms,omitempty"`
+	TTY            bool              `json:"tty,omitempty"`
+	SessionID      int               `json:"session_id,omitempty"`
+	ProcessID      int               `json:"process_id,omitempty"`
+	Chars          string            `json:"chars,omitempty"`
+	ShellMode      string            `json:"_nextai_shell_mode,omitempty"`
 	legacyCommand  bool              `json:"-"`
 }
 
@@ -43,8 +51,16 @@ type ToolCommandItem struct {
 	Pattern        string  `json:"pattern,omitempty"`
 	IgnoreCase     bool    `json:"ignore_case,omitempty"`
 	Command        string  `json:"command,omitempty"`
+	Cmd            string  `json:"cmd,omitempty"`
 	Cwd            string  `json:"cwd,omitempty"`
+	Workdir        string  `json:"workdir,omitempty"`
 	TimeoutSeconds int     `json:"timeout_seconds,omitempty"`
+	YieldTimeMS    int     `json:"yield_time_ms,omitempty"`
+	TTY            bool    `json:"tty,omitempty"`
+	SessionID      int     `json:"session_id,omitempty"`
+	ProcessID      int     `json:"process_id,omitempty"`
+	Chars          string  `json:"chars,omitempty"`
+	ShellMode      string  `json:"_nextai_shell_mode,omitempty"`
 	Query          string  `json:"query,omitempty"`
 	Q              string  `json:"q,omitempty"`
 	Provider       string  `json:"provider,omitempty"`
@@ -88,11 +104,19 @@ func CommandFromMap(input map[string]interface{}) (ToolCommand, error) {
 		return out, nil
 	}
 	out.Command = stringFromAny(input["command"])
+	out.Cmd = stringFromAny(input["cmd"])
 	if _, ok := input["command"]; ok {
 		out.legacyCommand = true
 	}
 	out.Cwd = stringFromAny(input["cwd"])
+	out.Workdir = stringFromAny(input["workdir"])
 	out.TimeoutSeconds = intFromAny(input["timeout_seconds"])
+	out.YieldTimeMS = intFromAny(input["yield_time_ms"])
+	out.TTY = boolFromAny(input["tty"])
+	out.SessionID = intFromAny(input["session_id"])
+	out.ProcessID = intFromAny(input["process_id"])
+	out.Chars = stringFromAny(input["chars"])
+	out.ShellMode = stringFromAny(input["_nextai_shell_mode"])
 
 	rawItems, hasItems := input["items"]
 	if !hasItems || rawItems == nil {
@@ -145,8 +169,16 @@ func commandItemFromMap(entry map[string]interface{}) ToolCommandItem {
 		Pattern:        stringFromAny(entry["pattern"]),
 		IgnoreCase:     boolFromAny(entry["ignore_case"]),
 		Command:        stringFromAny(entry["command"]),
+		Cmd:            stringFromAny(entry["cmd"]),
 		Cwd:            stringFromAny(entry["cwd"]),
+		Workdir:        stringFromAny(entry["workdir"]),
 		TimeoutSeconds: intFromAny(entry["timeout_seconds"]),
+		YieldTimeMS:    intFromAny(entry["yield_time_ms"]),
+		TTY:            boolFromAny(entry["tty"]),
+		SessionID:      intFromAny(entry["session_id"]),
+		ProcessID:      intFromAny(entry["process_id"]),
+		Chars:          stringFromAny(entry["chars"]),
+		ShellMode:      stringFromAny(entry["_nextai_shell_mode"]),
 		Query:          stringFromAny(entry["query"]),
 		Q:              stringFromAny(entry["q"]),
 		Provider:       stringFromAny(entry["provider"]),

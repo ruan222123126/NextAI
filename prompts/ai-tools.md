@@ -23,28 +23,6 @@
 - `search`: `query`, 可选 `provider`, `count`, `timeout_seconds`
 - `find`: `path`(工作区内路径), `pattern`, 可选 `ignore_case`
 
-## Codex 模式兼容（`prompt_mode=codex`）
-
-- 兼容工具名：
-  - `exec_command` / `functions.exec_command` -> `shell`
-  - `view_file_lines` / `view_file_lins` / `view_file` -> `view`
-  - `open` / `find` / `click` / `screenshot` 可直接调用
-- 兼容参数包装：自动解包 `input` / `arguments` / `args`。
-- 兼容别名字段：
-  - `start_line -> start`
-  - `end_line -> end`
-  - `q -> query`
-  - `num_results -> count`
-  - `workdir -> cwd`
-  - `yield_time_ms -> timeout_seconds`（毫秒向上取整秒）
-- 对 `view/edit/shell/browser/search/find`，若给的是单对象，会自动封装为 `{"items":[...]}`
-
-## Claude 模式兼容（`prompt_mode=claude`）
-
-- 沿用同一套工具契约：`arguments` 必须是对象，统一 `{"items":[...]}`。
-- 工具入参别名归一化与单对象自动封装规则与 Codex 模式一致。
-- 建议优先使用 `view/edit/find/shell` 的标准工具名，避免混用非标准别名。
-
 ## 手工请求（推荐）
 
 若手工调用 `POST /agent/process`，使用 `biz_params.tool`：

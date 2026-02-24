@@ -22,7 +22,9 @@ type ProcessParams struct {
 	Request           domain.AgentProcessRequest
 	EffectiveInput    []domain.AgentInputMessage
 	GenerateConfig    runner.GenerateConfig
+	ToolDefinitions   []runner.ToolDefinition
 	PromptMode        string
+	CollaborationMode string
 	HasToolCall       bool
 	RequestedToolCall ToolCall
 	Streaming         bool
@@ -95,6 +97,10 @@ func (s *Service) Process(
 	if replyChunkSize <= 0 {
 		replyChunkSize = 12
 	}
+	toolDefinitions := params.ToolDefinitions
+	if len(toolDefinitions) == 0 {
+		toolDefinitions = s.deps.ToolRuntime.ListToolDefinitions(params.PromptMode)
+	}
 	appendReplyDeltas := func(step int, text string) {
 		for _, chunk := range splitReplyChunks(text, replyChunkSize) {
 			appendEvent(domain.AgentEvent{
@@ -107,20 +113,32 @@ func (s *Service) Process(
 
 	if params.HasToolCall {
 		step := 1
+		rawRequestedName := strings.TrimSpace(params.RequestedToolCall.Name)
+		execName := normalizeProviderToolName(rawRequestedName)
+		if execName == "" {
+			execName = strings.ToLower(rawRequestedName)
+		}
+		if execName == "" {
+			execName = "unknown_tool"
+		}
+		eventToolName := rawRequestedName
+		if eventToolName == "" {
+			eventToolName = execName
+		}
+		toolInput := normalizeDirectToolCallInput(execName, safeMap(params.RequestedToolCall.Input))
+		toolInput = enrichNativeToolInput(execName, toolInput, params.Request, params.PromptMode, params.CollaborationMode, fmt.Sprintf("direct_tool_call_%d", step))
+		eventToolInput := normalizeToolCallEventInput(execName, safeMap(params.RequestedToolCall.Input), toolInput)
+
 		appendEvent(domain.AgentEvent{Type: "step_started", Step: step})
 		appendEvent(domain.AgentEvent{
 			Type: "tool_call",
 			Step: step,
 			ToolCall: &domain.AgentToolCallPayload{
-				Name:  params.RequestedToolCall.Name,
-				Input: safeMap(params.RequestedToolCall.Input),
+				Name:  eventToolName,
+				Input: eventToolInput,
 			},
 		})
-		toolInput := safeMap(params.RequestedToolCall.Input)
-		if strings.EqualFold(strings.TrimSpace(params.RequestedToolCall.Name), "self_ops") {
-			toolInput = enrichSelfOpsToolInput(toolInput, params.Request)
-		}
-		toolReply, err := s.deps.ToolRuntime.ExecuteToolCall(params.PromptMode, params.RequestedToolCall.Name, toolInput)
+		toolReply, err := s.deps.ToolRuntime.ExecuteToolCall(ctx, params.PromptMode, execName, toolInput)
 		if err != nil {
 			status, code, message := s.deps.ErrorMapper.MapToolError(err)
 			return ProcessResult{}, &ProcessError{Status: status, Code: code, Message: message}
@@ -130,7 +148,7 @@ func (s *Service) Process(
 			Type: "tool_result",
 			Step: step,
 			ToolResult: &domain.AgentToolResultPayload{
-				Name:    params.RequestedToolCall.Name,
+				Name:    eventToolName,
 				OK:      true,
 				Summary: summarizeAgentEventText(reply),
 			},
@@ -156,7 +174,7 @@ func (s *Service) Process(
 			runErr error
 		)
 		if params.Streaming {
-			turn, runErr = s.deps.Runner.GenerateTurnStream(ctx, turnReq, generateConfig, s.deps.ToolRuntime.ListToolDefinitions(params.PromptMode), func(delta string) {
+			turn, runErr = s.deps.Runner.GenerateTurnStream(ctx, turnReq, generateConfig, toolDefinitions, func(delta string) {
 				if delta == "" {
 					return
 				}
@@ -168,7 +186,7 @@ func (s *Service) Process(
 				})
 			})
 		} else {
-			turn, runErr = s.deps.Runner.GenerateTurn(ctx, turnReq, generateConfig, s.deps.ToolRuntime.ListToolDefinitions(params.PromptMode))
+			turn, runErr = s.deps.Runner.GenerateTurn(ctx, turnReq, generateConfig, toolDefinitions)
 		}
 		if runErr != nil {
 			if recoveredCall, recovered := s.deps.ToolRuntime.RecoverInvalidProviderToolCall(runErr, step); recovered {
@@ -261,27 +279,34 @@ func (s *Service) Process(
 		workflowInput = append(workflowInput, assistantMessage)
 
 		for _, call := range turn.ToolCalls {
-			execName := normalizeProviderToolName(call.Name)
-			execInput := normalizeProviderToolInput(execName, strings.TrimSpace(params.PromptMode), safeMap(call.Arguments))
-			if execName == "self_ops" {
-				execInput = enrichSelfOpsToolInput(execInput, params.Request)
+			rawCallName := strings.TrimSpace(call.Name)
+			execName := normalizeProviderToolName(rawCallName)
+			if execName == "" {
+				execName = strings.ToLower(rawCallName)
 			}
+			execInput := normalizeProviderToolInput(execName, strings.TrimSpace(params.PromptMode), safeMap(call.Arguments))
+			execInput = enrichNativeToolInput(execName, execInput, params.Request, params.PromptMode, params.CollaborationMode, call.ID)
+			eventToolName := rawCallName
+			if eventToolName == "" {
+				eventToolName = execName
+			}
+			eventToolInput := normalizeToolCallEventInput(execName, safeMap(call.Arguments), execInput)
 			appendEvent(domain.AgentEvent{
 				Type: "tool_call",
 				Step: step,
 				ToolCall: &domain.AgentToolCallPayload{
-					Name:  call.Name,
-					Input: safeMap(call.Arguments),
+					Name:  eventToolName,
+					Input: eventToolInput,
 				},
 			})
-			toolReply, toolErr := s.deps.ToolRuntime.ExecuteToolCall(params.PromptMode, execName, execInput)
+			toolReply, toolErr := s.deps.ToolRuntime.ExecuteToolCall(ctx, params.PromptMode, execName, execInput)
 			if toolErr != nil {
 				toolReply = s.deps.ToolRuntime.FormatToolErrorFeedback(toolErr)
 				appendEvent(domain.AgentEvent{
 					Type: "tool_result",
 					Step: step,
 					ToolResult: &domain.AgentToolResultPayload{
-						Name:    call.Name,
+						Name:    eventToolName,
 						OK:      false,
 						Summary: summarizeAgentEventText(toolReply),
 					},
@@ -292,7 +317,7 @@ func (s *Service) Process(
 					Content: []domain.RuntimeContent{{Type: "text", Text: toolReply}},
 					Metadata: map[string]interface{}{
 						"tool_call_id": call.ID,
-						"name":         call.Name,
+						"name":         eventToolName,
 					},
 				})
 				continue
@@ -301,7 +326,7 @@ func (s *Service) Process(
 				Type: "tool_result",
 				Step: step,
 				ToolResult: &domain.AgentToolResultPayload{
-					Name:    call.Name,
+					Name:    eventToolName,
 					OK:      true,
 					Summary: summarizeAgentEventText(toolReply),
 				},
@@ -312,7 +337,7 @@ func (s *Service) Process(
 				Content: []domain.RuntimeContent{{Type: "text", Text: toolReply}},
 				Metadata: map[string]interface{}{
 					"tool_call_id": call.ID,
-					"name":         call.Name,
+					"name":         eventToolName,
 				},
 			})
 		}
@@ -474,6 +499,8 @@ func normalizeProviderToolName(name string) string {
 		return "edit"
 	case "exec_command", "functions.exec_command":
 		return "shell"
+	case "write_stdin", "functions.write_stdin":
+		return "shell"
 	case "web_browser", "browser_use", "browser_tool":
 		return "browser"
 	case "web_search", "search_api", "search_tool":
@@ -486,6 +513,24 @@ func normalizeProviderToolName(name string) string {
 		return "click"
 	case "screenshot":
 		return "screenshot"
+	case "selfops", "self_ops":
+		return "self_ops"
+	case "spawnagent", "spawn_agent", "functions.spawn_agent":
+		return "spawn_agent"
+	case "sendinput", "send_input", "functions.send_input":
+		return "send_input"
+	case "resumeagent", "resume_agent", "functions.resume_agent":
+		return "resume_agent"
+	case "wait", "functions.wait":
+		return "wait"
+	case "closeagent", "close_agent", "functions.close_agent":
+		return "close_agent"
+	case "requestuserinput", "request_user_input", "functions.request_user_input":
+		return "request_user_input"
+	case "updateplan", "update_plan", "functions.update_plan":
+		return "update_plan"
+	case "applypatch", "apply_patch", "functions.apply_patch":
+		return "apply_patch"
 	default:
 		return normalized
 	}
@@ -497,6 +542,43 @@ func normalizeProviderToolInput(name, promptMode string, input map[string]interf
 		return normalized
 	}
 	return normalizeCodexProviderToolInput(name, normalized)
+}
+
+func normalizeDirectToolCallInput(name string, input map[string]interface{}) map[string]interface{} {
+	cloned := unwrapCodexProviderToolInput(safeMap(input))
+	if len(cloned) == 0 {
+		return cloned
+	}
+	normalizedName := strings.ToLower(strings.TrimSpace(name))
+
+	if rawItems, ok := cloned["items"]; ok && rawItems != nil {
+		entries, isArray := rawItems.([]interface{})
+		if !isArray {
+			return cloned
+		}
+		normalizedEntries := make([]interface{}, 0, len(entries))
+		for _, rawEntry := range entries {
+			entry, isObject := rawEntry.(map[string]interface{})
+			if !isObject {
+				normalizedEntries = append(normalizedEntries, rawEntry)
+				continue
+			}
+			item := safeMap(entry)
+			applyCodexProviderInputAliases(item)
+			if normalizedName == "shell" {
+				normalizeLegacyProviderShellInput(item)
+			}
+			normalizedEntries = append(normalizedEntries, item)
+		}
+		cloned["items"] = normalizedEntries
+		return cloned
+	}
+
+	applyCodexProviderInputAliases(cloned)
+	if normalizedName == "shell" {
+		normalizeLegacyProviderShellInput(cloned)
+	}
+	return cloned
 }
 
 func isCodexPromptMode(promptMode string) bool {
@@ -739,6 +821,117 @@ func parsePositiveIntFromAny(raw interface{}) (int, bool) {
 		}
 	}
 	return 0, false
+}
+
+const (
+	toolInputMetaSessionIDKey         = "_nextai_session_id"
+	toolInputMetaUserIDKey            = "_nextai_user_id"
+	toolInputMetaChannelKey           = "_nextai_channel"
+	toolInputMetaCollaborationModeKey = "_nextai_collaboration_mode"
+	toolInputMetaPromptModeKey        = "_nextai_prompt_mode"
+	toolInputMetaAgentDepthKey        = "_nextai_agent_depth"
+	toolInputMetaRequestIDKey         = "_nextai_request_id"
+)
+
+func enrichNativeToolInput(
+	name string,
+	input map[string]interface{},
+	req domain.AgentProcessRequest,
+	promptMode string,
+	collaborationMode string,
+	fallbackRequestID string,
+) map[string]interface{} {
+	out := safeMap(input)
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "self_ops":
+		return enrichSelfOpsToolInput(out, req)
+	case "spawn_agent", "send_input", "resume_agent", "wait", "close_agent", "update_plan", "request_user_input":
+		out[toolInputMetaSessionIDKey] = strings.TrimSpace(req.SessionID)
+		out[toolInputMetaUserIDKey] = strings.TrimSpace(req.UserID)
+		out[toolInputMetaChannelKey] = strings.TrimSpace(req.Channel)
+		out[toolInputMetaCollaborationModeKey] = strings.TrimSpace(collaborationMode)
+		out[toolInputMetaPromptModeKey] = strings.TrimSpace(promptMode)
+		if strings.TrimSpace(stringifyToolInputValue(out[toolInputMetaAgentDepthKey])) == "" {
+			out[toolInputMetaAgentDepthKey] = parseToolInputAgentDepthFromBizParams(req.BizParams)
+		}
+		if strings.EqualFold(name, "request_user_input") {
+			requestID := strings.TrimSpace(stringifyToolInputValue(out["request_id"]))
+			if requestID == "" {
+				requestID = strings.TrimSpace(fallbackRequestID)
+			}
+			if requestID != "" {
+				out["request_id"] = requestID
+				out[toolInputMetaRequestIDKey] = requestID
+			}
+		}
+		return out
+	default:
+		return out
+	}
+}
+
+func parseToolInputAgentDepthFromBizParams(bizParams map[string]interface{}) int {
+	if len(bizParams) == 0 {
+		return 0
+	}
+	raw, exists := bizParams[toolInputMetaAgentDepthKey]
+	if !exists {
+		return 0
+	}
+	depth, ok := parseNonNegativeIntFromAny(raw)
+	if !ok {
+		return 0
+	}
+	return depth
+}
+
+func parseNonNegativeIntFromAny(raw interface{}) (int, bool) {
+	switch value := raw.(type) {
+	case int:
+		if value >= 0 {
+			return value, true
+		}
+	case int32:
+		if value >= 0 {
+			return int(value), true
+		}
+	case int64:
+		if value >= 0 {
+			return int(value), true
+		}
+	case float64:
+		number := int(value)
+		if float64(number) == value && number >= 0 {
+			return number, true
+		}
+	case string:
+		trimmed := strings.TrimSpace(value)
+		if trimmed == "" {
+			return 0, false
+		}
+		number, err := strconv.Atoi(trimmed)
+		if err == nil && number >= 0 {
+			return number, true
+		}
+	}
+	return 0, false
+}
+
+func normalizeToolCallEventInput(name string, rawInput map[string]interface{}, execInput map[string]interface{}) map[string]interface{} {
+	out := safeMap(rawInput)
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "request_user_input":
+		requestID := strings.TrimSpace(stringifyToolInputValue(execInput["request_id"]))
+		if requestID == "" {
+			requestID = strings.TrimSpace(stringifyToolInputValue(execInput[toolInputMetaRequestIDKey]))
+		}
+		if requestID != "" && strings.TrimSpace(stringifyToolInputValue(out["request_id"])) == "" {
+			out["request_id"] = requestID
+		}
+		return out
+	default:
+		return out
+	}
 }
 
 func enrichSelfOpsToolInput(input map[string]interface{}, req domain.AgentProcessRequest) map[string]interface{} {

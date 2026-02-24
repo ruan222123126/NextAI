@@ -7,9 +7,7 @@ describe("web e2e: prompt 模板与模式场景 - prompt_mode 路由", () => {
   useWebShellFlowFixture();
   const page = new WebShellFlowPage();
 
-
-
-  it("聊天区提示词模式切换后，请求会携带对应 biz_params.prompt_mode", async () => {
+  it("聊天区请求会携带默认 biz_params.prompt_mode=default", async () => {
     let processCalls = 0;
     const capturedModes: string[] = [];
 
@@ -66,42 +64,25 @@ describe("web e2e: prompt 模板与模式场景 - prompt_mode 路由", () => {
 
     page.sendMessage("first");
     await waitFor(() => processCalls >= 1, 4000);
-    expect(capturedModes[0]).toBe("default");
-
-    page.setPromptMode("codex");
-
     page.sendMessage("second");
     await waitFor(() => processCalls >= 2, 4000);
-    expect(capturedModes[1]).toBe("codex");
 
-    page.setPromptMode("claude");
-
-    page.sendMessage("third");
-    await waitFor(() => processCalls >= 3, 4000);
-    expect(capturedModes[2]).toBe("claude");
-
-    page.setPromptMode("default");
-
-    page.sendMessage("fourth");
-    await waitFor(() => processCalls >= 4, 4000);
-    expect(capturedModes[3]).toBe("default");
+    expect(capturedModes).toEqual(["default", "default"]);
   });
 
-
-
-  it("会话间 prompt_mode 状态隔离：A=codex，B=default", async () => {
+  it("会话 meta 中非法 prompt_mode 会回退为 default", async () => {
     let processCalls = 0;
     const captured: Array<{ sessionID: string; promptMode: string }> = [];
     const chats = [
       {
-        id: "chat-codex",
-        name: "Codex Chat",
-        session_id: "session-codex",
+        id: "chat-invalid",
+        name: "Invalid Prompt Mode Chat",
+        session_id: "session-invalid",
         user_id: "demo-user",
         channel: "console",
         created_at: "2026-02-17T12:00:00Z",
         updated_at: "2026-02-17T12:00:20Z",
-        meta: { prompt_mode: "codex" },
+        meta: { prompt_mode: "legacy" },
       },
       {
         id: "chat-default",
@@ -136,7 +117,7 @@ describe("web e2e: prompt 模板与模式场景 - prompt_mode 路由", () => {
         return jsonResponse(chats);
       }
 
-      if ((url.pathname === "/chats/chat-codex" || url.pathname === "/chats/chat-default") && method === "GET") {
+      if ((url.pathname === "/chats/chat-invalid" || url.pathname === "/chats/chat-default") && method === "GET") {
         return jsonResponse({ messages: [] });
       }
 
@@ -173,12 +154,12 @@ describe("web e2e: prompt 模板与模式场景 - prompt_mode 路由", () => {
 
     const promptModeSelect = page.promptModeSelect();
 
-    await waitFor(() => page.chatItemButton("chat-codex") !== null, 4000);
-    expect(promptModeSelect.value).toBe("codex");
+    await waitFor(() => page.chatItemButton("chat-invalid") !== null, 4000);
+    expect(promptModeSelect.value).toBe("default");
 
-    page.sendMessage("for codex");
+    page.sendMessage("for invalid mode");
     await waitFor(() => processCalls >= 1, 4000);
-    expect(captured[0]).toEqual({ sessionID: "session-codex", promptMode: "codex" });
+    expect(captured[0]).toEqual({ sessionID: "session-invalid", promptMode: "default" });
 
     const defaultChatButton = page.chatItemButton("chat-default");
     expect(defaultChatButton).not.toBeNull();
@@ -189,8 +170,6 @@ describe("web e2e: prompt 模板与模式场景 - prompt_mode 路由", () => {
     await waitFor(() => processCalls >= 2, 4000);
     expect(captured[1]).toEqual({ sessionID: "session-default", promptMode: "default" });
   });
-
-
 
   it("新会话默认 prompt_mode=default", async () => {
     let processCalls = 0;
@@ -245,9 +224,7 @@ describe("web e2e: prompt 模板与模式场景 - prompt_mode 路由", () => {
     await mountWebApp();
 
     const promptModeSelect = page.promptModeSelect();
-
-    page.setPromptMode("claude");
-    expect(promptModeSelect.value).toBe("claude");
+    expect(promptModeSelect.value).toBe("default");
 
     page.clickNewChat();
     expect(promptModeSelect.value).toBe("default");

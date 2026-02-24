@@ -375,24 +375,6 @@
                         </div>
                         <ul id="workspace-prompts-body" class="detail-list models-provider-card-grid workspace-file-card-grid workspace-file-cards"></ul>
                       </section>
-                      <section id="workspace-level2-codex-view" class="models-level models-level-edit" hidden>
-                        <div class="models-level-edit-head">
-                          <div class="models-level-edit-title-group">
-                            <h3 class="settings-section-title" data-i18n="workspace.codexCardTitle">Codex Prompts</h3>
-                          </div>
-                          <button type="button" class="secondary-btn" data-workspace-action="back" data-i18n="workspace.backToCards">Back</button>
-                        </div>
-                        <ul id="workspace-codex-tree-body" class="detail-list workspace-codex-tree"></ul>
-                      </section>
-                      <section id="workspace-level2-claude-view" class="models-level models-level-edit" hidden>
-                        <div class="models-level-edit-head">
-                          <div class="models-level-edit-title-group">
-                            <h3 class="settings-section-title" data-i18n="workspace.claudeCardTitle">Claude Code Prompts</h3>
-                          </div>
-                          <button type="button" class="secondary-btn" data-workspace-action="back" data-i18n="workspace.backToCards">Back</button>
-                        </div>
-                        <ul id="workspace-claude-body" class="detail-list workspace-codex-tree"></ul>
-                      </section>
                     </div>
                   </section>
                   <section class="settings-section settings-section-connection" data-settings-section-panel="connection" hidden>
@@ -516,8 +498,15 @@
                     <span data-i18n="chat.promptMode">提示词模式</span>
                     <select id="chat-prompt-mode-select" class="chat-prompt-mode-select" data-select-search="off">
                       <option value="default" data-i18n="chat.promptModeDefault">默认</option>
-                      <option value="codex" data-i18n="chat.promptModeCodex">Codex</option>
-                      <option value="claude" data-i18n="chat.promptModeClaude">Claude</option>
+                    </select>
+                  </label>
+                  <label class="chat-prompt-mode-toggle" for="chat-collaboration-mode-select">
+                    <span data-i18n="chat.collaborationMode">协作模式</span>
+                    <select id="chat-collaboration-mode-select" class="chat-prompt-mode-select" data-select-search="off">
+                      <option value="default" data-i18n="chat.collaborationModeDefault">默认</option>
+                      <option value="plan" data-i18n="chat.collaborationModePlan">计划</option>
+                      <option value="execute" data-i18n="chat.collaborationModeExecute">执行</option>
+                      <option value="pair_programming" data-i18n="chat.collaborationModePairProgramming">结对编程</option>
                     </select>
                   </label>
                   <span id="chat-session" class="session-badge"></span>
@@ -536,18 +525,9 @@
                     <textarea
                       id="message-input"
                       rows="3"
-                      placeholder="Ask NextAI anything, @ add files, / open commands"
+                      placeholder="Ask NextAI anything, @ add files"
                       data-i18n-placeholder="chat.inputPlaceholder"
                     ></textarea>
-                    <div
-                      id="composer-slash-panel"
-                      class="composer-slash-panel is-hidden"
-                      role="listbox"
-                      aria-hidden="true"
-                      data-i18n-aria-label="chat.slashPanelAria"
-                    >
-                      <ul id="composer-slash-list" class="composer-slash-list"></ul>
-                    </div>
                     <button id="send-btn" class="composer-send-btn" type="submit" data-i18n-aria-label="chat.sendAria">
                       <svg viewBox="0 0 20 20" fill="none" aria-hidden="true">
                         <path d="M10 4.25V15.75" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" />
@@ -770,7 +750,14 @@
           </form>
         </section>
       </div>
-
+    <script type="importmap">
+      {
+        "imports": {
+          "@nextai/sdk-ts": "./vendor/sdk-ts/index.js",
+          "markdown-it": "./vendor/markdown-it-wrapper.js"
+        }
+      }
+    </script>
     <script type="module" src="./main.js"></script>
   </body>
 </html>

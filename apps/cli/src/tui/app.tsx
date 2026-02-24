@@ -6,7 +6,15 @@ import { ApiClient, ApiClientError } from "../client/api-client.js";
 import { resolveLocale, setLocale, t, type Locale } from "../i18n.js";
 import { applyAgentEvent, appendUserMessage, beginAssistantMessage, historyToViewMessages, settleAssistantMessage } from "./state.js";
 import { consumeSSEBuffer, parseAgentStreamData } from "./stream.js";
-import { filterSlashCommands, isLocalSlashCommand, isSlashDraft, resolveSlashCommand } from "./slash.js";
+import {
+  buildProcessBizParams,
+  nextCollaborationMode,
+  nextPromptMode,
+  normalizeCollaborationMode,
+  resolveModesFromMeta,
+  type TUICollaborationMode,
+  type TUIPromptMode,
+} from "./mode.js";
 import type { ChatHistoryResponse, ChatSpec, TUIBootstrapOptions, TUIMessage, TUISettings } from "./types.js";
 
 const settingFields = ["apiBase", "apiKey", "userID", "channel", "locale"] as const;
@@ -201,6 +209,28 @@ function calcWindow(total: number, selected: number, limit: number): { start: nu
   };
 }
 
+function promptModeLabelKey(mode: TUIPromptMode): "tui.mode.prompt.default" | "tui.mode.prompt.codex" {
+  if (mode === "codex") {
+    return "tui.mode.prompt.codex";
+  }
+  return "tui.mode.prompt.default";
+}
+
+function collaborationModeLabelKey(
+  mode: TUICollaborationMode,
+): "tui.mode.collaboration.default" | "tui.mode.collaboration.plan" | "tui.mode.collaboration.execute" | "tui.mode.collaboration.pair_programming" {
+  if (mode === "plan") {
+    return "tui.mode.collaboration.plan";
+  }
+  if (mode === "execute") {
+    return "tui.mode.collaboration.execute";
+  }
+  if (mode === "pair_programming") {
+    return "tui.mode.collaboration.pair_programming";
+  }
+  return "tui.mode.collaboration.default";
+}
+
 interface ChatRenderLine {
   key: string;
   color: "red" | "cyan" | "white";
@@ -295,7 +325,8 @@ export function TUIApp({ client, bootstrap }: TUIAppProps): React.ReactElement {
   const [settingsFieldIndex, setSettingsFieldIndex] = useState(0);
   const [terminalRows, setTerminalRows] = useState<number>(Math.max(stdout?.rows ?? 24, 12));
   const [terminalColumns, setTerminalColumns] = useState<number>(Math.max(stdout?.columns ?? 80, 40));
-  const [slashSelectionIndex, setSlashSelectionIndex] = useState(0);
+  const [promptMode, setPromptMode] = useState<TUIPromptMode>("default");
+  const [collaborationMode, setCollaborationMode] = useState<TUICollaborationMode>("default");
 
   const fetchSessions = useCallback(
     async (userID: string, channel: string): Promise<ChatSpec[]> => {
@@ -322,6 +353,12 @@ export function TUIApp({ client, bootstrap }: TUIAppProps): React.ReactElement {
     [client],
   );
 
+  const applyChatModes = useCallback((chat: ChatSpec | null | undefined): void => {
+    const resolved = resolveModesFromMeta(chat?.meta);
+    setPromptMode(resolved.promptMode);
+    setCollaborationMode(resolved.collaborationMode);
+  }, []);
+
   const createSession = useCallback(
     async (preferredSessionID?: string): Promise<ChatSpec> => {
       const sessionID = preferredSessionID?.trim() || `s-${Date.now()}`;
@@ -330,16 +367,20 @@ export function TUIApp({ client, bootstrap }: TUIAppProps): React.ReactElement {
         session_id: sessionID,
         user_id: settings.userID,
         channel: settings.channel,
-        meta: {},
+        meta: {
+          prompt_mode: promptMode,
+          collaboration_mode: collaborationMode,
+        },
       });
       setSessions((prev) => [created, ...prev.filter((item) => item.id !== created.id)]);
       setActiveChatID(created.id);
       setActiveSessionID(created.session_id);
+      applyChatModes(created);
       setStatus(t("tui.status.chat_created"));
       setMessages([]);
       return created;
     },
-    [client, settings.userID, settings.channel],
+    [client, settings.userID, settings.channel, promptMode, collaborationMode, applyChatModes],
   );
 
   const refreshSessions = useCallback(async (): Promise<void> => {
@@ -349,6 +390,8 @@ export function TUIApp({ client, bootstrap }: TUIAppProps): React.ReactElement {
 
     if (list.length === 0) {
       setActiveChatID("");
+      setActiveSessionID("");
+      applyChatModes(null);
       setMessages([]);
       setStatus(t("tui.status.no_sessions"));
       return;
@@ -359,8 +402,9 @@ export function TUIApp({ client, bootstrap }: TUIAppProps): React.ReactElement {
     const next = byActiveChat ?? bySession ?? list[0];
     setActiveChatID(next.id);
     setActiveSessionID(next.session_id);
+    applyChatModes(next);
     await loadHistory(next.id);
-  }, [fetchSessions, settings.userID, settings.channel, activeChatID, activeSessionID, loadHistory]);
+  }, [fetchSessions, settings.userID, settings.channel, activeChatID, activeSessionID, loadHistory, applyChatModes]);
 
   const openHistoryModal = useCallback(async (): Promise<void> => {
     setStatus(t("tui.status.loading_sessions"));
@@ -390,10 +434,11 @@ export function TUIApp({ client, bootstrap }: TUIAppProps): React.ReactElement {
     }
     setActiveChatID(selected.id);
     setActiveSessionID(selected.session_id);
+    applyChatModes(selected);
     setHistoryOpen(false);
     await loadHistory(selected.id);
     setStatus(t("tui.status.ready"));
-  }, [sessions, historySelectionIndex, loadHistory]);
+  }, [sessions, historySelectionIndex, loadHistory, applyChatModes]);
 
   useEffect(() => {
     const onResize = () => {
@@ -418,10 +463,6 @@ export function TUIApp({ client, bootstrap }: TUIAppProps): React.ReactElement {
   }, [sessions.length, historySelectionIndex]);
 
   useEffect(() => {
-    setSlashSelectionIndex(0);
-  }, [draft]);
-
-  useEffect(() => {
     if (initialized.current) {
       return;
     }
@@ -438,6 +479,7 @@ export function TUIApp({ client, bootstrap }: TUIAppProps): React.ReactElement {
           const selected = list.find((item) => item.session_id === bootstrap.sessionID) ?? (await createSession(bootstrap.sessionID));
           setActiveChatID(selected.id);
           setActiveSessionID(selected.session_id);
+          applyChatModes(selected);
           await loadHistory(selected.id);
           return;
         }
@@ -448,7 +490,7 @@ export function TUIApp({ client, bootstrap }: TUIAppProps): React.ReactElement {
         setStatus(t("tui.status.ready"));
       }
     })();
-  }, [bootstrap.sessionID, createSession, fetchSessions, loadHistory, settings.channel, settings.userID]);
+  }, [bootstrap.sessionID, createSession, fetchSessions, loadHistory, settings.channel, settings.userID, applyChatModes]);
 
   const sendMessage = useCallback(async (): Promise<void> => {
     if (streaming) {
@@ -456,15 +498,6 @@ export function TUIApp({ client, bootstrap }: TUIAppProps): React.ReactElement {
     }
     const text = draft.trim();
     if (text === "") {
-      return;
-    }
-    if (text.toLowerCase() === "/history") {
-      setDraft("");
-      setErrorText("");
-      void openHistoryModal().catch((err) => {
-        setErrorText(t("tui.error.fetch_failed", { message: errorToMessage(err) }));
-        setStatus(t("tui.status.ready"));
-      });
       return;
     }
 
@@ -498,6 +531,7 @@ export function TUIApp({ client, bootstrap }: TUIAppProps): React.ReactElement {
         user_id: settings.userID,
         channel: settings.channel,
         stream: true,
+        biz_params: buildProcessBizParams(promptMode, collaborationMode),
       };
       const res = await client.openStream("/agent/process", {
         method: "POST",
@@ -556,48 +590,53 @@ export function TUIApp({ client, bootstrap }: TUIAppProps): React.ReactElement {
     settings.userID,
     settings.channel,
     client,
+    promptMode,
+    collaborationMode,
     loadHistory,
     refreshSessions,
-    openHistoryModal,
   ]);
 
-  const runSlashCommand = useCallback(
-    async (raw: string, selection: number): Promise<boolean> => {
-      if (!isLocalSlashCommand(raw, selection)) {
-        return false;
-      }
-      const command = resolveSlashCommand(raw, selection);
-      if (!command) {
-        return false;
-      }
+  const updateActiveChatModeMeta = useCallback((nextPromptMode: TUIPromptMode, nextCollaborationMode: TUICollaborationMode): void => {
+    if (!activeChatID) {
+      return;
+    }
+    setSessions((prev) =>
+      prev.map((chat) => {
+        if (chat.id !== activeChatID) {
+          return chat;
+        }
+        const baseMeta = chat.meta && typeof chat.meta === "object" && !Array.isArray(chat.meta)
+          ? (chat.meta as Record<string, unknown>)
+          : {};
+        return {
+          ...chat,
+          meta: {
+            ...baseMeta,
+            prompt_mode: nextPromptMode,
+            collaboration_mode: nextCollaborationMode,
+          },
+        };
+      }),
+    );
+  }, [activeChatID]);
 
-      setDraft("");
-      setErrorText("");
-      switch (command.action) {
-        case "history":
-          await openHistoryModal();
-          return true;
-        case "new_chat":
-          await createSession();
-          return true;
-        case "refresh":
-          await refreshSessions();
-          return true;
-        case "settings":
-          setSettingsDraft(settings);
-          setSettingsFieldIndex(0);
-          setSettingsOpen(true);
-          setStatus(t("tui.status.ready"));
-          return true;
-        case "exit":
-          exit();
-          return true;
-        default:
-          return false;
-      }
-    },
-    [openHistoryModal, createSession, refreshSessions, settings, exit],
-  );
+  const cyclePromptMode = useCallback((): void => {
+    const next = nextPromptMode(promptMode);
+    setPromptMode(next);
+    updateActiveChatModeMeta(next, collaborationMode);
+    setStatus(t("tui.status.prompt_mode_changed", { mode: t(promptModeLabelKey(next)) }));
+  }, [promptMode, collaborationMode, updateActiveChatModeMeta]);
+
+  const cycleCollaborationMode = useCallback((): void => {
+    if (promptMode !== "codex") {
+      setStatus(t("tui.status.collaboration_requires_codex"));
+      return;
+    }
+    const next = normalizeCollaborationMode(nextCollaborationMode(collaborationMode));
+    setCollaborationMode(next);
+    updateActiveChatModeMeta(promptMode, next);
+    setStatus(t("tui.status.collaboration_mode_changed", { mode: t(collaborationModeLabelKey(next)) }));
+  }, [promptMode, collaborationMode, updateActiveChatModeMeta]);
 
   const applySettings = useCallback(async (): Promise<void> => {
     const nextLocale = resolveLocale(settingsDraft.locale);
@@ -624,6 +663,7 @@ export function TUIApp({ client, bootstrap }: TUIAppProps): React.ReactElement {
       if (list.length === 0) {
         setActiveChatID("");
         setActiveSessionID("");
+        applyChatModes(null);
         setMessages([]);
         setStatus(t("tui.status.no_sessions"));
         return;
@@ -631,13 +671,14 @@ export function TUIApp({ client, bootstrap }: TUIAppProps): React.ReactElement {
       const selected = list[0];
       setActiveChatID(selected.id);
       setActiveSessionID(selected.session_id);
+      applyChatModes(selected);
       await loadHistory(selected.id);
       setStatus(t("tui.status.ready"));
     } catch (err) {
       setErrorText(t("tui.error.fetch_failed", { message: errorToMessage(err) }));
       setStatus(t("tui.status.ready"));
     }
-  }, [settingsDraft, settings, client, fetchSessions, loadHistory]);
+  }, [settingsDraft, settings, client, fetchSessions, loadHistory, applyChatModes]);
 
   useInput((input, key) => {
     if (historyOpen) {
@@ -705,11 +746,15 @@ export function TUIApp({ client, bootstrap }: TUIAppProps): React.ReactElement {
       return;
     }
 
-    const slashMatches = filterSlashCommands(draft);
-    const slashOpen = isSlashDraft(draft) && slashMatches.length > 0;
-
     if (key.ctrl && input === "c") {
       exit();
+      return;
+    }
+    if (key.ctrl && input === "h") {
+      void openHistoryModal().catch((err) => {
+        setErrorText(t("tui.error.fetch_failed", { message: errorToMessage(err) }));
+        setStatus(t("tui.status.ready"));
+      });
       return;
     }
     if (key.ctrl && input === "n") {
@@ -730,22 +775,15 @@ export function TUIApp({ client, bootstrap }: TUIAppProps): React.ReactElement {
       setSettingsOpen(true);
       return;
     }
-    if (slashOpen && (key.downArrow || key.tab)) {
-      setSlashSelectionIndex((prev) => Math.min(slashMatches.length - 1, prev + 1));
+    if (key.ctrl && input === "p") {
+      cyclePromptMode();
       return;
     }
-    if (slashOpen && key.upArrow) {
-      setSlashSelectionIndex((prev) => Math.max(0, prev - 1));
+    if (key.ctrl && input === "m") {
+      cycleCollaborationMode();
       return;
     }
     if (key.return) {
-      if (slashOpen) {
-        void runSlashCommand(draft, slashSelectionIndex).catch((err) => {
-          setErrorText(t("tui.error.fetch_failed", { message: errorToMessage(err) }));
-          setStatus(t("tui.status.ready"));
-        });
-        return;
-      }
       void sendMessage();
       return;
     }
@@ -759,10 +797,6 @@ export function TUIApp({ client, bootstrap }: TUIAppProps): React.ReactElement {
   });
 
   const historyVisibleCount = calcHistoryVisibleCount(terminalRows, historyOpen, settingsOpen, sessions.length);
-  const slashMatches = filterSlashCommands(draft);
-  const slashOpen = !settingsOpen && !historyOpen && isSlashDraft(draft) && slashMatches.length > 0;
-  const slashWindow = calcWindow(slashMatches.length, slashSelectionIndex, 8);
-  const visibleSlash = slashMatches.slice(slashWindow.start, slashWindow.end);
   const chatContentWidth = Math.max(16, terminalColumns - 2);
   const lastMessage = messages.at(-1);
   const hasLiveMessage = Boolean(lastMessage && lastMessage.role === "assistant" && lastMessage.pending);
@@ -775,7 +809,9 @@ export function TUIApp({ client, bootstrap }: TUIAppProps): React.ReactElement {
   }));
   const historyWindow = calcWindow(sessions.length, historySelectionIndex, historyVisibleCount);
   const visibleSessions = sessions.slice(historyWindow.start, historyWindow.end);
-  const baseInfo = `${t("tui.settings.user_id")}: ${settings.userID} | ${t("tui.settings.channel")}: ${settings.channel} | ${t("tui.settings.api_base")}: ${settings.apiBase} | ${t("tui.settings.locale")}: ${settings.locale}`;
+  const promptModeLabel = t(promptModeLabelKey(promptMode));
+  const collaborationModeLabel = promptMode === "codex" ? t(collaborationModeLabelKey(collaborationMode)) : t("tui.mode.collaboration.na");
+  const baseInfo = `${t("tui.settings.user_id")}: ${settings.userID} | ${t("tui.settings.channel")}: ${settings.channel} | ${t("tui.settings.api_base")}: ${settings.apiBase} | ${t("tui.settings.locale")}: ${settings.locale} | ${t("tui.mode.prompt.label")}: ${promptModeLabel} | ${t("tui.mode.collaboration.label")}: ${collaborationModeLabel}`;
   const infoLine = fitText(baseInfo, Math.max(24, terminalColumns - 2));
 
   return (
@@ -841,24 +877,6 @@ export function TUIApp({ client, bootstrap }: TUIAppProps): React.ReactElement {
       <Box marginTop={1} borderStyle="round" borderColor={streaming ? "yellow" : "gray"} paddingX={1}>
         <Text>{draft === "" ? `${t("tui.input.placeholder")}` : `> ${draft}`}</Text>
       </Box>
-
-      {slashOpen ? (
-        <Box marginTop={1} flexDirection="column" borderStyle="round" borderColor="cyan" paddingX={1}>
-          <Text dimColor>{t("tui.command.menu_hint")}</Text>
-          {visibleSlash.map((cmd, index) => {
-            const absolute = slashWindow.start + index;
-            const selected = absolute === slashSelectionIndex;
-            const line = `${cmd.name.padEnd(12, " ")} ${t(cmd.descriptionKey)}`;
-            const rendered = fitText(line, Math.max(24, terminalColumns - 4));
-            return (
-              <Text key={cmd.name} color={selected ? "cyan" : "white"}>
-                {selected ? "> " : "  "}
-                {rendered}
-              </Text>
-            );
-          })}
-        </Box>
-      ) : null}
 
       <Box marginTop={1} flexDirection="column">
         <Text dimColor>{infoLine}</Text>

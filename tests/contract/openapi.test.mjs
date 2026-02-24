@@ -13,8 +13,6 @@ const requiredPaths = [
   "/chats/{chat_id}",
   "/agent/process",
   "/agent/system-layers",
-  "/v1/messages",
-  "/v1/messages/count_tokens",
   "/agent/self/sessions/bootstrap",
   "/agent/self/sessions/{session_id}/model",
   "/agent/self/config-mutations/preview",

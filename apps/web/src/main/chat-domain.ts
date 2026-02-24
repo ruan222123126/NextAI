@@ -1,6 +1,7 @@
 import { createChatToolCallHelpers } from "./chat-tool-call.js";
 import type {
   AgentStreamEvent,
+  CollaborationMode,
   ChatDomainContext,
   ChatHistoryResponse,
   ChatSpec,
@@ -36,8 +37,6 @@ export function createChatDomain(ctx: ChatDomainContext) {
     newSessionID,
     setSearchModalOpen,
     getBootstrapTask,
-    hideComposerSlashPanel,
-    renderComposerSlashPanel,
     parsePositiveInteger,
     resetComposerFileDragDepth,
     runtimeFlags,
@@ -53,6 +52,7 @@ export function createChatDomain(ctx: ChatDomainContext) {
     chatTitle,
     chatSession,
     chatPromptModeSelect,
+    chatCollaborationModeSelect,
     searchChatInput,
     searchChatResults,
     messageList,
@@ -69,11 +69,16 @@ export function createChatDomain(ctx: ChatDomainContext) {
   let searchResultsDigest = "";
   let messagesDigest = "";
   let activeStreamAbortController: AbortController | null = null;
+  const handledRequestUserInputRequests = new Set<string>();
+  const STREAM_REPLY_RETRY_LIMIT = 5;
+  const DEFAULT_STREAM_REPLY_RETRY_DELAY_MS = 15_000;
+  const RETRYABLE_STREAM_ERROR_MESSAGE_MARKERS = ["err_incomplete_chunked_encoding", "incomplete chunked encoding", "failed to fetch", "network request failed", "networkerror", "load failed", "fetch failed"];
   const {
     isToolCallRawNotice,
     normalizeToolName,
     parseToolNameFromToolCallRaw,
     resolveToolCallSummaryLine,
+    resolveToolCallSummaryMeta,
     resolveToolCallExpandedDetail,
     formatToolResultOutput,
     formatToolCallSummary,
@@ -140,6 +145,7 @@ async function reloadChats(options: { includeQQHistory?: boolean } = {}): Promis
     if (state.activeChatId && !state.chats.some((chat) => chat.id === state.activeChatId)) {
       state.activeChatId = null;
       state.activePromptMode = "default";
+      state.activeCollaborationMode = "default";
       activeChatCleared = true;
     }
 
@@ -165,6 +171,7 @@ async function openChat(chatID: string): Promise<void> {
   state.activeChatId = chat.id;
   state.activeSessionId = chat.session_id;
   state.activePromptMode = resolveChatPromptMode(chat.meta);
+  state.activeCollaborationMode = resolveChatCollaborationMode(chat.meta);
   renderChatHeader();
   syncActiveChatSelections();
 
@@ -231,12 +238,12 @@ async function deleteChat(chatID: string): Promise<void> {
     setStatus(asErrorMessage(error), "error");
   }
 }
-
 function startDraftSession(): void {
   openChatRequestSerial += 1;
   state.activeChatId = null;
   state.activeSessionId = newSessionID();
   state.activePromptMode = "default";
+  state.activeCollaborationMode = "default";
   state.messages = [];
   renderChatHeader();
   renderChatList();
@@ -244,12 +251,10 @@ function startDraftSession(): void {
   renderMessages();
   renderComposerTokenEstimate();
 }
-
 interface PromptTemplateCommand {
   templateName: string;
   args: Map<string, string>;
 }
-
 function parsePromptTemplateCommand(inputText: string): PromptTemplateCommand | null {
   const trimmed = inputText.trim();
   if (!trimmed.startsWith(PROMPT_TEMPLATE_PREFIX)) {
@@ -285,7 +290,6 @@ async function loadPromptTemplateContent(templateName: string): Promise<string> 
   const candidates = [
     `prompts/${templateName}.md`,
     `prompt/${templateName}.md`,
-    `prompts/codex/user-codex/prompts/${templateName}.md`,
   ];
   let lastError: unknown = null;
   for (const path of candidates) {
@@ -302,7 +306,6 @@ async function loadPromptTemplateContent(templateName: string): Promise<string> 
   }
   throw new Error(`prompt template not found: ${templateName} (${asErrorMessage(lastError)})`);
 }
-
 function applyPromptTemplateArgs(templateContent: string, args: Map<string, string>): string {
   if (/\$[1-9]\b/.test(templateContent) || /\$ARGUMENTS\b/.test(templateContent)) {
     throw new Error("positional prompt arguments are not supported yet");
@@ -334,7 +337,6 @@ async function expandPromptTemplateIfNeeded(inputText: string): Promise<string> 
   const templateContent = await loadPromptTemplateContent(parsed.templateName);
   return applyPromptTemplateArgs(templateContent, parsed.args);
 }
-
 function setThinkingIndicatorVisible(visible: boolean): void {
   thinkingIndicator.hidden = !visible;
   thinkingIndicator.classList.toggle("is-visible", visible);
@@ -348,7 +350,6 @@ function setThinkingIndicatorVisible(visible: boolean): void {
   syncThinkingIndicatorPosition();
   messageList.scrollTop = messageList.scrollHeight;
 }
-
 function syncThinkingIndicatorPosition(): void {
   if (thinkingIndicator.hidden) {
     return;
@@ -357,7 +358,16 @@ function syncThinkingIndicatorPosition(): void {
     messageList.appendChild(thinkingIndicator);
   }
 }
-
+function syncThinkingIndicatorByStreamEvent(event: AgentStreamEvent): void {
+  const eventType = typeof event.type === "string" ? event.type : "";
+  if (eventType === "step_started" || eventType === "tool_call" || eventType === "tool_result") {
+    setThinkingIndicatorVisible(true);
+    return;
+  }
+  if (eventType === "completed" || eventType === "error") {
+    setThinkingIndicatorVisible(false);
+  }
+}
 function waitForNextPaint(): Promise<void> {
   return new Promise((resolve) => {
     if (typeof window.requestAnimationFrame === "function") {
@@ -367,7 +377,6 @@ function waitForNextPaint(): Promise<void> {
     window.setTimeout(resolve, 0);
   });
 }
-
 function isAbortError(error: unknown): boolean {
   if (error instanceof DOMException) {
     return error.name === "AbortError";
@@ -377,7 +386,62 @@ function isAbortError(error: unknown): boolean {
   }
   return (error as { name?: unknown }).name === "AbortError";
 }
+function createAbortError(): Error {
+  try {
+    return new DOMException("aborted", "AbortError");
+  } catch {
+    return Object.assign(new Error("aborted"), { name: "AbortError" });
+  }
+}
 
+class SSEEndedEarlyError extends Error { constructor(message: string) { super(message); this.name = "SSEEndedEarlyError"; } }
+function isRetryableStreamError(error: unknown): boolean {
+  if (error instanceof SSEEndedEarlyError) {
+    return true;
+  }
+  if (error instanceof TypeError) {
+    return true;
+  }
+  if (error instanceof DOMException && error.name === "NetworkError") {
+    return true;
+  }
+  if (!(error instanceof Error)) {
+    return false;
+  }
+  const normalizedMessage = error.message.trim().toLowerCase();
+  if (normalizedMessage === "") {
+    return false;
+  }
+  return RETRYABLE_STREAM_ERROR_MESSAGE_MARKERS.some((marker) => normalizedMessage.includes(marker));
+}
+function resolveStreamReplyRetryDelayMS(): number {
+  const override = (globalThis as { __NEXTAI_STREAM_RETRY_DELAY_MS__?: unknown }).__NEXTAI_STREAM_RETRY_DELAY_MS__;
+  const parsedOverride = parsePositiveInteger(override);
+  return parsedOverride ?? DEFAULT_STREAM_REPLY_RETRY_DELAY_MS;
+}
+
+async function waitWithAbort(ms: number, signal?: AbortSignal): Promise<void> {
+  if (ms <= 0) {
+    return;
+  }
+  if (signal?.aborted) {
+    throw createAbortError();
+  }
+  await new Promise<void>((resolve, reject) => {
+    const timer = window.setTimeout(() => {
+      if (signal) {
+        signal.removeEventListener("abort", onAbort);
+      }
+      resolve();
+    }, ms);
+    function onAbort() {
+      window.clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+      reject(createAbortError());
+    }
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
 function syncSendButtonState(): void {
   const isSending = state.sending;
   sendButton.classList.toggle("is-sending", isSending);
@@ -386,7 +450,6 @@ function syncSendButtonState(): void {
   sendButton.setAttribute("aria-label", ariaLabel);
   sendButton.title = ariaLabel;
 }
-
 function pauseReply(): void {
   if (!state.sending || !activeStreamAbortController) {
     return;
@@ -411,8 +474,6 @@ async function sendMessage(): Promise<void> {
     setStatus(t("status.controlsRequired"), "error");
     return;
   }
-  hideComposerSlashPanel();
-
   let inputText = draftText;
   try {
     inputText = await expandPromptTemplateIfNeeded(draftText);
@@ -470,6 +531,7 @@ async function sendMessage(): Promise<void> {
   setStatus(t("status.streamingReply"), "info");
 
   try {
+    handledRequestUserInputRequests.clear();
     try {
       await streamReply(
         inputText,
@@ -486,7 +548,9 @@ async function sendMessage(): Promise<void> {
           renderMessageInPlace(assistantID);
         },
         (event) => {
+          syncThinkingIndicatorByStreamEvent(event);
           handleToolCallEvent(event, assistantID);
+          void maybeHandleRequestUserInputToolCall(event);
         },
         streamAbortController.signal,
       );
@@ -518,6 +582,7 @@ async function sendMessage(): Promise<void> {
       setStatus(message, "error");
     }
   } finally {
+    handledRequestUserInputRequests.clear();
     setThinkingIndicatorVisible(false);
     if (activeStreamAbortController === streamAbortController) {
       activeStreamAbortController = null;
@@ -527,7 +592,6 @@ async function sendMessage(): Promise<void> {
     renderComposerTokenEstimate();
   }
 }
-
 function isFileDragEvent(event: DragEvent): boolean {
   const types = event.dataTransfer?.types;
   if (!types) {
@@ -535,7 +599,6 @@ function isFileDragEvent(event: DragEvent): boolean {
   }
   return Array.from(types).includes("Files");
 }
-
 function clearComposerFileDragState(): void {
   resetComposerFileDragDepth();
   composerMain.classList.remove("is-file-drag-over");
@@ -595,7 +658,6 @@ async function uploadWorkspaceAttachment(file: File, sourcePath: string): Promis
   }
   return uploadedPath;
 }
-
 function appendComposerAttachmentMentions(paths: string[]): number {
   if (paths.length === 0) {
     return 0;
@@ -618,14 +680,11 @@ function appendComposerAttachmentMentions(paths: string[]): number {
   const cursor = messageInput.value.length;
   messageInput.setSelectionRange(cursor, cursor);
   renderComposerTokenEstimate();
-  renderComposerSlashPanel();
   return mentions.length;
 }
-
 function normalizeAttachmentName(raw: string): string {
   return raw.replace(/[\r\n\t]+/g, " ").trim();
 }
-
 function resolveAttachmentPathForMention(file: File, index: number, droppedFilePaths: string[]): string {
   const fromFileObject = extractFilePathFromFileObject(file);
   if (fromFileObject !== "") {
@@ -637,7 +696,6 @@ function resolveAttachmentPathForMention(file: File, index: number, droppedFileP
   }
   return file.name;
 }
-
 function extractFilePathFromFileObject(file: File): string {
   const withPath = file as File & { path?: unknown };
   if (typeof withPath.path === "string") {
@@ -648,7 +706,6 @@ function extractFilePathFromFileObject(file: File): string {
   }
   return "";
 }
-
 function extractDroppedFilePaths(dataTransfer: DataTransfer | null): string[] {
   if (!dataTransfer) {
     return [];
@@ -659,7 +716,6 @@ function extractDroppedFilePaths(dataTransfer: DataTransfer | null): string[] {
   }
   return parseDroppedPathsFromRawText(dataTransfer.getData("text/plain"));
 }
-
 function parseDroppedPathsFromRawText(raw: string): string[] {
   const normalizedRaw = raw.trim();
   if (normalizedRaw === "") {
@@ -680,7 +736,6 @@ function parseDroppedPathsFromRawText(raw: string): string[] {
   }
   return paths;
 }
-
 function parseDroppedLocalPath(raw: string): string {
   const directPath = normalizePossibleLocalPath(raw);
   if (directPath !== "") {
@@ -707,7 +762,6 @@ function parseDroppedLocalPath(raw: string): string {
     return "";
   }
 }
-
 function normalizePossibleLocalPath(raw: string): string {
   if (raw.startsWith("/") || raw.startsWith("\\\\") || /^[A-Za-z]:[\\/]/.test(raw)) {
     return normalizeAttachmentName(raw);
@@ -729,9 +783,55 @@ async function streamReply(
     channel: WEB_CHAT_CHANNEL,
     stream: true,
   };
-  payload.biz_params = mergePromptModeBizParams(bizParams, state.activePromptMode);
+  payload.biz_params = mergePromptModeBizParams(bizParams, state.activePromptMode, state.activeCollaborationMode);
 
   const requestBody = JSON.stringify(payload);
+  const retryDelayMS = resolveStreamReplyRetryDelayMS();
+  for (let retry = 0; retry <= STREAM_REPLY_RETRY_LIMIT; retry += 1) {
+    let streamProducedOutput = false;
+    const onTrackedDelta = (delta: string) => {
+      if (delta !== "") {
+        streamProducedOutput = true;
+      }
+      onDelta(delta);
+    };
+    const onTrackedEvent = (event: AgentStreamEvent) => {
+      streamProducedOutput = true;
+      if (onEvent) {
+        onEvent(event);
+      }
+    };
+    try {
+      await streamReplyOnce(requestBody, payload, onTrackedDelta, onTrackedEvent, signal);
+      return;
+    } catch (error) {
+      const hasRetryQuota = retry < STREAM_REPLY_RETRY_LIMIT;
+      const shouldRetry = hasRetryQuota && !streamProducedOutput && !isAbortError(error) && isRetryableStreamError(error);
+      if (!shouldRetry) {
+        throw error;
+      }
+      const retryAttempt = retry + 1;
+      setStatus(
+        t("status.streamRetryWaiting", {
+          seconds: Math.floor(retryDelayMS / 1000),
+          attempt: retryAttempt,
+          max: STREAM_REPLY_RETRY_LIMIT,
+        }),
+        "info",
+      );
+      await waitWithAbort(retryDelayMS, signal);
+      setStatus(t("status.streamingReply"), "info");
+    }
+  }
+}
+
+async function streamReplyOnce(
+  requestBody: string,
+  payload: Record<string, unknown>,
+  onDelta: (delta: string) => void,
+  onEvent?: (event: AgentStreamEvent) => void,
+  signal?: AbortSignal,
+): Promise<void> {
   logAgentRawRequest(requestBody);
 
   const response = await openStream("/agent/process", {
@@ -772,13 +872,12 @@ async function streamReply(
     }
 
     if (!doneReceived) {
-      throw new Error(t("error.sseEndedEarly"));
+      throw new SSEEndedEarlyError(t("error.sseEndedEarly"));
     }
   } finally {
     logAgentRawResponse(rawOutput);
   }
 }
-
 function parseChatBizParams(inputText: string): Record<string, unknown> | undefined {
   const trimmed = inputText.trim();
   if (!trimmed.startsWith("/shell")) {
@@ -795,7 +894,6 @@ function parseChatBizParams(inputText: string): Record<string, unknown> | undefi
     },
   };
 }
-
 function consumeSSEBuffer(
   raw: string,
   onDelta: (delta: string) => void,
@@ -814,7 +912,6 @@ function consumeSSEBuffer(
   }
   return { done, rest: buffer };
 }
-
 function consumeSSEBlock(block: string, onDelta: (delta: string) => void, onEvent?: (event: AgentStreamEvent) => void): boolean {
   if (block.trim() === "") {
     return false;
@@ -862,7 +959,6 @@ function consumeSSEBlock(block: string, onDelta: (delta: string) => void, onEven
   }
   return false;
 }
-
 function renderChatList(options: { force?: boolean } = {}): void {
   const force = options.force === true;
   const nextDigest = computeChatListDigest(state.chats);
@@ -929,7 +1025,6 @@ function renderChatList(options: { force?: boolean } = {}): void {
   });
   syncActiveChatSelections();
 }
-
 function renderSearchChatResults(options: { force?: boolean } = {}): void {
   const force = options.force === true;
   const nextDigest = computeSearchResultsDigest(state.chats, state.chatSearchQuery);
@@ -992,7 +1087,6 @@ function renderSearchChatResults(options: { force?: boolean } = {}): void {
   });
   syncActiveChatSelections();
 }
-
 function filterChatsForSearch(query: string): ChatSpec[] {
   const normalizedQuery = query.trim().toLowerCase();
   if (normalizedQuery === "") {
@@ -1000,11 +1094,9 @@ function filterChatsForSearch(query: string): ChatSpec[] {
   }
   return state.chats.filter((chat) => buildChatSearchText(chat).includes(normalizedQuery));
 }
-
 function buildChatSearchText(chat: ChatSpec): string {
   return [chat.name, chat.session_id, chat.user_id, chat.channel, resolveChatCronJobID(chat.meta)].join(" ").toLowerCase();
 }
-
 function resolveChatCronJobID(meta: Record<string, unknown> | undefined): string {
   if (!meta) {
     return "";
@@ -1018,34 +1110,53 @@ function resolveChatCronJobID(meta: Record<string, unknown> | undefined): string
   }
   return "";
 }
-
 function normalizePromptMode(raw: unknown): PromptMode {
+  void raw;
+  return "default";
+}
+function normalizeCollaborationMode(raw: unknown): CollaborationMode {
   if (typeof raw !== "string") {
     return "default";
   }
   const normalized = raw.trim().toLowerCase();
-  if (normalized === "codex") {
-    return "codex";
+  if (normalized === "plan") {
+    return "plan";
   }
-  if (normalized === "claude") {
-    return "claude";
+  if (normalized === "execute") {
+    return "execute";
+  }
+  if (normalized === "pair_programming" || normalized === "pair-programming" || normalized === "pairprogramming") {
+    return "pair_programming";
   }
   return "default";
 }
-
 function resolveChatPromptMode(meta: Record<string, unknown> | undefined): PromptMode {
   return normalizePromptMode(meta?.[PROMPT_MODE_META_KEY]);
 }
-
+function resolveChatCollaborationMode(meta: Record<string, unknown> | undefined): CollaborationMode {
+  return normalizeCollaborationMode(meta?.collaboration_mode);
+}
 function mergePromptModeBizParams(
   bizParams: Record<string, unknown> | undefined,
   promptMode: PromptMode,
+  collaborationMode: CollaborationMode,
 ): Record<string, unknown> {
   const merged: Record<string, unknown> = bizParams ? { ...bizParams } : {};
   merged[PROMPT_MODE_META_KEY] = promptMode;
+  void collaborationMode;
+  delete merged.collaboration_mode;
   return merged;
 }
-
+function syncCollaborationModeControlState(): void {
+  const enabled = false;
+  const collaborationModeLabel = chatCollaborationModeSelect.closest<HTMLElement>(".chat-prompt-mode-toggle");
+  chatCollaborationModeSelect.disabled = !enabled;
+  chatCollaborationModeSelect.setAttribute("aria-disabled", enabled ? "false" : "true");
+  if (collaborationModeLabel) {
+    collaborationModeLabel.hidden = !enabled;
+    collaborationModeLabel.setAttribute("aria-hidden", enabled ? "false" : "true");
+  }
+}
 function setActivePromptMode(nextMode: PromptMode, options: { announce?: boolean } = {}): void {
   const normalized = normalizePromptMode(nextMode);
   const changed = state.activePromptMode !== normalized;
@@ -1059,29 +1170,49 @@ function setActivePromptMode(nextMode: PromptMode, options: { announce?: boolean
   }
   renderChatHeader();
   if (options.announce && changed) {
-    let statusKey: I18nKey = "status.promptModeDefaultEnabled";
-    if (normalized === "codex") {
-      statusKey = "status.promptModeCodexEnabled";
-    } else if (normalized === "claude") {
-      statusKey = "status.promptModeClaudeEnabled";
+    setStatus(t("status.promptModeDefaultEnabled"), "info");
+  }
+  renderComposerTokenEstimate();
+}
+function setActiveCollaborationMode(nextMode: CollaborationMode, options: { announce?: boolean } = {}): void {
+  const normalized = normalizeCollaborationMode(nextMode);
+  const changed = state.activeCollaborationMode !== normalized;
+  state.activeCollaborationMode = normalized;
+  const active = state.chats.find((chat) => chat.id === state.activeChatId);
+  if (active) {
+    if (!active.meta) {
+      active.meta = {};
+    }
+    active.meta.collaboration_mode = normalized;
+  }
+  renderChatHeader();
+  if (options.announce && changed) {
+    let statusKey: I18nKey = "status.collaborationModeDefaultEnabled";
+    if (normalized === "plan") {
+      statusKey = "status.collaborationModePlanEnabled";
+    } else if (normalized === "execute") {
+      statusKey = "status.collaborationModeExecuteEnabled";
+    } else if (normalized === "pair_programming") {
+      statusKey = "status.collaborationModePairProgrammingEnabled";
     }
     setStatus(t(statusKey), "info");
   }
   renderComposerTokenEstimate();
 }
-
 function renderChatHeader(): void {
   const active = state.chats.find((chat) => chat.id === state.activeChatId);
   if (active) {
     state.activePromptMode = resolveChatPromptMode(active.meta);
+    state.activeCollaborationMode = resolveChatCollaborationMode(active.meta);
   }
   chatTitle.textContent = active ? active.name : t("chat.draftTitle");
   const sessionId = state.activeSessionId;
   chatSession.textContent = sessionId;
   chatSession.title = sessionId;
   chatPromptModeSelect.value = state.activePromptMode;
+  chatCollaborationModeSelect.value = state.activeCollaborationMode;
+  syncCollaborationModeControlState();
 }
-
 function syncActiveChatSelections(): void {
   const activeChatID = state.activeChatId ?? "";
   chatList.querySelectorAll<HTMLButtonElement>(".chat-item-btn[data-chat-id]").forEach((button) => {
@@ -1093,7 +1224,6 @@ function syncActiveChatSelections(): void {
     button.classList.toggle("active", chatID !== "" && chatID === activeChatID);
   });
 }
-
 function renderMessages(options: { animate?: boolean; force?: boolean } = {}): void {
   const animate = options.animate ?? true;
   const force = options.force === true;
@@ -1128,7 +1258,6 @@ function renderMessages(options: { animate?: boolean; force?: boolean } = {}): v
   syncThinkingIndicatorPosition();
   messageList.scrollTop = messageList.scrollHeight;
 }
-
 function renderMessageInPlace(messageID: string): void {
   const target = state.messages.find((item) => item.id === messageID);
   if (!target) {
@@ -1145,12 +1274,10 @@ function renderMessageInPlace(messageID: string): void {
   syncThinkingIndicatorPosition();
   messageList.scrollTop = messageList.scrollHeight;
 }
-
 function nextMessageOutputOrder(): number {
   state.messageOutputOrder += 1;
   return state.messageOutputOrder;
 }
-
 function handleToolCallEvent(event: AgentStreamEvent, assistantID: string): void {
   if (event.type === "tool_call") {
     const notice = formatToolCallNotice(event);
@@ -1164,7 +1291,143 @@ function handleToolCallEvent(event: AgentStreamEvent, assistantID: string): void
     applyToolResultEvent(event, assistantID);
   }
 }
+interface RequestUserInputQuestionOption {
+  label: string;
+  description: string;
+}
+interface RequestUserInputQuestion {
+  id: string;
+  header: string;
+  question: string;
+  options: RequestUserInputQuestionOption[];
+}
+interface RequestUserInputAnswer {
+  answers: string[];
+}
 
+async function maybeHandleRequestUserInputToolCall(event: AgentStreamEvent): Promise<void> {
+  if (event.type !== "tool_call") {
+    return;
+  }
+  const toolName = normalizeToolName(event.tool_call?.name);
+  if (toolName !== "request_user_input") {
+    return;
+  }
+  const input = (event.tool_call?.input ?? {}) as Record<string, unknown>;
+  const requestID = typeof input.request_id === "string" ? input.request_id.trim() : "";
+  if (requestID === "" || handledRequestUserInputRequests.has(requestID)) {
+    return;
+  }
+  handledRequestUserInputRequests.add(requestID);
+
+  const questions = parseRequestUserInputQuestions(input.questions);
+  const answers = promptRequestUserInputAnswers(questions) ?? {};
+  try {
+    await requestJSON<{ accepted?: boolean; request_id?: string }>("/agent/tool-input-answer", {
+      method: "POST",
+      body: {
+        request_id: requestID,
+        session_id: state.activeSessionId,
+        user_id: state.userId,
+        channel: WEB_CHAT_CHANNEL,
+        answers,
+      },
+    });
+  } catch (error) {
+    handledRequestUserInputRequests.delete(requestID);
+    setStatus(asErrorMessage(error), "error");
+  }
+}
+function parseRequestUserInputQuestions(raw: unknown): RequestUserInputQuestion[] {
+  if (!Array.isArray(raw)) {
+    return [];
+  }
+  const out: RequestUserInputQuestion[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== "object") {
+      continue;
+    }
+    const row = item as Record<string, unknown>;
+    const id = typeof row.id === "string" ? row.id.trim() : "";
+    const header = typeof row.header === "string" ? row.header.trim() : "";
+    const question = typeof row.question === "string" ? row.question.trim() : "";
+    if (id === "" || header === "" || question === "") {
+      continue;
+    }
+    const options = parseRequestUserInputQuestionOptions(row.options);
+    out.push({
+      id,
+      header,
+      question,
+      options,
+    });
+  }
+  return out;
+}
+function parseRequestUserInputQuestionOptions(raw: unknown): RequestUserInputQuestionOption[] {
+  if (!Array.isArray(raw)) {
+    return [];
+  }
+  const out: RequestUserInputQuestionOption[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== "object") {
+      continue;
+    }
+    const row = item as Record<string, unknown>;
+    const label = typeof row.label === "string" ? row.label.trim() : "";
+    const description = typeof row.description === "string" ? row.description.trim() : "";
+    if (label === "" || description === "") {
+      continue;
+    }
+    out.push({ label, description });
+  }
+  return out;
+}
+function promptRequestUserInputAnswers(
+  questions: RequestUserInputQuestion[],
+): Record<string, RequestUserInputAnswer> | null {
+  const answers: Record<string, RequestUserInputAnswer> = {};
+  for (let index = 0; index < questions.length; index += 1) {
+    const question = questions[index];
+    const promptText = formatRequestUserInputPrompt(question, index, questions.length);
+    const raw = window.prompt(promptText);
+    if (raw === null) {
+      return null;
+    }
+    const parsed = raw
+      .split(",")
+      .map((item) => item.trim())
+      .filter((item) => item !== "");
+    if (parsed.length > 0) {
+      answers[question.id] = { answers: parsed };
+      continue;
+    }
+    if (question.options.length > 0) {
+      answers[question.id] = { answers: [question.options[0].label] };
+    } else {
+      answers[question.id] = { answers: [] };
+    }
+  }
+  return answers;
+}
+function formatRequestUserInputPrompt(
+  question: RequestUserInputQuestion,
+  index: number,
+  total: number,
+): string {
+  const lines: string[] = [
+    `[${index + 1}/${total}] ${question.header}`,
+    question.question,
+  ];
+  if (question.options.length > 0) {
+    lines.push("可选项：");
+    question.options.forEach((option, optionIndex) => {
+      lines.push(`${optionIndex + 1}. ${option.label} - ${option.description}`);
+    });
+  }
+  lines.push("输入回答（可用逗号分隔多个答案）");
+  return lines.join("\n");
+}
 function appendToolCallNoticeToAssistant(assistantID: string, notice: ViewToolCallNotice): void {
   const target = state.messages.find((item) => item.id === assistantID);
   if (!target) {
@@ -1189,7 +1452,6 @@ function appendToolCallNoticeToAssistant(assistantID: string, notice: ViewToolCa
   });
   renderMessageInPlace(assistantID);
 }
-
 function appendAssistantDelta(message: ViewMessage, delta: string): void {
   if (delta === "") {
     return;
@@ -1212,7 +1474,6 @@ function appendAssistantDelta(message: ViewMessage, delta: string): void {
     text: delta,
   });
 }
-
 function fillAssistantErrorMessageIfPending(assistantID: string, rawMessage: string): void {
   const target = state.messages.find((item) => item.id === assistantID);
   if (!target || target.role !== "assistant" || target.text.trim() !== "") {
@@ -1225,7 +1486,6 @@ function fillAssistantErrorMessageIfPending(assistantID: string, rawMessage: str
   appendAssistantDelta(target, message);
   renderMessageInPlace(assistantID);
 }
-
 function formatToolCallNotice(event: AgentStreamEvent): ViewToolCallNotice | null {
   const raw = formatToolCallRaw(event);
   const toolName = normalizeToolName(event.tool_call?.name) || parseToolNameFromToolCallRaw(raw);
@@ -1241,14 +1501,12 @@ function formatToolCallNotice(event: AgentStreamEvent): ViewToolCallNotice | nul
     outputReady: toolName !== "shell",
   };
 }
-
 function formatToolCallDetail(raw: string, toolName: string): string {
   if (toolName === "shell") {
     return t("chat.toolCallOutputPending");
   }
   return raw;
 }
-
 function formatToolCallRaw(event: AgentStreamEvent): string {
   const raw = typeof event.raw === "string" ? event.raw.trim() : "";
   if (raw !== "") {
@@ -1267,7 +1525,6 @@ function formatToolCallRaw(event: AgentStreamEvent): string {
   }
   return "";
 }
-
 function applyToolResultEvent(event: AgentStreamEvent, assistantID: string): void {
   const raw = typeof event.raw === "string" ? event.raw : "";
   const toolName = normalizeToolName(event.tool_result?.name) || parseToolNameFromToolCallRaw(raw);
@@ -1298,7 +1555,6 @@ function applyToolResultEvent(event: AgentStreamEvent, assistantID: string): voi
     outputReady: true,
   });
 }
-
 function findPendingToolCallNotice(
   notices: ViewToolCallNotice[],
   toolName: string,
@@ -1318,7 +1574,6 @@ function findPendingToolCallNotice(
   }
   return undefined;
 }
-
 function renderMessageNode(node: HTMLLIElement, message: ViewMessage): void {
   node.innerHTML = "";
 
@@ -1363,6 +1618,14 @@ function renderMessageNode(node: HTMLLIElement, message: ViewMessage): void {
     summary.textContent = resolveToolCallSummaryLine(toolCall);
     row.appendChild(summary);
 
+    const summaryMetaText = resolveToolCallSummaryMeta(toolCall);
+    if (summaryMetaText !== "") {
+      const summaryMeta = document.createElement("span");
+      summaryMeta.className = "tool-call-summary-meta";
+      summaryMeta.textContent = summaryMetaText;
+      row.appendChild(summaryMeta);
+    }
+
     const detail = document.createElement("pre");
     detail.className = "tool-call-expand-preview";
     detail.textContent = resolveToolCallExpandedDetail(toolCall);
@@ -1388,7 +1651,6 @@ function renderMessageNode(node: HTMLLIElement, message: ViewMessage): void {
     node.appendChild(toolCallList);
   }
 }
-
 function buildOrderedTimeline(message: ViewMessage): ViewMessageTimelineEntry[] {
   const fromTimeline = normalizeTimeline(message.timeline);
   if (fromTimeline.length > 0) {
@@ -1412,7 +1674,6 @@ function buildOrderedTimeline(message: ViewMessage): ViewMessageTimelineEntry[] 
   }
   return normalizeTimeline(fallback);
 }
-
 function normalizeTimeline(entries: ViewMessageTimelineEntry[]): ViewMessageTimelineEntry[] {
   const normalized = entries
     .filter((entry) => entry.order > 0)
@@ -1447,7 +1708,9 @@ function normalizeTimeline(entries: ViewMessageTimelineEntry[]): ViewMessageTime
     handleComposerAttachmentFiles,
     extractDroppedFilePaths,
     normalizePromptMode,
+    normalizeCollaborationMode,
     setActivePromptMode,
+    setActiveCollaborationMode,
     renderChatHeader,
     renderChatList,
     renderSearchChatResults,

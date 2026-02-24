@@ -31,13 +31,7 @@
 ## 6. 近期完成项（摘要）
 
 ### 2026-02-23
-- Claude 提示词全量补齐：将 `/mnt/Files/claude-code-system-prompts` 完整镜像到 `prompts/claude/claude-code-system-prompts/`（排除 `.git`），并保留源码分类（`system-prompts/`、`tools/`、根文档）。
-- Claude 运行时核心层升级为完整版：`prompts/claude/main.md`、`prompts/claude/doing-tasks.md`、`prompts/claude/executing-actions-with-care.md`、`prompts/claude/tool-usage-policy.md`、`prompts/claude/tone-and-style.md` 由源仓库对应 `system-prompts/system-prompt-*.md` 直拷覆盖。
 - 同步校验通过：源目录非 `.git` 文件数 `161`，目标镜像文件数 `161`；确保“按 codex 一样的来源分目录分类 + 完整复制”同时满足。
-- Web 工作区 Claude 卡片展示对齐 Codex：`apps/web/src/main/workspace-domain.ts` 为 `prompts/claude/*` 新增目录树数据结构与渲染链路（文件夹可折叠、同款文件按钮样式、根文件与子目录混合展示），并独立维护 `workspaceClaudeExpandedFolders`，避免与 Codex 展开状态互相污染。
-- Web 事件与模板同步：`apps/web/src/main.ts` 新增 `toggleWorkspaceClaudeFolder` 事件分支与状态字段；`apps/web/src/index.html` 将 `workspace-claude-body` 容器改为与 Codex 一致的树形列表样式类。
-- Web e2e 同步增强：`apps/web/test/e2e/web-shell-tool-flow.test.ts` 的 Claude 卡片用例升级为“文件夹层层展开”场景，新增 `data-workspace-claude-folder-toggle` 断言并覆盖根文件可见性。
-- 验证通过：`pnpm -C apps/web exec tsc -p tsconfig.json --noEmit`、`pnpm -C apps/web exec vitest run test/e2e/web-shell-tool-flow.test.ts --testNamePattern="工作区应新增 codex 提示词卡片并支持文件夹层层展开|工作区应新增 claude code 提示词卡片并支持文件夹层层展开"`。
 - Provider API 配置新增思考强度：`apps/gateway/internal/repo/store.go`、`apps/gateway/internal/service/model/service.go`、`apps/gateway/internal/app/server_admin.go`、`apps/gateway/internal/app/server_agent.go` 新增 `reasoning_effort` 配置透传与校验（支持 `minimal|low|medium|high`，仅 OpenAI/Codex 兼容链路生效）。
 - Runner 请求透传补齐：`apps/gateway/internal/runner/runner.go` 在 OpenAI-compatible `POST /chat/completions` 透传 `reasoning_effort`，在 Codex-compatible `POST /responses` 透传 `reasoning.effort`。
 - Web/CLI 配置入口补齐：`apps/web/src/index.html`、`apps/web/src/main.ts`、`apps/web/src/main/model-domain.ts` 新增“思考强度”表单项并按 provider 类型显隐；`apps/cli/src/commands/models.ts` 新增 `--reasoning-effort`。
@@ -126,7 +120,6 @@
 - Web prompt 模板回退路径扩展：`apps/web/src/main/chat-domain.ts` 的模板加载候选新增 `prompts/codex/user-codex/prompts/<name>.md`，`/prompts:check-fix`、`/prompts:refactor` 可直接命中 user-codex 模板目录，不再要求额外复制到根 `prompts/`。
 - Web e2e 补测：`apps/web/test/e2e/web-shell-tool-flow.test.ts` 新增“check-fix 模板会回退到 codex user 目录加载”，断言加载顺序为 `prompts -> prompt -> prompts/codex/user-codex/prompts`，并确认最终发送内容来自 codex user 模板。
 - 验证通过：`pnpm -C apps/web exec tsc -p tsconfig.json --noEmit`、`pnpm -C apps/web exec vitest run test/e2e/web-shell-tool-flow.test.ts --testNamePattern="check-fix 模板会回退到 codex user 目录加载|开启 prompt 模板后，/prompts 命令会先展开再发送"`。
-- Web 上下文 token 估算修复：`apps/web/src/main.ts` 将 `systemPromptTokens` 缓存绑定 `prompt_mode`，切换 `default/codex/claude` 时自动失效并重载 `/agent/system-layers?prompt_mode=...`，避免沿用旧模式缓存导致估算偏差。
 - Web 模式切换即时刷新：`apps/web/src/main/chat-domain.ts` 在 `setActivePromptMode` 后立即触发 `renderComposerTokenEstimate()`，切换模式后无需再输入字符即可看到最新估算。
 - Web 命令级估算对齐：`apps/web/src/main.ts` 新增 `task_command` 场景感知（`review/compact/memory/plan`），在 Codex 模式输入 slash 命令时按“模式+命令+session”维度重载估算，避免 `/review` 等动态系统层被忽略。
 - Gateway 估算接口补齐命令上下文：`apps/gateway/internal/app/server_agent.go` 的 `GET /agent/system-layers` 新增可选 query `task_command` 与 `session_id`；Codex 模式下会按命令组装与 `/agent/process` 同源的系统层（如 `review/plan/memory/compact`）。
@@ -160,11 +153,6 @@
 - Web 聊天头部快捷入口回退：移除 `apps/web/src/index.html` 的 `chat-open-models-settings`、`chat-open-workspace-settings`、`chat-open-connection-settings` 三个按钮，避免聊天区头部出现额外“模型设置/配置文件/连接设置”按钮。
 - Web 事件清理：`apps/web/src/main.ts` 删除上述三个按钮的 DOM 绑定与点击事件，并移除不再使用的 `openSettingsSectionShortcut()`，保持设置面板仅通过侧栏/总入口进入。
 - 验证通过：`pnpm -C apps/web exec tsc -p tsconfig.json --noEmit`、`pnpm -C apps/web build`。
-- Web 配置文件面板补齐 `claude code` 独立卡片：`apps/web/src/main/workspace-domain.ts` 将 `prompts/claude/*` 从“提示词”卡片中拆分，新增 `claude` 卡片分组、启用/禁用状态持久化与二级列表视图。
-- Web 交互链路补齐：`apps/web/src/index.html` 新增 `workspace-level2-claude-view` 与 `workspace-claude-body`；`apps/web/src/main.ts` 同步新增 `open-claude` 路由、DOM 绑定与文件点击事件委托。
-- 文案同步：`apps/web/src/locales/zh-CN.ts`、`apps/web/src/locales/en-US.ts` 新增 `workspace.claudeCardTitle`、`workspace.emptyClaude`、`workspace.briefClaude`。
-- Web e2e 补测：`apps/web/test/e2e/web-shell-tool-flow.test.ts` 新增“工作区应新增 claude code 提示词卡片并支持打开文件”用例。
-- 验证通过：`pnpm -C apps/web exec tsc -p tsconfig.json --noEmit`、`pnpm -C apps/web exec vitest run test/e2e/web-shell-tool-flow.test.ts --testNamePattern="工作区应新增 codex 提示词卡片并支持文件夹层层展开|工作区应新增 claude code 提示词卡片并支持打开文件|工作区卡片应支持启用和禁用"`、`pnpm -C apps/web build`。
 
 ### 2026-02-22
 - Web `main.ts` 领域拆分落地：按 `chat/model/workspace/cron/transport/logging` 拆出 `apps/web/src/main/` 下 6 个领域模块（`chat-domain.ts`、`model-domain.ts`、`workspace-domain.ts`、`cron-domain.ts`、`transport.ts`、`logging.ts`），`apps/web/src/main.ts` 收敛为组装与编排层，文件体积降至 `3287` 行（满足 `<3500` 目标）。
@@ -177,11 +165,6 @@
 - 文档修复与补齐：`docs/contracts.md` 全面修复乱码并重写为 UTF-8 正文，新增“用户错误排查手册”（连不上网关、401、模型不可用、提示词不可用、重启中断）与“新人 30 分钟首轮对话清单”。
 - 统一回归入口落地：根 `package.json` 新增 `test:go/test:ts/test:contract/test:smoke/test:all`，`test:all` 串联 Go + TS + contract + smoke；`docs/development.md` 与 `README.md` 同步使用方式。
 - 验证通过：执行 `pnpm run test:all` 全链路通过（Go/TS/contract 全绿，smoke 5 通过 + 1 nightly live 用例按设计 skip）。
-- Gateway 新增 `prompt_mode=claude`：`apps/gateway/internal/app/server.go`、`apps/gateway/internal/app/server_admin.go`、`apps/gateway/internal/app/server_agent.go` 增加 Claude 系统层编排、`claude_v1` 变体与 `claude_prompt_unavailable` 错误语义，并保持 `default/codex` 兼容。
-- Claude 提示词落地：新增 `prompts/claude/main.md`、`prompts/claude/doing-tasks.md`、`prompts/claude/executing-actions-with-care.md`、`prompts/claude/tool-usage-policy.md`、`prompts/claude/tone-and-style.md`，作为 Claude 模式的可注入层。
-- Web 聊天提示词模式改为三态：`apps/web/src/index.html` 将头部开关改为下拉选择（`default/codex/claude`），`apps/web/src/main.ts` 同步请求参数与会话态，`apps/web/src/locales/zh-CN.ts`、`apps/web/src/locales/en-US.ts` 新增 Claude 模式文案，`apps/web/src/styles.css` 补齐下拉样式。
-- 文档与工具指南同步：`docs/contracts.md` 的 prompt_mode 枚举与 mode_variant 扩展到 `claude`/`claude_v1`，`prompts/ai-tools.md` 增补 Claude 模式兼容说明。
-- 回归补测：`apps/gateway/internal/app/server_test.go` 新增 Claude 模式 introspect、会话持久化复用与缺失提示词错误测试；`apps/web/test/e2e/web-shell-tool-flow.test.ts` 的提示词模式切换用例扩展覆盖 `claude`。
 - 验证通过：`cd apps/gateway && go test ./internal/app`、`pnpm -C apps/web exec vitest run test/e2e/web-shell-tool-flow.test.ts`（28/28）、`pnpm -C apps/web build`。
 - Web 聊天输入框新增 slash 命令面板：`apps/web/src/index.html` 在 `composer-main` 内增加 `composer-slash-panel`，输入以 `/` 开头时展开命令列表，支持无结果空态展示。
 - Web slash 面板交互落地：`apps/web/src/main.ts` 新增命令筛选与状态控制，支持 ↑/↓/Tab 切换、Enter 回填命令、Esc/点击外部关闭；回填后不触发发送。
