@@ -72,15 +72,7 @@ export function createChatDomain(ctx: ChatDomainContext) {
   const handledRequestUserInputRequests = new Set<string>();
   const STREAM_REPLY_RETRY_LIMIT = 5;
   const DEFAULT_STREAM_REPLY_RETRY_DELAY_MS = 15_000;
-  const RETRYABLE_STREAM_ERROR_MESSAGE_MARKERS = [
-    "err_incomplete_chunked_encoding",
-    "incomplete chunked encoding",
-    "failed to fetch",
-    "network request failed",
-    "networkerror",
-    "load failed",
-    "fetch failed",
-  ];
+  const RETRYABLE_STREAM_ERROR_MESSAGE_MARKERS = ["err_incomplete_chunked_encoding", "incomplete chunked encoding", "failed to fetch", "network request failed", "networkerror", "load failed", "fetch failed"];
   const {
     isToolCallRawNotice,
     normalizeToolName,
@@ -246,7 +238,6 @@ async function deleteChat(chatID: string): Promise<void> {
     setStatus(asErrorMessage(error), "error");
   }
 }
-
 function startDraftSession(): void {
   openChatRequestSerial += 1;
   state.activeChatId = null;
@@ -260,12 +251,10 @@ function startDraftSession(): void {
   renderMessages();
   renderComposerTokenEstimate();
 }
-
 interface PromptTemplateCommand {
   templateName: string;
   args: Map<string, string>;
 }
-
 function parsePromptTemplateCommand(inputText: string): PromptTemplateCommand | null {
   const trimmed = inputText.trim();
   if (!trimmed.startsWith(PROMPT_TEMPLATE_PREFIX)) {
@@ -301,7 +290,6 @@ async function loadPromptTemplateContent(templateName: string): Promise<string> 
   const candidates = [
     `prompts/${templateName}.md`,
     `prompt/${templateName}.md`,
-    `prompts/codex/user-codex/prompts/${templateName}.md`,
   ];
   let lastError: unknown = null;
   for (const path of candidates) {
@@ -318,7 +306,6 @@ async function loadPromptTemplateContent(templateName: string): Promise<string> 
   }
   throw new Error(`prompt template not found: ${templateName} (${asErrorMessage(lastError)})`);
 }
-
 function applyPromptTemplateArgs(templateContent: string, args: Map<string, string>): string {
   if (/\$[1-9]\b/.test(templateContent) || /\$ARGUMENTS\b/.test(templateContent)) {
     throw new Error("positional prompt arguments are not supported yet");
@@ -350,7 +337,6 @@ async function expandPromptTemplateIfNeeded(inputText: string): Promise<string> 
   const templateContent = await loadPromptTemplateContent(parsed.templateName);
   return applyPromptTemplateArgs(templateContent, parsed.args);
 }
-
 function setThinkingIndicatorVisible(visible: boolean): void {
   thinkingIndicator.hidden = !visible;
   thinkingIndicator.classList.toggle("is-visible", visible);
@@ -364,7 +350,6 @@ function setThinkingIndicatorVisible(visible: boolean): void {
   syncThinkingIndicatorPosition();
   messageList.scrollTop = messageList.scrollHeight;
 }
-
 function syncThinkingIndicatorPosition(): void {
   if (thinkingIndicator.hidden) {
     return;
@@ -373,7 +358,16 @@ function syncThinkingIndicatorPosition(): void {
     messageList.appendChild(thinkingIndicator);
   }
 }
-
+function syncThinkingIndicatorByStreamEvent(event: AgentStreamEvent): void {
+  const eventType = typeof event.type === "string" ? event.type : "";
+  if (eventType === "step_started" || eventType === "tool_call" || eventType === "tool_result") {
+    setThinkingIndicatorVisible(true);
+    return;
+  }
+  if (eventType === "completed" || eventType === "error") {
+    setThinkingIndicatorVisible(false);
+  }
+}
 function waitForNextPaint(): Promise<void> {
   return new Promise((resolve) => {
     if (typeof window.requestAnimationFrame === "function") {
@@ -383,7 +377,6 @@ function waitForNextPaint(): Promise<void> {
     window.setTimeout(resolve, 0);
   });
 }
-
 function isAbortError(error: unknown): boolean {
   if (error instanceof DOMException) {
     return error.name === "AbortError";
@@ -393,24 +386,15 @@ function isAbortError(error: unknown): boolean {
   }
   return (error as { name?: unknown }).name === "AbortError";
 }
-
 function createAbortError(): Error {
   try {
     return new DOMException("aborted", "AbortError");
   } catch {
-    const err = new Error("aborted");
-    (err as Error & { name: string }).name = "AbortError";
-    return err;
+    return Object.assign(new Error("aborted"), { name: "AbortError" });
   }
 }
 
-class SSEEndedEarlyError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = "SSEEndedEarlyError";
-  }
-}
-
+class SSEEndedEarlyError extends Error { constructor(message: string) { super(message); this.name = "SSEEndedEarlyError"; } }
 function isRetryableStreamError(error: unknown): boolean {
   if (error instanceof SSEEndedEarlyError) {
     return true;
@@ -430,7 +414,6 @@ function isRetryableStreamError(error: unknown): boolean {
   }
   return RETRYABLE_STREAM_ERROR_MESSAGE_MARKERS.some((marker) => normalizedMessage.includes(marker));
 }
-
 function resolveStreamReplyRetryDelayMS(): number {
   const override = (globalThis as { __NEXTAI_STREAM_RETRY_DELAY_MS__?: unknown }).__NEXTAI_STREAM_RETRY_DELAY_MS__;
   const parsedOverride = parsePositiveInteger(override);
@@ -459,7 +442,6 @@ async function waitWithAbort(ms: number, signal?: AbortSignal): Promise<void> {
     signal?.addEventListener("abort", onAbort, { once: true });
   });
 }
-
 function syncSendButtonState(): void {
   const isSending = state.sending;
   sendButton.classList.toggle("is-sending", isSending);
@@ -468,7 +450,6 @@ function syncSendButtonState(): void {
   sendButton.setAttribute("aria-label", ariaLabel);
   sendButton.title = ariaLabel;
 }
-
 function pauseReply(): void {
   if (!state.sending || !activeStreamAbortController) {
     return;
@@ -567,6 +548,7 @@ async function sendMessage(): Promise<void> {
           renderMessageInPlace(assistantID);
         },
         (event) => {
+          syncThinkingIndicatorByStreamEvent(event);
           handleToolCallEvent(event, assistantID);
           void maybeHandleRequestUserInputToolCall(event);
         },
@@ -610,7 +592,6 @@ async function sendMessage(): Promise<void> {
     renderComposerTokenEstimate();
   }
 }
-
 function isFileDragEvent(event: DragEvent): boolean {
   const types = event.dataTransfer?.types;
   if (!types) {
@@ -618,7 +599,6 @@ function isFileDragEvent(event: DragEvent): boolean {
   }
   return Array.from(types).includes("Files");
 }
-
 function clearComposerFileDragState(): void {
   resetComposerFileDragDepth();
   composerMain.classList.remove("is-file-drag-over");
@@ -678,7 +658,6 @@ async function uploadWorkspaceAttachment(file: File, sourcePath: string): Promis
   }
   return uploadedPath;
 }
-
 function appendComposerAttachmentMentions(paths: string[]): number {
   if (paths.length === 0) {
     return 0;
@@ -703,11 +682,9 @@ function appendComposerAttachmentMentions(paths: string[]): number {
   renderComposerTokenEstimate();
   return mentions.length;
 }
-
 function normalizeAttachmentName(raw: string): string {
   return raw.replace(/[\r\n\t]+/g, " ").trim();
 }
-
 function resolveAttachmentPathForMention(file: File, index: number, droppedFilePaths: string[]): string {
   const fromFileObject = extractFilePathFromFileObject(file);
   if (fromFileObject !== "") {
@@ -719,7 +696,6 @@ function resolveAttachmentPathForMention(file: File, index: number, droppedFileP
   }
   return file.name;
 }
-
 function extractFilePathFromFileObject(file: File): string {
   const withPath = file as File & { path?: unknown };
   if (typeof withPath.path === "string") {
@@ -730,7 +706,6 @@ function extractFilePathFromFileObject(file: File): string {
   }
   return "";
 }
-
 function extractDroppedFilePaths(dataTransfer: DataTransfer | null): string[] {
   if (!dataTransfer) {
     return [];
@@ -741,7 +716,6 @@ function extractDroppedFilePaths(dataTransfer: DataTransfer | null): string[] {
   }
   return parseDroppedPathsFromRawText(dataTransfer.getData("text/plain"));
 }
-
 function parseDroppedPathsFromRawText(raw: string): string[] {
   const normalizedRaw = raw.trim();
   if (normalizedRaw === "") {
@@ -762,7 +736,6 @@ function parseDroppedPathsFromRawText(raw: string): string[] {
   }
   return paths;
 }
-
 function parseDroppedLocalPath(raw: string): string {
   const directPath = normalizePossibleLocalPath(raw);
   if (directPath !== "") {
@@ -789,7 +762,6 @@ function parseDroppedLocalPath(raw: string): string {
     return "";
   }
 }
-
 function normalizePossibleLocalPath(raw: string): string {
   if (raw.startsWith("/") || raw.startsWith("\\\\") || /^[A-Za-z]:[\\/]/.test(raw)) {
     return normalizeAttachmentName(raw);
@@ -906,7 +878,6 @@ async function streamReplyOnce(
     logAgentRawResponse(rawOutput);
   }
 }
-
 function parseChatBizParams(inputText: string): Record<string, unknown> | undefined {
   const trimmed = inputText.trim();
   if (!trimmed.startsWith("/shell")) {
@@ -923,7 +894,6 @@ function parseChatBizParams(inputText: string): Record<string, unknown> | undefi
     },
   };
 }
-
 function consumeSSEBuffer(
   raw: string,
   onDelta: (delta: string) => void,
@@ -942,7 +912,6 @@ function consumeSSEBuffer(
   }
   return { done, rest: buffer };
 }
-
 function consumeSSEBlock(block: string, onDelta: (delta: string) => void, onEvent?: (event: AgentStreamEvent) => void): boolean {
   if (block.trim() === "") {
     return false;
@@ -990,7 +959,6 @@ function consumeSSEBlock(block: string, onDelta: (delta: string) => void, onEven
   }
   return false;
 }
-
 function renderChatList(options: { force?: boolean } = {}): void {
   const force = options.force === true;
   const nextDigest = computeChatListDigest(state.chats);
@@ -1057,7 +1025,6 @@ function renderChatList(options: { force?: boolean } = {}): void {
   });
   syncActiveChatSelections();
 }
-
 function renderSearchChatResults(options: { force?: boolean } = {}): void {
   const force = options.force === true;
   const nextDigest = computeSearchResultsDigest(state.chats, state.chatSearchQuery);
@@ -1120,7 +1087,6 @@ function renderSearchChatResults(options: { force?: boolean } = {}): void {
   });
   syncActiveChatSelections();
 }
-
 function filterChatsForSearch(query: string): ChatSpec[] {
   const normalizedQuery = query.trim().toLowerCase();
   if (normalizedQuery === "") {
@@ -1128,11 +1094,9 @@ function filterChatsForSearch(query: string): ChatSpec[] {
   }
   return state.chats.filter((chat) => buildChatSearchText(chat).includes(normalizedQuery));
 }
-
 function buildChatSearchText(chat: ChatSpec): string {
   return [chat.name, chat.session_id, chat.user_id, chat.channel, resolveChatCronJobID(chat.meta)].join(" ").toLowerCase();
 }
-
 function resolveChatCronJobID(meta: Record<string, unknown> | undefined): string {
   if (!meta) {
     return "";
@@ -1146,21 +1110,10 @@ function resolveChatCronJobID(meta: Record<string, unknown> | undefined): string
   }
   return "";
 }
-
 function normalizePromptMode(raw: unknown): PromptMode {
-  if (typeof raw !== "string") {
-    return "default";
-  }
-  const normalized = raw.trim().toLowerCase();
-  if (normalized === "codex") {
-    return "codex";
-  }
-  if (normalized === "claude") {
-    return "claude";
-  }
+  void raw;
   return "default";
 }
-
 function normalizeCollaborationMode(raw: unknown): CollaborationMode {
   if (typeof raw !== "string") {
     return "default";
@@ -1177,15 +1130,12 @@ function normalizeCollaborationMode(raw: unknown): CollaborationMode {
   }
   return "default";
 }
-
 function resolveChatPromptMode(meta: Record<string, unknown> | undefined): PromptMode {
   return normalizePromptMode(meta?.[PROMPT_MODE_META_KEY]);
 }
-
 function resolveChatCollaborationMode(meta: Record<string, unknown> | undefined): CollaborationMode {
   return normalizeCollaborationMode(meta?.collaboration_mode);
 }
-
 function mergePromptModeBizParams(
   bizParams: Record<string, unknown> | undefined,
   promptMode: PromptMode,
@@ -1193,20 +1143,20 @@ function mergePromptModeBizParams(
 ): Record<string, unknown> {
   const merged: Record<string, unknown> = bizParams ? { ...bizParams } : {};
   merged[PROMPT_MODE_META_KEY] = promptMode;
-  if (promptMode === "codex") {
-    merged.collaboration_mode = collaborationMode;
-  } else {
-    delete merged.collaboration_mode;
-  }
+  void collaborationMode;
+  delete merged.collaboration_mode;
   return merged;
 }
-
 function syncCollaborationModeControlState(): void {
-  const enabled = state.activePromptMode === "codex";
+  const enabled = false;
+  const collaborationModeLabel = chatCollaborationModeSelect.closest<HTMLElement>(".chat-prompt-mode-toggle");
   chatCollaborationModeSelect.disabled = !enabled;
   chatCollaborationModeSelect.setAttribute("aria-disabled", enabled ? "false" : "true");
+  if (collaborationModeLabel) {
+    collaborationModeLabel.hidden = !enabled;
+    collaborationModeLabel.setAttribute("aria-hidden", enabled ? "false" : "true");
+  }
 }
-
 function setActivePromptMode(nextMode: PromptMode, options: { announce?: boolean } = {}): void {
   const normalized = normalizePromptMode(nextMode);
   const changed = state.activePromptMode !== normalized;
@@ -1220,17 +1170,10 @@ function setActivePromptMode(nextMode: PromptMode, options: { announce?: boolean
   }
   renderChatHeader();
   if (options.announce && changed) {
-    let statusKey: I18nKey = "status.promptModeDefaultEnabled";
-    if (normalized === "codex") {
-      statusKey = "status.promptModeCodexEnabled";
-    } else if (normalized === "claude") {
-      statusKey = "status.promptModeClaudeEnabled";
-    }
-    setStatus(t(statusKey), "info");
+    setStatus(t("status.promptModeDefaultEnabled"), "info");
   }
   renderComposerTokenEstimate();
 }
-
 function setActiveCollaborationMode(nextMode: CollaborationMode, options: { announce?: boolean } = {}): void {
   const normalized = normalizeCollaborationMode(nextMode);
   const changed = state.activeCollaborationMode !== normalized;
@@ -1256,7 +1199,6 @@ function setActiveCollaborationMode(nextMode: CollaborationMode, options: { anno
   }
   renderComposerTokenEstimate();
 }
-
 function renderChatHeader(): void {
   const active = state.chats.find((chat) => chat.id === state.activeChatId);
   if (active) {
@@ -1271,7 +1213,6 @@ function renderChatHeader(): void {
   chatCollaborationModeSelect.value = state.activeCollaborationMode;
   syncCollaborationModeControlState();
 }
-
 function syncActiveChatSelections(): void {
   const activeChatID = state.activeChatId ?? "";
   chatList.querySelectorAll<HTMLButtonElement>(".chat-item-btn[data-chat-id]").forEach((button) => {
@@ -1283,7 +1224,6 @@ function syncActiveChatSelections(): void {
     button.classList.toggle("active", chatID !== "" && chatID === activeChatID);
   });
 }
-
 function renderMessages(options: { animate?: boolean; force?: boolean } = {}): void {
   const animate = options.animate ?? true;
   const force = options.force === true;
@@ -1318,7 +1258,6 @@ function renderMessages(options: { animate?: boolean; force?: boolean } = {}): v
   syncThinkingIndicatorPosition();
   messageList.scrollTop = messageList.scrollHeight;
 }
-
 function renderMessageInPlace(messageID: string): void {
   const target = state.messages.find((item) => item.id === messageID);
   if (!target) {
@@ -1335,12 +1274,10 @@ function renderMessageInPlace(messageID: string): void {
   syncThinkingIndicatorPosition();
   messageList.scrollTop = messageList.scrollHeight;
 }
-
 function nextMessageOutputOrder(): number {
   state.messageOutputOrder += 1;
   return state.messageOutputOrder;
 }
-
 function handleToolCallEvent(event: AgentStreamEvent, assistantID: string): void {
   if (event.type === "tool_call") {
     const notice = formatToolCallNotice(event);
@@ -1354,19 +1291,16 @@ function handleToolCallEvent(event: AgentStreamEvent, assistantID: string): void
     applyToolResultEvent(event, assistantID);
   }
 }
-
 interface RequestUserInputQuestionOption {
   label: string;
   description: string;
 }
-
 interface RequestUserInputQuestion {
   id: string;
   header: string;
   question: string;
   options: RequestUserInputQuestionOption[];
 }
-
 interface RequestUserInputAnswer {
   answers: string[];
 }
@@ -1404,7 +1338,6 @@ async function maybeHandleRequestUserInputToolCall(event: AgentStreamEvent): Pro
     setStatus(asErrorMessage(error), "error");
   }
 }
-
 function parseRequestUserInputQuestions(raw: unknown): RequestUserInputQuestion[] {
   if (!Array.isArray(raw)) {
     return [];
@@ -1431,7 +1364,6 @@ function parseRequestUserInputQuestions(raw: unknown): RequestUserInputQuestion[
   }
   return out;
 }
-
 function parseRequestUserInputQuestionOptions(raw: unknown): RequestUserInputQuestionOption[] {
   if (!Array.isArray(raw)) {
     return [];
@@ -1451,7 +1383,6 @@ function parseRequestUserInputQuestionOptions(raw: unknown): RequestUserInputQue
   }
   return out;
 }
-
 function promptRequestUserInputAnswers(
   questions: RequestUserInputQuestion[],
 ): Record<string, RequestUserInputAnswer> | null {
@@ -1479,7 +1410,6 @@ function promptRequestUserInputAnswers(
   }
   return answers;
 }
-
 function formatRequestUserInputPrompt(
   question: RequestUserInputQuestion,
   index: number,
@@ -1498,7 +1428,6 @@ function formatRequestUserInputPrompt(
   lines.push("输入回答（可用逗号分隔多个答案）");
   return lines.join("\n");
 }
-
 function appendToolCallNoticeToAssistant(assistantID: string, notice: ViewToolCallNotice): void {
   const target = state.messages.find((item) => item.id === assistantID);
   if (!target) {
@@ -1523,7 +1452,6 @@ function appendToolCallNoticeToAssistant(assistantID: string, notice: ViewToolCa
   });
   renderMessageInPlace(assistantID);
 }
-
 function appendAssistantDelta(message: ViewMessage, delta: string): void {
   if (delta === "") {
     return;
@@ -1546,7 +1474,6 @@ function appendAssistantDelta(message: ViewMessage, delta: string): void {
     text: delta,
   });
 }
-
 function fillAssistantErrorMessageIfPending(assistantID: string, rawMessage: string): void {
   const target = state.messages.find((item) => item.id === assistantID);
   if (!target || target.role !== "assistant" || target.text.trim() !== "") {
@@ -1559,7 +1486,6 @@ function fillAssistantErrorMessageIfPending(assistantID: string, rawMessage: str
   appendAssistantDelta(target, message);
   renderMessageInPlace(assistantID);
 }
-
 function formatToolCallNotice(event: AgentStreamEvent): ViewToolCallNotice | null {
   const raw = formatToolCallRaw(event);
   const toolName = normalizeToolName(event.tool_call?.name) || parseToolNameFromToolCallRaw(raw);
@@ -1575,14 +1501,12 @@ function formatToolCallNotice(event: AgentStreamEvent): ViewToolCallNotice | nul
     outputReady: toolName !== "shell",
   };
 }
-
 function formatToolCallDetail(raw: string, toolName: string): string {
   if (toolName === "shell") {
     return t("chat.toolCallOutputPending");
   }
   return raw;
 }
-
 function formatToolCallRaw(event: AgentStreamEvent): string {
   const raw = typeof event.raw === "string" ? event.raw.trim() : "";
   if (raw !== "") {
@@ -1601,7 +1525,6 @@ function formatToolCallRaw(event: AgentStreamEvent): string {
   }
   return "";
 }
-
 function applyToolResultEvent(event: AgentStreamEvent, assistantID: string): void {
   const raw = typeof event.raw === "string" ? event.raw : "";
   const toolName = normalizeToolName(event.tool_result?.name) || parseToolNameFromToolCallRaw(raw);
@@ -1632,7 +1555,6 @@ function applyToolResultEvent(event: AgentStreamEvent, assistantID: string): voi
     outputReady: true,
   });
 }
-
 function findPendingToolCallNotice(
   notices: ViewToolCallNotice[],
   toolName: string,
@@ -1652,7 +1574,6 @@ function findPendingToolCallNotice(
   }
   return undefined;
 }
-
 function renderMessageNode(node: HTMLLIElement, message: ViewMessage): void {
   node.innerHTML = "";
 
@@ -1730,7 +1651,6 @@ function renderMessageNode(node: HTMLLIElement, message: ViewMessage): void {
     node.appendChild(toolCallList);
   }
 }
-
 function buildOrderedTimeline(message: ViewMessage): ViewMessageTimelineEntry[] {
   const fromTimeline = normalizeTimeline(message.timeline);
   if (fromTimeline.length > 0) {
@@ -1754,7 +1674,6 @@ function buildOrderedTimeline(message: ViewMessage): ViewMessageTimelineEntry[] 
   }
   return normalizeTimeline(fallback);
 }
-
 function normalizeTimeline(entries: ViewMessageTimelineEntry[]): ViewMessageTimelineEntry[] {
   const normalized = entries
     .filter((entry) => entry.order > 0)

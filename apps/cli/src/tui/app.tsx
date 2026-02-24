@@ -209,12 +209,9 @@ function calcWindow(total: number, selected: number, limit: number): { start: nu
   };
 }
 
-function promptModeLabelKey(mode: TUIPromptMode): "tui.mode.prompt.default" | "tui.mode.prompt.codex" | "tui.mode.prompt.claude" {
+function promptModeLabelKey(mode: TUIPromptMode): "tui.mode.prompt.default" | "tui.mode.prompt.codex" {
   if (mode === "codex") {
     return "tui.mode.prompt.codex";
-  }
-  if (mode === "claude") {
-    return "tui.mode.prompt.claude";
   }
   return "tui.mode.prompt.default";
 }

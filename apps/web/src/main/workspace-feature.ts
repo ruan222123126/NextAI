@@ -24,8 +24,6 @@ interface WorkspaceFeatureContext {
   workspaceImportModalCloseButton: HTMLButtonElement;
   workspaceFilesBody: HTMLUListElement;
   workspacePromptsBody: HTMLUListElement;
-  workspaceClaudeBody: HTMLUListElement;
-  workspaceCodexTreeBody: HTMLUListElement;
   workspaceEditorForm: HTMLFormElement;
   workspaceDeleteFileButton: HTMLButtonElement;
   workspaceFilePathInput: HTMLInputElement;
@@ -49,8 +47,6 @@ export function createWorkspaceFeature(ctx: WorkspaceFeatureContext): FeatureMod
     workspaceImportModalCloseButton,
     workspaceFilesBody,
     workspacePromptsBody,
-    workspaceClaudeBody,
-    workspaceCodexTreeBody,
     workspaceEditorForm,
     workspaceDeleteFileButton,
     workspaceFilePathInput,
@@ -106,14 +102,6 @@ export function createWorkspaceFeature(ctx: WorkspaceFeatureContext): FeatureMod
     }
     if (action === "open-prompt") {
       openWorkspaceSettingsCard("prompt");
-      return;
-    }
-    if (action === "open-codex") {
-      openWorkspaceSettingsCard("codex");
-      return;
-    }
-    if (action === "open-claude") {
-      openWorkspaceSettingsCard("claude");
       return;
     }
     if (action === "back") {
@@ -199,36 +187,6 @@ export function createWorkspaceFeature(ctx: WorkspaceFeatureContext): FeatureMod
     });
 
     on(workspacePromptsBody, "click", (event: Event) => {
-      void handleWorkspaceFileListClick(event);
-    });
-
-    on(workspaceClaudeBody, "click", (event: Event) => {
-      const target = event.target;
-      if (target instanceof Element) {
-        const folderToggle = target.closest<HTMLButtonElement>("button[data-workspace-claude-folder-toggle]");
-        if (folderToggle) {
-          const folderPath = folderToggle.dataset.workspaceClaudeFolderToggle ?? "";
-          if (folderPath !== "") {
-            domain.toggleWorkspaceClaudeFolder(folderPath);
-          }
-          return;
-        }
-      }
-      void handleWorkspaceFileListClick(event);
-    });
-
-    on(workspaceCodexTreeBody, "click", (event: Event) => {
-      const target = event.target;
-      if (target instanceof Element) {
-        const folderToggle = target.closest<HTMLButtonElement>("button[data-workspace-folder-toggle]");
-        if (folderToggle) {
-          const folderPath = folderToggle.dataset.workspaceFolderToggle ?? "";
-          if (folderPath !== "") {
-            domain.toggleWorkspaceCodexFolder(folderPath);
-          }
-          return;
-        }
-      }
       void handleWorkspaceFileListClick(event);
     });
 

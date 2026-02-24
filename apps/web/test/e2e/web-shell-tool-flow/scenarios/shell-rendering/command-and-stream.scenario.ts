@@ -261,9 +261,11 @@ describe("web e2e: shell/tool 渲染场景 - 命令与流式", () => {
 
 
 
-  it("流式回复期间显示思考动画，完成后隐藏", async () => {
+  it("流式回复期间按阶段切换思考动画", async () => {
     let processCalled = false;
-    let emitDelta: (() => void) | null = null;
+    let emitFirstDelta: (() => void) | null = null;
+    let emitToolCall: (() => void) | null = null;
+    let emitSecondDelta: (() => void) | null = null;
     let finishStream: (() => void) | null = null;
 
     globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -294,14 +296,28 @@ describe("web e2e: shell/tool 渲染场景 - 命令与流式", () => {
           start(controller) {
             const firstChunk = [`data: ${JSON.stringify({ type: "step_started", step: 1 })}`, ""].join("\n\n");
             controller.enqueue(encoder.encode(firstChunk));
-            emitDelta = () => {
-              const deltaChunk = [`data: ${JSON.stringify({ type: "assistant_delta", step: 1, delta: "收到" })}`, ""].join(
+            emitFirstDelta = () => {
+              const deltaChunk = [`data: ${JSON.stringify({ type: "assistant_delta", step: 1, delta: "先说一句" })}`, ""].join(
+                "\n\n",
+              );
+              controller.enqueue(encoder.encode(deltaChunk));
+            };
+            emitToolCall = () => {
+              const toolChunk = [
+                `data: ${JSON.stringify({ type: "tool_call", step: 1, tool_call: { name: "shell", input: { command: "echo 1" } } })}`,
+                `data: ${JSON.stringify({ type: "tool_result", step: 1, tool_result: { name: "shell", ok: true, summary: "done" } })}`,
+                "",
+              ].join("\n\n");
+              controller.enqueue(encoder.encode(toolChunk));
+            };
+            emitSecondDelta = () => {
+              const deltaChunk = [`data: ${JSON.stringify({ type: "assistant_delta", step: 1, delta: "再补一句" })}`, ""].join(
                 "\n\n",
               );
               controller.enqueue(encoder.encode(deltaChunk));
             };
             finishStream = () => {
-              const finalChunk = [`data: ${JSON.stringify({ type: "completed", step: 1, reply: "收到" })}`, "data: [DONE]", ""].join(
+              const finalChunk = [`data: ${JSON.stringify({ type: "completed", step: 1, reply: "先说一句再补一句" })}`, "data: [DONE]", ""].join(
                 "\n\n",
               );
               controller.enqueue(encoder.encode(finalChunk));
@@ -334,8 +350,24 @@ describe("web e2e: shell/tool 渲染场景 - 命令与流式", () => {
     const pendingAssistantText = page.assistantMessages().map((item) => (item.textContent ?? "").trim());
     expect(pendingAssistantText).not.toContain("...");
 
-    await waitFor(() => typeof emitDelta === "function", 4000);
-    emitDelta?.();
+    await waitFor(() => typeof emitFirstDelta === "function", 4000);
+    emitFirstDelta?.();
+
+    await waitFor(() => {
+      const indicator = page.thinkingIndicator();
+      return !indicator || indicator.hidden;
+    }, 4000);
+
+    await waitFor(() => typeof emitToolCall === "function", 4000);
+    emitToolCall?.();
+
+    await waitFor(() => {
+      const indicator = page.thinkingIndicator();
+      return Boolean(indicator && !indicator.hidden);
+    }, 4000);
+
+    await waitFor(() => typeof emitSecondDelta === "function", 4000);
+    emitSecondDelta?.();
 
     await waitFor(() => {
       const indicator = page.thinkingIndicator();
@@ -348,7 +380,8 @@ describe("web e2e: shell/tool 渲染场景 - 命令与流式", () => {
     await waitFor(() => {
       const assistants = page.assistantMessages();
       const assistant = assistants[assistants.length - 1];
-      return (assistant?.textContent ?? "").includes("收到");
+      const text = assistant?.textContent ?? "";
+      return text.includes("先说一句") && text.includes("再补一句");
     }, 4000);
   });
 

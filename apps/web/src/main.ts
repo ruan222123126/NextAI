@@ -55,7 +55,6 @@ import type {
   ViewMessageTimelineEntry,
   ViewToolCallNotice,
   WorkspaceCardKey,
-  WorkspaceCodexTreeNode,
   WorkspaceEditorMode,
   WorkspaceFileCatalog,
   WorkspaceFileInfo,
@@ -133,14 +132,10 @@ const PROMPT_TEMPLATE_PREFIX = "/prompts:";
 const SYSTEM_PROMPT_LAYER_ENDPOINT = "/agent/system-layers";
 const SYSTEM_PROMPT_WORKSPACE_FALLBACK_PATHS = ["prompts/AGENTS.md", "prompts/ai-tools.md"] as const;
 const SYSTEM_PROMPT_WORKSPACE_PATH_SET = new Set(SYSTEM_PROMPT_WORKSPACE_FALLBACK_PATHS.map((path) => path.toLowerCase()));
-const WORKSPACE_CODEX_PREFIX = "prompts/codex/";
-const WORKSPACE_CLAUDE_PREFIX = "prompts/claude/";
-const WORKSPACE_CARD_KEYS: WorkspaceCardKey[] = ["config", "prompt", "codex", "claude"];
+const WORKSPACE_CARD_KEYS: WorkspaceCardKey[] = ["config", "prompt"];
 const DEFAULT_WORKSPACE_CARD_ENABLED: Record<WorkspaceCardKey, boolean> = {
   config: true,
   prompt: true,
-  codex: true,
-  claude: true,
 };
 const PROMPT_TEMPLATE_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const PROMPT_TEMPLATE_ARG_KEY_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -258,12 +253,8 @@ const workspaceEntryList = mustElement<HTMLUListElement>("workspace-entry-list")
 const workspaceLevel1View = mustElement<HTMLElement>("workspace-level1-view");
 const workspaceLevel2ConfigView = mustElement<HTMLElement>("workspace-level2-config-view");
 const workspaceLevel2PromptView = mustElement<HTMLElement>("workspace-level2-prompt-view");
-const workspaceLevel2CodexView = mustElement<HTMLElement>("workspace-level2-codex-view");
-const workspaceLevel2ClaudeView = mustElement<HTMLElement>("workspace-level2-claude-view");
 const workspaceFilesBody = mustElement<HTMLUListElement>("workspace-files-body");
 const workspacePromptsBody = mustElement<HTMLUListElement>("workspace-prompts-body");
-const workspaceCodexTreeBody = mustElement<HTMLUListElement>("workspace-codex-tree-body");
-const workspaceClaudeBody = mustElement<HTMLUListElement>("workspace-claude-body");
 const workspaceEditorModal = mustElement<HTMLElement>("workspace-editor-modal");
 const workspaceEditorModalCloseButton = mustElement<HTMLButtonElement>("workspace-editor-modal-close-btn");
 const workspaceImportModal = mustElement<HTMLElement>("workspace-import-modal");
@@ -366,19 +357,7 @@ const state = {
     files: [] as WorkspaceFileInfo[],
     configFiles: [] as WorkspaceFileInfo[],
     promptFiles: [] as WorkspaceFileInfo[],
-    codexFiles: [] as WorkspaceFileInfo[],
-    claudeFiles: [] as WorkspaceFileInfo[],
-    codexTree: [] as WorkspaceCodexTreeNode[],
-    codexRootFiles: [] as WorkspaceFileInfo[],
-    codexFolderPaths: new Set<string>(),
-    codexTopLevelFolderPaths: new Set<string>(),
-    claudeTree: [] as WorkspaceCodexTreeNode[],
-    claudeRootFiles: [] as WorkspaceFileInfo[],
-    claudeFolderPaths: new Set<string>(),
-    claudeTopLevelFolderPaths: new Set<string>(),
   },
-  workspaceCodexExpandedFolders: new Set<string>(),
-  workspaceClaudeExpandedFolders: new Set<string>(),
   qqChannelConfig: {
     enabled: false,
     app_id: "",
@@ -436,8 +415,6 @@ const workspaceFeature = createWorkspaceFeature({
   workspaceImportModalCloseButton,
   workspaceFilesBody,
   workspacePromptsBody,
-  workspaceClaudeBody,
-  workspaceCodexTreeBody,
   workspaceEditorForm,
   workspaceDeleteFileButton,
   workspaceFilePathInput,
@@ -457,20 +434,14 @@ const workspaceFeature = createWorkspaceFeature({
     setWorkspaceImportModalOpen,
     DEFAULT_WORKSPACE_CARD_ENABLED,
     WORKSPACE_CARD_KEYS,
-    WORKSPACE_CODEX_PREFIX,
-    WORKSPACE_CLAUDE_PREFIX,
     TRASH_ICON_SVG,
     workspaceEntryList,
     workspaceLevel1View,
     workspaceLevel2ConfigView,
     workspaceLevel2PromptView,
-    workspaceLevel2CodexView,
-    workspaceLevel2ClaudeView,
     workspaceSettingsSection,
     workspaceFilesBody,
     workspacePromptsBody,
-    workspaceCodexTreeBody,
-    workspaceClaudeBody,
     workspaceFilePathInput,
     workspaceFileContentInput,
     workspaceSaveFileButton,
@@ -983,24 +954,10 @@ function applyPromptContextIntrospectOverride(enabled: boolean, notify = false):
   }
 }
 
-function normalizeSystemLayerTaskCommand(raw: string): string {
-  const command = raw.trim().split(/\s+/)[0]?.toLowerCase() ?? "";
-  switch (command) {
-    case "/review":
-      return "review";
-    case "/compact":
-      return "compact";
-    case "/memory":
-      return "memory";
-    default:
-      return "";
-  }
-}
-
 function resolveSystemPromptTokenScenario(promptMode: PromptMode): SystemPromptTokenScenario {
-  const taskCommand = promptMode === "codex" ? normalizeSystemLayerTaskCommand(messageInput.value) : "";
-  const collaborationMode = promptMode === "codex" ? state.activeCollaborationMode : "";
-  const sessionID = taskCommand === "memory" ? state.activeSessionId.trim() : "";
+  const taskCommand = "";
+  const collaborationMode = "";
+  const sessionID = "";
   const tokenSourceKey = runtimeFlags.prompt_context_introspect ? "introspect" : "fallback";
   return {
     promptMode,

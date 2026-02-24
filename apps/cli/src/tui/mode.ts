@@ -1,4 +1,4 @@
-export type TUIPromptMode = "default" | "codex" | "claude";
+export type TUIPromptMode = "default" | "codex";
 export type TUICollaborationMode = "default" | "plan" | "execute" | "pair_programming";
 
 export interface TUIModeState {
@@ -6,7 +6,7 @@ export interface TUIModeState {
   collaborationMode: TUICollaborationMode;
 }
 
-const promptModes: TUIPromptMode[] = ["default", "codex", "claude"];
+const promptModes: TUIPromptMode[] = ["default", "codex"];
 const collaborationModes: TUICollaborationMode[] = ["default", "plan", "execute", "pair_programming"];
 
 export function normalizePromptMode(raw: unknown): TUIPromptMode {
@@ -16,9 +16,6 @@ export function normalizePromptMode(raw: unknown): TUIPromptMode {
   const normalized = raw.trim().toLowerCase();
   if (normalized === "codex") {
     return "codex";
-  }
-  if (normalized === "claude") {
-    return "claude";
   }
   return "default";
 }

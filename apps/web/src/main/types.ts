@@ -12,7 +12,7 @@ import type {
   RuntimeMessage as ContractRuntimeMessage,
 } from "@nextai/sdk-ts";
 
-export type PromptMode = "default" | "codex" | "claude";
+export type PromptMode = "default";
 export type CollaborationMode = "default" | "plan" | "execute" | "pair_programming";
 
 export type ChatSpec = ContractChatSpec & { updated_at: string };
@@ -270,8 +270,8 @@ export interface CronJobState {
 }
 
 export type WorkspaceEditorMode = "json" | "text";
-export type WorkspaceSettingsLevel = "list" | "config" | "prompt" | "codex" | "claude";
-export type WorkspaceCardKey = "config" | "prompt" | "codex" | "claude";
+export type WorkspaceSettingsLevel = "list" | "config" | "prompt";
+export type WorkspaceCardKey = "config" | "prompt";
 
 export interface WorkspaceFileInfo {
   path: string;
@@ -290,16 +290,6 @@ export interface WorkspaceFileCatalog {
   files: WorkspaceFileInfo[];
   configFiles: WorkspaceFileInfo[];
   promptFiles: WorkspaceFileInfo[];
-  codexFiles: WorkspaceFileInfo[];
-  claudeFiles: WorkspaceFileInfo[];
-  codexTree: WorkspaceCodexTreeNode[];
-  codexRootFiles: WorkspaceFileInfo[];
-  codexFolderPaths: Set<string>;
-  codexTopLevelFolderPaths: Set<string>;
-  claudeTree: WorkspaceCodexTreeNode[];
-  claudeRootFiles: WorkspaceFileInfo[];
-  claudeFolderPaths: Set<string>;
-  claudeTopLevelFolderPaths: Set<string>;
 }
 
 export interface WorkspaceTextPayload {
@@ -362,8 +352,6 @@ export interface WebAppState {
   providerAPIKeyVisible: boolean;
   providerModal: WebAppProviderModalState;
   workspaceFileCatalog: WorkspaceFileCatalog;
-  workspaceCodexExpandedFolders: Set<string>;
-  workspaceClaudeExpandedFolders: Set<string>;
   qqChannelConfig: QQChannelConfig;
   qqChannelAvailable: boolean;
   activeWorkspacePath: string;
@@ -514,19 +502,13 @@ export interface WebAppContext {
   setWorkspaceImportModalOpen: (open: boolean) => void;
   DEFAULT_WORKSPACE_CARD_ENABLED: Record<WorkspaceCardKey, boolean>;
   WORKSPACE_CARD_KEYS: WorkspaceCardKey[];
-  WORKSPACE_CODEX_PREFIX: string;
-  WORKSPACE_CLAUDE_PREFIX: string;
   workspaceEntryList: HTMLUListElement;
   workspaceLevel1View: HTMLElement;
   workspaceLevel2ConfigView: HTMLElement;
   workspaceLevel2PromptView: HTMLElement;
-  workspaceLevel2CodexView: HTMLElement;
-  workspaceLevel2ClaudeView: HTMLElement;
   workspaceSettingsSection: HTMLElement;
   workspaceFilesBody: HTMLUListElement;
   workspacePromptsBody: HTMLUListElement;
-  workspaceCodexTreeBody: HTMLUListElement;
-  workspaceClaudeBody: HTMLUListElement;
   workspaceFilePathInput: HTMLInputElement;
   workspaceFileContentInput: HTMLTextAreaElement;
   workspaceSaveFileButton: HTMLButtonElement;
@@ -701,20 +683,14 @@ export type WorkspaceDomainContext = Pick<WebAppContext,
   | "setWorkspaceImportModalOpen"
   | "DEFAULT_WORKSPACE_CARD_ENABLED"
   | "WORKSPACE_CARD_KEYS"
-  | "WORKSPACE_CODEX_PREFIX"
-  | "WORKSPACE_CLAUDE_PREFIX"
   | "TRASH_ICON_SVG"
   | "workspaceEntryList"
   | "workspaceLevel1View"
   | "workspaceLevel2ConfigView"
   | "workspaceLevel2PromptView"
-  | "workspaceLevel2CodexView"
-  | "workspaceLevel2ClaudeView"
   | "workspaceSettingsSection"
   | "workspaceFilesBody"
   | "workspacePromptsBody"
-  | "workspaceCodexTreeBody"
-  | "workspaceClaudeBody"
   | "workspaceFilePathInput"
   | "workspaceFileContentInput"
   | "workspaceSaveFileButton"

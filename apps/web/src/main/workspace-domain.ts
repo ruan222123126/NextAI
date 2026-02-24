@@ -1,18 +1,12 @@
 import type {
   WorkspaceDomainContext,
   WorkspaceCardKey,
-  WorkspaceCodexTreeNode,
   WorkspaceEditorMode,
   WorkspaceFileCatalog,
   WorkspaceFileInfo,
   WorkspaceSettingsLevel,
   WorkspaceTextPayload,
 } from "./types.js";
-
-interface WorkspaceFileTree {
-  folders: WorkspaceCodexTreeNode[];
-  rootFiles: WorkspaceFileInfo[];
-}
 
 export function createWorkspaceDomain(ctx: WorkspaceDomainContext) {
   const {
@@ -30,20 +24,14 @@ export function createWorkspaceDomain(ctx: WorkspaceDomainContext) {
     setWorkspaceImportModalOpen,
     DEFAULT_WORKSPACE_CARD_ENABLED,
     WORKSPACE_CARD_KEYS,
-    WORKSPACE_CODEX_PREFIX,
-    WORKSPACE_CLAUDE_PREFIX,
     TRASH_ICON_SVG,
     workspaceEntryList,
     workspaceLevel1View,
     workspaceLevel2ConfigView,
     workspaceLevel2PromptView,
-    workspaceLevel2CodexView,
-    workspaceLevel2ClaudeView,
     workspaceSettingsSection,
     workspaceFilesBody,
     workspacePromptsBody,
-    workspaceCodexTreeBody,
-    workspaceClaudeBody,
     workspaceFilePathInput,
     workspaceFileContentInput,
     workspaceSaveFileButton,
@@ -52,13 +40,11 @@ export function createWorkspaceDomain(ctx: WorkspaceDomainContext) {
   } = ctx;
 
 function setWorkspaceSettingsLevel(level: WorkspaceSettingsLevel): void {
-  state.workspaceSettingsLevel = level === "config" || level === "prompt" || level === "codex" || level === "claude" ? level : "list";
+  state.workspaceSettingsLevel = level === "config" || level === "prompt" ? level : "list";
   const showList = state.workspaceSettingsLevel === "list";
   workspaceLevel1View.hidden = !showList;
   workspaceLevel2ConfigView.hidden = state.workspaceSettingsLevel !== "config";
   workspaceLevel2PromptView.hidden = state.workspaceSettingsLevel !== "prompt";
-  workspaceLevel2CodexView.hidden = state.workspaceSettingsLevel !== "codex";
-  workspaceLevel2ClaudeView.hidden = state.workspaceSettingsLevel !== "claude";
   workspaceSettingsSection.classList.toggle("is-level2-active", !showList);
 }
 
@@ -77,7 +63,7 @@ function parseWorkspaceCardEnabled(raw: unknown): Record<WorkspaceCardKey, boole
 }
 
 function isWorkspaceCardKey(value: string | undefined): value is WorkspaceCardKey {
-  return value === "config" || value === "prompt" || value === "codex" || value === "claude";
+  return value === "config" || value === "prompt";
 }
 
 function isWorkspaceCardEnabled(card: WorkspaceCardKey): boolean {
@@ -88,13 +74,7 @@ function resolveWorkspaceCardTitle(card: WorkspaceCardKey): string {
   if (card === "config") {
     return t("workspace.configCardTitle");
   }
-  if (card === "prompt") {
-    return t("workspace.promptCardTitle");
-  }
-  if (card === "codex") {
-    return t("workspace.codexCardTitle");
-  }
-  return t("workspace.claudeCardTitle");
+  return t("workspace.promptCardTitle");
 }
 
 function ensureWorkspaceCardEnabled(card: WorkspaceCardKey): boolean {
@@ -125,7 +105,7 @@ function setWorkspaceCardEnabled(card: WorkspaceCardKey, enabled: boolean): void
 
 function appendWorkspaceNavigationCard(
   card: WorkspaceCardKey,
-  action: "open-config" | "open-prompt" | "open-codex" | "open-claude",
+  action: "open-config" | "open-prompt",
   selected: boolean,
   titleText: string,
   descText: string,
@@ -180,7 +160,7 @@ function appendWorkspaceNavigationCard(
   workspaceEntryList.appendChild(entry);
 }
 
-function renderWorkspaceNavigation(configCount: number, promptCount: number, codexCount: number, claudeCount: number): void {
+function renderWorkspaceNavigation(configCount: number, promptCount: number): void {
   workspaceEntryList.innerHTML = "";
   appendWorkspaceNavigationCard(
     "config",
@@ -197,22 +177,6 @@ function renderWorkspaceNavigation(configCount: number, promptCount: number, cod
     t("workspace.promptCardTitle"),
     t("workspace.briefAITools"),
     promptCount,
-  );
-  appendWorkspaceNavigationCard(
-    "codex",
-    "open-codex",
-    state.workspaceSettingsLevel === "codex",
-    t("workspace.codexCardTitle"),
-    t("workspace.briefCodex"),
-    codexCount,
-  );
-  appendWorkspaceNavigationCard(
-    "claude",
-    "open-claude",
-    state.workspaceSettingsLevel === "claude",
-    t("workspace.claudeCardTitle"),
-    t("workspace.briefClaude"),
-    claudeCount,
   );
 }
 
@@ -231,8 +195,6 @@ async function refreshWorkspace(options: { silent?: boolean } = {}): Promise<voi
 
 function applyWorkspaceFileCatalog(catalog: WorkspaceFileCatalog): void {
   state.workspaceFileCatalog = catalog;
-  syncWorkspaceCodexExpandedFolders(catalog);
-  syncWorkspaceClaudeExpandedFolders(catalog);
   syncActiveWorkspaceSelection(catalog.files);
   renderWorkspacePanel();
   state.tabLoaded.workspace = true;
@@ -254,20 +216,9 @@ function renderWorkspacePanel(): void {
 }
 
 function renderWorkspaceFiles(): void {
-  const {
-    configFiles,
-    promptFiles,
-    codexFiles,
-    claudeFiles,
-    codexTree,
-    codexRootFiles,
-    claudeTree,
-    claudeRootFiles,
-  } = state.workspaceFileCatalog;
-  renderWorkspaceNavigation(configFiles.length, promptFiles.length, codexFiles.length, claudeFiles.length);
+  const { configFiles, promptFiles } = state.workspaceFileCatalog;
+  renderWorkspaceNavigation(configFiles.length, promptFiles.length);
   renderWorkspaceConfigAndPromptFiles(configFiles, promptFiles);
-  renderWorkspaceCodexTree(workspaceCodexTreeBody, codexTree, codexRootFiles, t("workspace.emptyCodex"));
-  renderWorkspaceClaudeTree(workspaceClaudeBody, claudeTree, claudeRootFiles, t("workspace.emptyClaude"));
 }
 
 function renderWorkspaceConfigAndPromptFiles(
@@ -280,308 +231,26 @@ function renderWorkspaceConfigAndPromptFiles(
 
 function splitWorkspaceFiles(
   files: WorkspaceFileInfo[],
-): { configFiles: WorkspaceFileInfo[]; promptFiles: WorkspaceFileInfo[]; codexFiles: WorkspaceFileInfo[]; claudeFiles: WorkspaceFileInfo[] } {
+): { configFiles: WorkspaceFileInfo[]; promptFiles: WorkspaceFileInfo[] } {
   const configFiles: WorkspaceFileInfo[] = [];
   const promptFiles: WorkspaceFileInfo[] = [];
-  const codexFiles: WorkspaceFileInfo[] = [];
-  const claudeFiles: WorkspaceFileInfo[] = [];
   for (const file of files) {
-    if (isWorkspaceCodexFile(file)) {
-      codexFiles.push(file);
-      continue;
-    }
-    if (isWorkspaceClaudeFile(file)) {
-      claudeFiles.push(file);
-      continue;
-    }
     if (isWorkspacePromptFile(file)) {
       promptFiles.push(file);
       continue;
     }
     configFiles.push(file);
   }
-  return { configFiles, promptFiles, codexFiles, claudeFiles };
+  return { configFiles, promptFiles };
 }
 
 function createWorkspaceFileCatalog(files: WorkspaceFileInfo[]): WorkspaceFileCatalog {
   const groups = splitWorkspaceFiles(files);
-  const codexTree = buildWorkspacePromptTree(groups.codexFiles, WORKSPACE_CODEX_PREFIX);
-  const codexFolders = collectWorkspaceTreeFolderPaths(codexTree.folders);
-  const claudeTree = buildWorkspacePromptTree(groups.claudeFiles, WORKSPACE_CLAUDE_PREFIX);
-  const claudeFolders = collectWorkspaceTreeFolderPaths(claudeTree.folders);
   return {
     files,
     configFiles: groups.configFiles,
     promptFiles: groups.promptFiles,
-    codexFiles: groups.codexFiles,
-    claudeFiles: groups.claudeFiles,
-    codexTree: codexTree.folders,
-    codexRootFiles: codexTree.rootFiles,
-    codexFolderPaths: codexFolders.folderPaths,
-    codexTopLevelFolderPaths: codexFolders.topLevelFolderPaths,
-    claudeTree: claudeTree.folders,
-    claudeRootFiles: claudeTree.rootFiles,
-    claudeFolderPaths: claudeFolders.folderPaths,
-    claudeTopLevelFolderPaths: claudeFolders.topLevelFolderPaths,
   };
-}
-
-function collectWorkspaceTreeFolderPaths(tree: WorkspaceCodexTreeNode[]): {
-  folderPaths: Set<string>;
-  topLevelFolderPaths: Set<string>;
-} {
-  const folderPaths = new Set<string>();
-  const topLevelFolderPaths = new Set<string>();
-  const visit = (node: WorkspaceCodexTreeNode, depth: number): void => {
-    folderPaths.add(node.path);
-    if (depth === 0) {
-      topLevelFolderPaths.add(node.path);
-    }
-    for (const child of node.folders) {
-      visit(child, depth + 1);
-    }
-  };
-  for (const node of tree) {
-    visit(node, 0);
-  }
-  return { folderPaths, topLevelFolderPaths };
-}
-
-function renderWorkspaceCodexTree(
-  targetBody: HTMLUListElement,
-  tree: WorkspaceCodexTreeNode[],
-  rootFiles: WorkspaceFileInfo[],
-  emptyText: string,
-): void {
-  renderWorkspacePromptTree(targetBody, tree, rootFiles, emptyText, "codex");
-}
-
-function renderWorkspaceClaudeTree(
-  targetBody: HTMLUListElement,
-  tree: WorkspaceCodexTreeNode[],
-  rootFiles: WorkspaceFileInfo[],
-  emptyText: string,
-): void {
-  renderWorkspacePromptTree(targetBody, tree, rootFiles, emptyText, "claude");
-}
-
-function renderWorkspacePromptTree(
-  targetBody: HTMLUListElement,
-  tree: WorkspaceCodexTreeNode[],
-  rootFiles: WorkspaceFileInfo[],
-  emptyText: string,
-  kind: "codex" | "claude",
-): void {
-  targetBody.innerHTML = "";
-  if (tree.length === 0 && rootFiles.length === 0) {
-    appendEmptyItem(targetBody, emptyText);
-    return;
-  }
-  for (const node of tree) {
-    appendWorkspaceFolderNode(targetBody, node, 0, kind);
-  }
-  for (const file of rootFiles) {
-    appendWorkspaceTreeFileNode(targetBody, file);
-  }
-}
-
-function buildWorkspacePromptTree(files: WorkspaceFileInfo[], prefix: string): WorkspaceFileTree {
-  type MutableNode = {
-    name: string;
-    path: string;
-    folders: Map<string, MutableNode>;
-    files: WorkspaceFileInfo[];
-  };
-  const root: MutableNode = {
-    name: "",
-    path: "",
-    folders: new Map<string, MutableNode>(),
-    files: [],
-  };
-
-  for (const file of files) {
-    const normalizedPath = normalizeWorkspaceInputPath(file.path);
-    if (!normalizedPath.startsWith(prefix)) {
-      continue;
-    }
-    const relativePath = normalizedPath.slice(prefix.length);
-    const parts = relativePath.split("/").filter((part) => part !== "");
-    if (parts.length === 0) {
-      continue;
-    }
-    const fileName = parts.pop() ?? "";
-    if (fileName === "") {
-      continue;
-    }
-    let cursor = root;
-    let folderPath = "";
-    for (const part of parts) {
-      folderPath = folderPath === "" ? part : `${folderPath}/${part}`;
-      let next = cursor.folders.get(part);
-      if (!next) {
-        next = {
-          name: part,
-          path: folderPath,
-          folders: new Map<string, MutableNode>(),
-          files: [],
-        };
-        cursor.folders.set(part, next);
-      }
-      cursor = next;
-    }
-    cursor.files.push(file);
-  }
-
-  const freezeTree = (node: MutableNode): WorkspaceCodexTreeNode => {
-    const folders = Array.from(node.folders.values())
-      .sort((a, b) => a.name.localeCompare(b.name))
-      .map((child) => freezeTree(child));
-    const sortedFiles = [...node.files].sort((a, b) => a.path.localeCompare(b.path));
-    return {
-      name: node.name,
-      path: node.path,
-      folders,
-      files: sortedFiles,
-    };
-  };
-
-  const frozenRoot = freezeTree(root);
-  return {
-    folders: frozenRoot.folders,
-    rootFiles: frozenRoot.files,
-  };
-}
-
-function appendWorkspaceFolderNode(
-  targetBody: HTMLUListElement,
-  node: WorkspaceCodexTreeNode,
-  depth: number,
-  kind: "codex" | "claude",
-): void {
-  const entry = document.createElement("li");
-  entry.className = "workspace-codex-tree-node workspace-codex-tree-folder";
-
-  const toggleButton = document.createElement("button");
-  toggleButton.type = "button";
-  toggleButton.className = "workspace-codex-folder-toggle";
-  if (kind === "codex") {
-    toggleButton.dataset.workspaceFolderToggle = node.path;
-  } else {
-    toggleButton.dataset.workspaceClaudeFolderToggle = node.path;
-  }
-  toggleButton.dataset.workspaceFolderPath = node.path;
-  toggleButton.dataset.workspaceFolderDepth = String(depth + 1);
-
-  const expanded = isWorkspaceFolderExpanded(kind, node.path);
-  toggleButton.classList.toggle("is-expanded", expanded);
-  toggleButton.setAttribute("aria-expanded", String(expanded));
-
-  const prefix = document.createElement("span");
-  prefix.className = "workspace-codex-folder-prefix";
-  prefix.textContent = expanded ? "▾" : "▸";
-
-  const title = document.createElement("span");
-  title.className = "workspace-codex-folder-title mono";
-  title.textContent = node.name;
-
-  const countMeta = document.createElement("span");
-  countMeta.className = "workspace-codex-folder-meta";
-  countMeta.textContent = t("workspace.cardFileCount", { count: countWorkspaceTreeNodeFiles(node) });
-
-  toggleButton.append(prefix, title, countMeta);
-  entry.appendChild(toggleButton);
-
-  const children = document.createElement("ul");
-  children.className = "workspace-codex-tree-children";
-  children.hidden = !expanded;
-
-  for (const folder of node.folders) {
-    appendWorkspaceFolderNode(children, folder, depth + 1, kind);
-  }
-  for (const file of node.files) {
-    appendWorkspaceTreeFileNode(children, file);
-  }
-
-  if (children.childElementCount > 0) {
-    entry.appendChild(children);
-  }
-  targetBody.appendChild(entry);
-}
-
-function appendWorkspaceTreeFileNode(targetBody: HTMLUListElement, file: WorkspaceFileInfo): void {
-  const fileEntry = document.createElement("li");
-  fileEntry.className = "workspace-codex-tree-node workspace-codex-tree-file";
-
-  const fileButton = document.createElement("button");
-  fileButton.type = "button";
-  fileButton.className = "workspace-codex-file-open";
-  fileButton.dataset.workspaceOpen = file.path;
-  if (file.path === state.activeWorkspacePath) {
-    fileButton.classList.add("is-selected");
-  }
-  const fileName = file.path.split("/").pop() ?? file.path;
-  fileButton.textContent = fileName;
-  fileButton.title = file.path;
-  fileEntry.appendChild(fileButton);
-  targetBody.appendChild(fileEntry);
-}
-
-function countWorkspaceTreeNodeFiles(node: WorkspaceCodexTreeNode): number {
-  let count = node.files.length;
-  for (const folder of node.folders) {
-    count += countWorkspaceTreeNodeFiles(folder);
-  }
-  return count;
-}
-
-function isWorkspaceFolderExpanded(kind: "codex" | "claude", path: string): boolean {
-  if (kind === "codex") {
-    return state.workspaceCodexExpandedFolders.has(path);
-  }
-  return state.workspaceClaudeExpandedFolders.has(path);
-}
-
-function toggleWorkspaceCodexFolder(path: string): void {
-  toggleWorkspaceFolder("codex", path);
-}
-
-function toggleWorkspaceClaudeFolder(path: string): void {
-  toggleWorkspaceFolder("claude", path);
-}
-
-function toggleWorkspaceFolder(kind: "codex" | "claude", path: string): void {
-  const expandedFolders = kind === "codex" ? state.workspaceCodexExpandedFolders : state.workspaceClaudeExpandedFolders;
-  if (expandedFolders.has(path)) {
-    expandedFolders.delete(path);
-  } else {
-    expandedFolders.add(path);
-  }
-  renderWorkspaceFiles();
-}
-
-function syncWorkspaceCodexExpandedFolders(catalog: WorkspaceFileCatalog): void {
-  syncWorkspaceExpandedFolders(state.workspaceCodexExpandedFolders, catalog.codexFolderPaths, catalog.codexTopLevelFolderPaths);
-}
-
-function syncWorkspaceClaudeExpandedFolders(catalog: WorkspaceFileCatalog): void {
-  syncWorkspaceExpandedFolders(state.workspaceClaudeExpandedFolders, catalog.claudeFolderPaths, catalog.claudeTopLevelFolderPaths);
-}
-
-function syncWorkspaceExpandedFolders(
-  expandedFolders: Set<string>,
-  folderPaths: Set<string>,
-  topLevelFolderPaths: Set<string>,
-): void {
-  for (const path of Array.from(expandedFolders) as string[]) {
-    if (!folderPaths.has(path)) {
-      expandedFolders.delete(path);
-    }
-  }
-  if (expandedFolders.size === 0) {
-    for (const topPath of topLevelFolderPaths) {
-      expandedFolders.add(topPath);
-    }
-  }
 }
 
 function renderWorkspaceFileRows(
@@ -663,31 +332,14 @@ function resolveWorkspaceFileSummary(file: WorkspaceFileInfo): string {
   if (file.kind === "skill") {
     return t("workspace.briefSkill");
   }
-  if (path.startsWith(WORKSPACE_CODEX_PREFIX)) {
-    return t("workspace.briefCodex");
-  }
-  if (path.startsWith(WORKSPACE_CLAUDE_PREFIX)) {
-    return t("workspace.briefClaude");
-  }
   if (path.startsWith("docs/ai/") || path.startsWith("prompts/") || path.startsWith("prompt/")) {
     return t("workspace.briefAITools");
   }
   return t("workspace.briefGeneric");
 }
 
-function isWorkspaceCodexFile(file: WorkspaceFileInfo): boolean {
-  return normalizeWorkspacePathKey(file.path).startsWith(WORKSPACE_CODEX_PREFIX);
-}
-
-function isWorkspaceClaudeFile(file: WorkspaceFileInfo): boolean {
-  return normalizeWorkspacePathKey(file.path).startsWith(WORKSPACE_CLAUDE_PREFIX);
-}
-
 function isWorkspacePromptFile(file: WorkspaceFileInfo): boolean {
   const path = normalizeWorkspacePathKey(file.path);
-  if (path.startsWith(WORKSPACE_CODEX_PREFIX) || path.startsWith(WORKSPACE_CLAUDE_PREFIX)) {
-    return false;
-  }
   if (file.kind === "skill") {
     return true;
   }
@@ -1054,8 +706,6 @@ function isWorkspaceSkillPath(path: string): boolean {
     clearWorkspaceSelection,
     isWorkspaceSkillPath,
     normalizeWorkspaceInputPath,
-    toggleWorkspaceCodexFolder,
-    toggleWorkspaceClaudeFolder,
     requestWorkspaceFile,
   };
 }

@@ -128,7 +128,7 @@ describe("web e2e: prompt 模板与模式场景 - 模板展开", () => {
 
 
 
-  it("check-fix 模板会回退到 codex user 目录加载", async () => {
+  it("check-fix 模板会按候选路径回退加载", async () => {
     window.localStorage.setItem("nextai.feature.prompt_templates", "true");
     let processCalled = false;
     let sessionID = "";
@@ -139,7 +139,6 @@ describe("web e2e: prompt 模板与模式场景 - 模板展开", () => {
     const fallbackTemplatePaths = new Set([
       "prompts/check-fix.md",
       "prompt/check-fix.md",
-      "prompts/codex/user-codex/prompts/check-fix.md",
     ]);
 
     globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -181,7 +180,7 @@ describe("web e2e: prompt 模板与模式场景 - 模板展开", () => {
         const workspacePath = decodeURIComponent(url.pathname.slice("/workspace/files/".length));
         if (fallbackTemplatePaths.has(workspacePath)) {
           requestedTemplatePaths.push(workspacePath);
-          if (workspacePath === "prompts/codex/user-codex/prompts/check-fix.md") {
+          if (workspacePath === "prompt/check-fix.md") {
             return jsonResponse({ content: "# 修复影响检查" });
           }
           return jsonResponse({ error: { code: "not_found", message: "not found" } }, 404);
@@ -247,7 +246,6 @@ describe("web e2e: prompt 模板与模式场景 - 模板展开", () => {
     expect(requestedTemplatePaths).toEqual([
       "prompts/check-fix.md",
       "prompt/check-fix.md",
-      "prompts/codex/user-codex/prompts/check-fix.md",
     ]);
   });
 

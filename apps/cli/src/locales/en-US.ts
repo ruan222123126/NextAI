@@ -51,7 +51,6 @@ export const enUS: CliMessages = {
   "tui.mode.prompt.label": "Prompt",
   "tui.mode.prompt.default": "Default",
   "tui.mode.prompt.codex": "Codex",
-  "tui.mode.prompt.claude": "Claude",
   "tui.mode.collaboration.label": "Collab",
   "tui.mode.collaboration.na": "N/A",
   "tui.mode.collaboration.default": "Default",

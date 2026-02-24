@@ -12,7 +12,6 @@ import {
 describe("tui mode helpers", () => {
   it("normalizes prompt mode", () => {
     expect(normalizePromptMode("codex")).toBe("codex");
-    expect(normalizePromptMode("claude")).toBe("claude");
     expect(normalizePromptMode("unknown")).toBe("default");
     expect(normalizePromptMode(null)).toBe("default");
   });
@@ -27,8 +26,7 @@ describe("tui mode helpers", () => {
 
   it("cycles prompt and collaboration modes", () => {
     expect(nextPromptMode("default")).toBe("codex");
-    expect(nextPromptMode("codex")).toBe("claude");
-    expect(nextPromptMode("claude")).toBe("default");
+    expect(nextPromptMode("codex")).toBe("default");
 
     expect(nextCollaborationMode("default")).toBe("plan");
     expect(nextCollaborationMode("plan")).toBe("execute");
@@ -41,8 +39,8 @@ describe("tui mode helpers", () => {
       promptMode: "codex",
       collaborationMode: "plan",
     });
-    expect(resolveModesFromMeta({ prompt_mode: "claude", collaboration_mode: "execute" })).toEqual({
-      promptMode: "claude",
+    expect(resolveModesFromMeta({ prompt_mode: "legacy", collaboration_mode: "execute" })).toEqual({
+      promptMode: "default",
       collaborationMode: "execute",
     });
     expect(resolveModesFromMeta({})).toEqual({
