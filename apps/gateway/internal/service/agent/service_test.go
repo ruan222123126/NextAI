@@ -28,7 +28,7 @@ func TestProcessToolCallSuccess(t *testing.T) {
 		},
 		ToolRuntime: adapters.AgentToolRuntime{
 			ListToolDefinitionsFunc: func(string) []runner.ToolDefinition { return nil },
-			ExecuteToolCallFunc: func(_ string, name string, _ map[string]interface{}) (string, error) {
+			ExecuteToolCallFunc: func(_ context.Context, _ string, name string, _ map[string]interface{}) (string, error) {
 				if name != "shell" {
 					t.Fatalf("unexpected tool name: %s", name)
 				}
@@ -89,7 +89,7 @@ func TestProcessRunnerLoopWithToolCallAndStreamDelta(t *testing.T) {
 		},
 		ToolRuntime: adapters.AgentToolRuntime{
 			ListToolDefinitionsFunc: func(string) []runner.ToolDefinition { return nil },
-			ExecuteToolCallFunc: func(_ string, name string, _ map[string]interface{}) (string, error) {
+			ExecuteToolCallFunc: func(_ context.Context, _ string, name string, _ map[string]interface{}) (string, error) {
 				if name != "view" {
 					t.Fatalf("unexpected tool name: %s", name)
 				}
@@ -145,7 +145,7 @@ func TestProcessRunnerErrorMapped(t *testing.T) {
 		},
 		ToolRuntime: adapters.AgentToolRuntime{
 			ListToolDefinitionsFunc: func(string) []runner.ToolDefinition { return nil },
-			ExecuteToolCallFunc: func(_ string, _ string, _ map[string]interface{}) (string, error) {
+			ExecuteToolCallFunc: func(_ context.Context, _ string, _ string, _ map[string]interface{}) (string, error) {
 				t.Fatalf("ExecuteToolCall should not be called")
 				return "", nil
 			},
@@ -196,7 +196,7 @@ func TestProcessRunnerErrorMappedIncludesDetails(t *testing.T) {
 		},
 		ToolRuntime: adapters.AgentToolRuntime{
 			ListToolDefinitionsFunc: func(string) []runner.ToolDefinition { return nil },
-			ExecuteToolCallFunc: func(_ string, _ string, _ map[string]interface{}) (string, error) {
+			ExecuteToolCallFunc: func(_ context.Context, _ string, _ string, _ map[string]interface{}) (string, error) {
 				t.Fatalf("ExecuteToolCall should not be called")
 				return "", nil
 			},
@@ -262,7 +262,7 @@ func TestProcessCodexModeNormalizesLegacyProviderViewObject(t *testing.T) {
 		},
 		ToolRuntime: adapters.AgentToolRuntime{
 			ListToolDefinitionsFunc: func(string) []runner.ToolDefinition { return nil },
-			ExecuteToolCallFunc: func(_ string, name string, input map[string]interface{}) (string, error) {
+			ExecuteToolCallFunc: func(_ context.Context, _ string, name string, input map[string]interface{}) (string, error) {
 				if name != "view" {
 					t.Fatalf("tool name=%s want=view", name)
 				}
@@ -336,7 +336,7 @@ func TestProcessCodexModeNormalizesExecCommandLegacyParams(t *testing.T) {
 		},
 		ToolRuntime: adapters.AgentToolRuntime{
 			ListToolDefinitionsFunc: func(string) []runner.ToolDefinition { return nil },
-			ExecuteToolCallFunc: func(_ string, name string, input map[string]interface{}) (string, error) {
+			ExecuteToolCallFunc: func(_ context.Context, _ string, name string, input map[string]interface{}) (string, error) {
 				if name != "shell" {
 					t.Fatalf("tool name=%s want=shell", name)
 				}
@@ -415,7 +415,7 @@ func TestProcessDefaultModeAlsoNormalizesLegacyProviderInput(t *testing.T) {
 		},
 		ToolRuntime: adapters.AgentToolRuntime{
 			ListToolDefinitionsFunc: func(string) []runner.ToolDefinition { return nil },
-			ExecuteToolCallFunc: func(_ string, name string, input map[string]interface{}) (string, error) {
+			ExecuteToolCallFunc: func(_ context.Context, _ string, name string, input map[string]interface{}) (string, error) {
 				if name != "shell" {
 					t.Fatalf("tool name=%s want=shell", name)
 				}
@@ -452,6 +452,75 @@ func TestProcessDefaultModeAlsoNormalizesLegacyProviderInput(t *testing.T) {
 	}
 }
 
+func TestProcessCodexModeNormalizesWriteStdinAlias(t *testing.T) {
+	t.Parallel()
+
+	callCount := 0
+	svc := NewService(Dependencies{
+		Runner: adapters.AgentRunner{
+			GenerateTurnFunc: func(context.Context, domain.AgentProcessRequest, runner.GenerateConfig, []runner.ToolDefinition) (runner.TurnResult, error) {
+				callCount++
+				if callCount == 1 {
+					return runner.TurnResult{
+						ToolCalls: []runner.ToolCall{
+							{
+								ID:   "call_write",
+								Name: "write_stdin",
+								Arguments: map[string]interface{}{
+									"session_id":    1001,
+									"chars":         "echo hi\\n",
+									"yield_time_ms": 200,
+								},
+							},
+						},
+					}, nil
+				}
+				return runner.TurnResult{Text: "done"}, nil
+			},
+		},
+		ToolRuntime: adapters.AgentToolRuntime{
+			ListToolDefinitionsFunc: func(string) []runner.ToolDefinition { return nil },
+			ExecuteToolCallFunc: func(_ context.Context, _ string, name string, input map[string]interface{}) (string, error) {
+				if name != "shell" {
+					t.Fatalf("tool name=%s want=shell", name)
+				}
+				switch got := input["session_id"].(type) {
+				case int:
+					if got != 1001 {
+						t.Fatalf("session_id=%v want=1001", input["session_id"])
+					}
+				case float64:
+					if got != 1001 {
+						t.Fatalf("session_id=%v want=1001", input["session_id"])
+					}
+				default:
+					t.Fatalf("session_id type invalid: %#v", input["session_id"])
+				}
+				if got, _ := input["chars"].(string); got != "echo hi\\n" {
+					t.Fatalf("chars=%q want=%q", got, "echo hi\\n")
+				}
+				return "shell-write-ok", nil
+			},
+		},
+		ErrorMapper: adapters.AgentErrorMapper{
+			MapToolErrorFunc:   func(err error) (int, string, string) { return http.StatusBadRequest, "tool_error", err.Error() },
+			MapRunnerErrorFunc: func(err error) (int, string, string) { return http.StatusBadGateway, "runner_error", err.Error() },
+		},
+	})
+
+	result, processErr := svc.Process(context.Background(), ProcessParams{
+		Request:        domain.AgentProcessRequest{Input: []domain.AgentInputMessage{{Role: "user", Type: "message"}}},
+		EffectiveInput: []domain.AgentInputMessage{{Role: "user", Type: "message"}},
+		PromptMode:     "codex",
+	}, nil)
+	if processErr != nil {
+		t.Fatalf("process error: %+v", processErr)
+	}
+	if result.Reply != "done" {
+		t.Fatalf("reply=%q want=done", result.Reply)
+	}
+}
+
 func TestProcessSelfOpsToolCallAutoInjectsRequestScope(t *testing.T) {
 	t.Parallel()
 
@@ -468,7 +537,7 @@ func TestProcessSelfOpsToolCallAutoInjectsRequestScope(t *testing.T) {
 		},
 		ToolRuntime: adapters.AgentToolRuntime{
 			ListToolDefinitionsFunc: func(string) []runner.ToolDefinition { return nil },
-			ExecuteToolCallFunc: func(_ string, name string, input map[string]interface{}) (string, error) {
+			ExecuteToolCallFunc: func(_ context.Context, _ string, name string, input map[string]interface{}) (string, error) {
 				if name != "self_ops" {
 					t.Fatalf("unexpected tool name: %s", name)
 				}
@@ -498,6 +567,77 @@ func TestProcessSelfOpsToolCallAutoInjectsRequestScope(t *testing.T) {
 		},
 		HasToolCall:       true,
 		RequestedToolCall: ToolCall{Name: "self_ops", Input: map[string]interface{}{"action": "set_session_model"}},
+	}, nil)
+	if processErr != nil {
+		t.Fatalf("unexpected process error: %+v", processErr)
+	}
+}
+
+func TestProcessSpawnAgentToolCallAutoInjectsRequestScope(t *testing.T) {
+	t.Parallel()
+
+	svc := NewService(Dependencies{
+		Runner: adapters.AgentRunner{
+			GenerateTurnFunc: func(context.Context, domain.AgentProcessRequest, runner.GenerateConfig, []runner.ToolDefinition) (runner.TurnResult, error) {
+				t.Fatalf("GenerateTurn should not be called when has tool call")
+				return runner.TurnResult{}, nil
+			},
+			GenerateTurnStreamFunc: func(context.Context, domain.AgentProcessRequest, runner.GenerateConfig, []runner.ToolDefinition, func(string)) (runner.TurnResult, error) {
+				t.Fatalf("GenerateTurnStream should not be called when has tool call")
+				return runner.TurnResult{}, nil
+			},
+		},
+		ToolRuntime: adapters.AgentToolRuntime{
+			ListToolDefinitionsFunc: func(string) []runner.ToolDefinition { return nil },
+			ExecuteToolCallFunc: func(_ context.Context, _ string, name string, input map[string]interface{}) (string, error) {
+				if name != "spawn_agent" {
+					t.Fatalf("unexpected tool name: %s", name)
+				}
+				if got, _ := input[toolInputMetaSessionIDKey].(string); got != "s-parent" {
+					t.Fatalf("session_id=%q, want=s-parent", got)
+				}
+				if got, _ := input[toolInputMetaUserIDKey].(string); got != "u-parent" {
+					t.Fatalf("user_id=%q, want=u-parent", got)
+				}
+				if got, _ := input[toolInputMetaChannelKey].(string); got != "console" {
+					t.Fatalf("channel=%q, want=console", got)
+				}
+				if got, _ := input[toolInputMetaPromptModeKey].(string); got != "codex" {
+					t.Fatalf("prompt_mode=%q, want=codex", got)
+				}
+				switch got := input[toolInputMetaAgentDepthKey].(type) {
+				case int:
+					if got != 0 {
+						t.Fatalf("agent_depth=%v, want=0", got)
+					}
+				case float64:
+					if got != 0 {
+						t.Fatalf("agent_depth=%v, want=0", got)
+					}
+				default:
+					t.Fatalf("agent_depth type invalid: %#v", input[toolInputMetaAgentDepthKey])
+				}
+				return "ok", nil
+			},
+		},
+		ErrorMapper: adapters.AgentErrorMapper{
+			MapToolErrorFunc:   func(err error) (int, string, string) { return http.StatusBadRequest, "tool_error", err.Error() },
+			MapRunnerErrorFunc: func(err error) (int, string, string) { return http.StatusBadGateway, "runner_error", err.Error() },
+		},
+	})
+
+	_, processErr := svc.Process(context.Background(), ProcessParams{
+		Request: domain.AgentProcessRequest{
+			SessionID: "s-parent",
+			UserID:    "u-parent",
+			Channel:   "console",
+		},
+		PromptMode:  "codex",
+		HasToolCall: true,
+		RequestedToolCall: ToolCall{
+			Name:  "functions.spawn_agent",
+			Input: map[string]interface{}{"task": "run tests"},
+		},
 	}, nil)
 	if processErr != nil {
 		t.Fatalf("unexpected process error: %+v", processErr)

@@ -90,7 +90,7 @@
 | Model Provider | 对接模型 API，返回文本与工具调用 | `apps/gateway/internal/runner/runner.go` | `domain.AgentProcessRequest + runner.GenerateConfig + []runner.ToolDefinition` | `runner.TurnResult` | `runner.RunnerError{code=provider_*}` |
 | Channel | 把最终文本分发到外部渠道 | `apps/gateway/internal/app/server.go` | `ctx + user_id + session_id + text + channel_cfg` | `error` | `channel_not_supported/channel_disabled/channel_dispatch_failed` |
 | Tool | 执行本地工具调用 | `apps/gateway/internal/app/server.go` | `plugin.ToolCommand` | `plugin.ToolResult` | `tool_not_supported/tool_invoke_failed/tool_invalid_result` |
-| Prompt Source | 解析系统层提示词来源（文件/目录/catalog） | `apps/gateway/internal/service/systemprompt`（Codex 由 `service/codexprompt`） | `prompt_mode + task_command + session_id + runtime env` | `[]systemprompt.Layer` | `*_prompt_unavailable` |
+| Prompt Source | 解析系统层提示词来源（文件/目录/catalog） | `apps/gateway/internal/service/systemprompt`（Codex 由 `service/codexprompt`） | `prompt_mode + collaboration_mode/event + task_command + session_id + runtime env` | `[]systemprompt.Layer` | `*_prompt_unavailable` |
 | Cron Node | 执行 workflow 节点（`text_event/delay/if_event/...`） | `apps/gateway/internal/service/cron/service.go` | `ctx + CronJobSpec + CronWorkflowNode` | `CronNodeResult` | `unsupported workflow node type`/节点执行错误 |
 
 ### 1) Model Provider
@@ -507,7 +507,9 @@ func (h *TextNodeHandler) Execute(
   - `GET /agent/system-layers`
   - 可选 query：
     - `prompt_mode=default|codex|claude`（默认 `default`）
-    - `task_command=review|compact|memory|plan|execute|pair_programming`（仅 `prompt_mode=codex` 生效，用于对齐 slash 命令场景的系统层估算）
+    - `task_command=review|compact|memory`（仅 `prompt_mode=codex` 生效，用于非协作任务模板估算）
+    - `collaboration_mode=default|plan|execute|pair_programming`（仅 `prompt_mode=codex` 生效，显式指定协作状态）
+    - `collaboration_event=set_default|set_plan|set_execute|set_pair_programming`（仅 `prompt_mode=codex` 生效，按事件迁移协作状态）
     - `session_id=<chat-session-id>`（可选，主要用于 `task_command=memory` 的模板变量对齐）
   - Purpose: return effective injected layers and token estimate used for this runtime.
 
@@ -539,6 +541,12 @@ Sample response:
 - 若 `task_command` 非法（仅 codex 模式校验），返回：
   - `400 invalid_request`
   - `message=invalid task_command`
+- 若 `collaboration_mode` 非法（仅 codex 模式校验），返回：
+  - `400 invalid_request`
+  - `message=invalid collaboration_mode`
+- 若 `collaboration_event` 非法（仅 codex 模式校验），返回：
+  - `400 invalid_request`
+  - `message=invalid collaboration_event`
 
 ### Feature flags
 - `NEXTAI_ENABLE_PROMPT_TEMPLATES` (default: `false`).
@@ -582,6 +590,27 @@ Sample response:
   2. 会话 `meta.prompt_mode`
   3. `default`
 
+## Collaboration Mode（状态机，2026-02）
+- `POST /agent/process` 在 `prompt_mode=codex` 下支持协作状态机参数（3 种等价入口）：
+  - `biz_params.collaboration_mode`
+  - `biz_params.collaboration_event`
+  - `biz_params.collaboration.{mode|event}`
+- 状态枚举：`Default` | `Plan` | `Execute` | `PairProgramming`。
+- 切换事件：`set_default` | `set_plan` | `set_execute` | `set_pair_programming`。
+- 状态迁移：任意状态均可被上述事件切换到目标状态（显式事件优先）。
+- 会话持久化字段：
+  - `chat.meta.collaboration_mode`
+  - `chat.meta.collaboration_last_event`
+  - `chat.meta.collaboration_event_source`
+  - `chat.meta.collaboration_updated_at`
+- 协作状态切换仅由 `biz_params.collaboration_*` 事件驱动；`/plan`、`/execute`、`/pair_programming` 不再触发协作状态迁移。
+- 能力约束（codex）：
+  - `Plan`：`request_user_input` 可用。
+  - `Default` / `Execute` / `PairProgramming`：`request_user_input` 从可用工具列表中剔除，调用会失败。
+- 若在非 `codex` 模式显式携带协作切换参数，返回：
+  - `400 invalid_request`
+  - `message=collaboration mode is only supported when prompt_mode=codex`
+
 ### 系统层注入规则
 - `prompt_mode=default`：
   - 维持原行为（`AGENTS + ai-tools` 分层注入）。
@@ -602,7 +631,7 @@ Sample response:
     - 模板变量标准化来源：
       - `personality` <- `prompts/codex/codex-rs/core/templates/personalities/gpt-5.2-codex_pragmatic.md`
       - `KNOWN_MODE_NAMES` <- 当前支持模式名拼接（非硬编码）
-      - `REQUEST_USER_INPUT_AVAILABILITY` <- 基于 mode 能力生成
+      - `REQUEST_USER_INPUT_AVAILABLE` <- 基于 mode 能力生成（`true|false`）
     - V2 在编排末尾执行内容归一化去重（优先级：codex 核心层 > 本地策略层 > 工具层）。
   - `codex_model_instructions_system` 来源可切换（层顺序不变）：
     - `NEXTAI_CODEX_PROMPT_SOURCE=file`：使用 `prompts/codex/codex-rs/core/templates/model_instructions/gpt-5.2-codex_instructions_template.md` + personality 渲染（兼容现有行为）。

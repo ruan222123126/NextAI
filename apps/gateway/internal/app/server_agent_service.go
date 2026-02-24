@@ -1,6 +1,8 @@
 package app
 
 import (
+	"context"
+
 	"nextai/apps/gateway/internal/runner"
 	"nextai/apps/gateway/internal/service/adapters"
 	agentservice "nextai/apps/gateway/internal/service/agent"
@@ -21,8 +23,8 @@ func (s *Server) newAgentService() *agentservice.Service {
 			ListToolDefinitionsFunc: func(promptMode string) []runner.ToolDefinition {
 				return s.listToolDefinitionsForPromptMode(promptMode)
 			},
-			ExecuteToolCallFunc: func(promptMode string, name string, input map[string]interface{}) (string, error) {
-				return s.executeToolCallForPromptMode(promptMode, toolCall{Name: name, Input: input})
+			ExecuteToolCallFunc: func(ctx context.Context, promptMode string, name string, input map[string]interface{}) (string, error) {
+				return s.executeToolCallForPromptModeWithContext(ctx, promptMode, toolCall{Name: name, Input: input})
 			},
 			RecoverInvalidProviderToolCallFunc: func(err error, step int) (ports.RecoverableProviderToolCall, bool) {
 				recovered, ok := recoverInvalidProviderToolCall(err, step)

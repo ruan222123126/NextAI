@@ -33,7 +33,7 @@ type RecoverableProviderToolCall struct {
 
 type AgentToolRuntime interface {
 	ListToolDefinitions(promptMode string) []runner.ToolDefinition
-	ExecuteToolCall(promptMode string, name string, input map[string]interface{}) (string, error)
+	ExecuteToolCall(ctx context.Context, promptMode string, name string, input map[string]interface{}) (string, error)
 	RecoverInvalidProviderToolCall(err error, step int) (RecoverableProviderToolCall, bool)
 	FormatToolErrorFeedback(err error) string
 }

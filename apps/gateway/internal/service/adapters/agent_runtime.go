@@ -49,7 +49,7 @@ func (a AgentRunner) GenerateTurnStream(
 
 type AgentToolRuntime struct {
 	ListToolDefinitionsFunc            func(promptMode string) []runner.ToolDefinition
-	ExecuteToolCallFunc                func(promptMode string, name string, input map[string]interface{}) (string, error)
+	ExecuteToolCallFunc                func(ctx context.Context, promptMode string, name string, input map[string]interface{}) (string, error)
 	RecoverInvalidProviderToolCallFunc func(err error, step int) (ports.RecoverableProviderToolCall, bool)
 	FormatToolErrorFeedbackFunc        func(err error) string
 }
@@ -61,11 +61,11 @@ func (a AgentToolRuntime) ListToolDefinitions(promptMode string) []runner.ToolDe
 	return a.ListToolDefinitionsFunc(promptMode)
 }
 
-func (a AgentToolRuntime) ExecuteToolCall(promptMode string, name string, input map[string]interface{}) (string, error) {
+func (a AgentToolRuntime) ExecuteToolCall(ctx context.Context, promptMode string, name string, input map[string]interface{}) (string, error) {
 	if a.ExecuteToolCallFunc == nil {
 		return "", errors.New("agent tool runtime is unavailable")
 	}
-	return a.ExecuteToolCallFunc(promptMode, name, input)
+	return a.ExecuteToolCallFunc(ctx, promptMode, name, input)
 }
 
 func (a AgentToolRuntime) RecoverInvalidProviderToolCall(err error, step int) (ports.RecoverableProviderToolCall, bool) {

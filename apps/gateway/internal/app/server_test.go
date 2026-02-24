@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -24,6 +25,7 @@ import (
 	"nextai/apps/gateway/internal/plugin"
 	"nextai/apps/gateway/internal/provider"
 	"nextai/apps/gateway/internal/repo"
+	"nextai/apps/gateway/internal/runner"
 	codexpromptservice "nextai/apps/gateway/internal/service/codexprompt"
 )
 
@@ -160,6 +162,26 @@ func collectSystemMessagesFromModelRequest(t *testing.T, requestBody map[string]
 			out = append(out, content)
 		}
 	}
+	return out
+}
+
+func collectToolNamesFromModelRequest(t *testing.T, requestBody map[string]interface{}) []string {
+	t.Helper()
+	rawTools, ok := requestBody["tools"].([]interface{})
+	if !ok {
+		return []string{}
+	}
+	out := make([]string, 0, len(rawTools))
+	for _, rawTool := range rawTools {
+		toolObj, _ := rawTool.(map[string]interface{})
+		functionObj, _ := toolObj["function"].(map[string]interface{})
+		name, _ := functionObj["name"].(string)
+		if strings.TrimSpace(name) == "" {
+			continue
+		}
+		out = append(out, name)
+	}
+	sort.Strings(out)
 	return out
 }
 
@@ -1859,7 +1881,7 @@ func TestBuildSystemLayersForCodexModeIncludesTemplateLayersWhenFeatureEnabled(t
 	if collabLayer.Source != codexCollabDefaultRelativePath {
 		t.Fatalf("expected collab default source=%q, got=%q", codexCollabDefaultRelativePath, collabLayer.Source)
 	}
-	if strings.Contains(collabLayer.Content, "{{KNOWN_MODE_NAMES}}") || strings.Contains(collabLayer.Content, "{{REQUEST_USER_INPUT_AVAILABILITY}}") {
+	if strings.Contains(collabLayer.Content, "{{KNOWN_MODE_NAMES}}") || strings.Contains(collabLayer.Content, "{{REQUEST_USER_INPUT_AVAILABLE}}") {
 		t.Fatalf("expected collaboration placeholders to be rendered, got=%q", collabLayer.Content)
 	}
 	localPolicyLayer, exists := byName["codex_local_policy_system"]
@@ -1966,15 +1988,15 @@ func TestBuildSystemLayersForCodexModeV2IncludesLocalPolicyAndToolGuide(t *testi
 	}
 
 	collabLayer := byName["codex_collaboration_default_system"]
-	if strings.Contains(collabLayer.Content, "{{KNOWN_MODE_NAMES}}") || strings.Contains(collabLayer.Content, "{{REQUEST_USER_INPUT_AVAILABILITY}}") {
+	if strings.Contains(collabLayer.Content, "{{KNOWN_MODE_NAMES}}") || strings.Contains(collabLayer.Content, "{{REQUEST_USER_INPUT_AVAILABLE}}") {
 		t.Fatalf("expected collaboration placeholders rendered, got=%q", collabLayer.Content)
 	}
 	expectedKnownModesSentence := fmt.Sprintf("Known mode names are %s.", knownCollaborationModeNames())
 	if !strings.Contains(collabLayer.Content, expectedKnownModesSentence) {
 		t.Fatalf("expected known mode names to be rendered from supported list, got=%q", collabLayer.Content)
 	}
-	if !strings.Contains(collabLayer.Content, "request_user_input` tool is unavailable in Default mode") {
-		t.Fatalf("expected request_user_input availability to be rendered, got=%q", collabLayer.Content)
+	if !strings.Contains(collabLayer.Content, "- available_in_current_mode: false") {
+		t.Fatalf("expected request_user_input availability boolean to be rendered, got=%q", collabLayer.Content)
 	}
 
 	localLayer := byName["codex_local_policy_system"]
@@ -2082,12 +2104,12 @@ func TestBuildSystemLayersForCodexModeShadowCompareLogsDiffWithoutChangingLayerC
 		log.SetPrefix(originalPrefix)
 	})
 
-	layers, err := srv.buildSystemLayersForModeWithOptions(promptModeCodex, codexLayerBuildOptions{
+	layers, err := srv.buildSystemLayersForLegacyOptions(promptModeCodex, codexLayerBuildOptions{
 		SessionID: "s-shadow",
 		ModelSlug: defaultCodexModelSlug,
 	})
 	if err != nil {
-		t.Fatalf("buildSystemLayersForModeWithOptions failed: %v", err)
+		t.Fatalf("buildSystemLayersForLegacyOptions failed: %v", err)
 	}
 
 	byName := map[string]systemPromptLayer{}
@@ -2110,6 +2132,147 @@ func TestBuildSystemLayersForCodexModeShadowCompareLogsDiffWithoutChangingLayerC
 	}
 	if !strings.Contains(logs, "model_slug="+defaultCodexModelSlug) {
 		t.Fatalf("expected model_slug in shadow diff log, got=%q", logs)
+	}
+}
+
+func TestBuildSystemLayersForModeWithOptionsCompilesDeterministicHashFromSnapshot(t *testing.T) {
+	t.Setenv("NEXTAI_DISABLE_QQ_INBOUND_SUPERVISOR", "true")
+	srv, err := NewServer(config.Config{
+		Host:                  "127.0.0.1",
+		Port:                  "0",
+		DataDir:               t.TempDir(),
+		EnablePromptTemplates: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { srv.Close() })
+
+	runtime := turnRuntimeSnapshotFromLegacyOptions(promptModeCodex, codexLayerBuildOptions{
+		SessionID: "s-compiler",
+	})
+	runtime.AvailableTools = []string{"shell", "view", "mcp__calendar__list_events", "mcp__docs__search"}
+	runtime.DynamicTools = []string{"dynamic_b", "dynamic_a", "dynamic_b"}
+	runtime.MCP = TurnRuntimeMCPSnapshot{
+		Enabled: true,
+		Status:  "connected",
+	}
+
+	first, err := srv.buildSystemLayersForModeWithOptions(runtime)
+	if err != nil {
+		t.Fatalf("first compile failed: %v", err)
+	}
+	second, err := srv.buildSystemLayersForModeWithOptions(runtime)
+	if err != nil {
+		t.Fatalf("second compile failed: %v", err)
+	}
+
+	if strings.TrimSpace(first.Hash) == "" {
+		t.Fatalf("expected non-empty compiler hash")
+	}
+	if first.Hash != second.Hash {
+		t.Fatalf("expected deterministic compiler hash, first=%q second=%q", first.Hash, second.Hash)
+	}
+	if len(first.Layers) != len(second.Layers) {
+		t.Fatalf("layer length mismatch: first=%d second=%d", len(first.Layers), len(second.Layers))
+	}
+	for index := range first.Layers {
+		if first.Layers[index].Hash != second.Layers[index].Hash {
+			t.Fatalf("layer hash mismatch at index=%d first=%q second=%q", index, first.Layers[index].Hash, second.Layers[index].Hash)
+		}
+	}
+
+	runtime.Mode.ReviewTask = true
+	changed, err := srv.buildSystemLayersForModeWithOptions(runtime)
+	if err != nil {
+		t.Fatalf("changed compile failed: %v", err)
+	}
+	if changed.Hash == first.Hash {
+		t.Fatalf("expected compiler hash to change when snapshot changes, hash=%q", changed.Hash)
+	}
+
+	runtime.Mode.ReviewTask = false
+	runtime.Mode.CollaborationEvent = collaborationEventSetPlan
+	eventChanged, err := srv.buildSystemLayersForModeWithOptions(runtime)
+	if err != nil {
+		t.Fatalf("event changed compile failed: %v", err)
+	}
+	if eventChanged.Hash == first.Hash {
+		t.Fatalf("expected compiler hash to change when collaboration_event changes, hash=%q", eventChanged.Hash)
+	}
+}
+
+func TestBuildSystemLayersForModeWithOptionsUsesRuntimeToolFactsForTemplateVars(t *testing.T) {
+	t.Setenv("NEXTAI_DISABLE_QQ_INBOUND_SUPERVISOR", "true")
+	srv, err := NewServer(config.Config{
+		Host:                  "127.0.0.1",
+		Port:                  "0",
+		DataDir:               t.TempDir(),
+		EnablePromptTemplates: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { srv.Close() })
+
+	runtime := turnRuntimeSnapshotFromLegacyOptions(promptModeCodex, codexLayerBuildOptions{
+		SessionID:         "s-runtime-vars",
+		CollaborationMode: collaborationModeDefaultName,
+	})
+	runtime.AvailableTools = []string{"mcp__calendar__list_events", "mcp__docs__search"}
+
+	compiled, err := srv.buildSystemLayersForModeWithOptions(runtime)
+	if err != nil {
+		t.Fatalf("buildSystemLayersForModeWithOptions failed: %v", err)
+	}
+	byName := map[string]compiledSystemPromptLayer{}
+	for _, layer := range compiled.Layers {
+		byName[layer.Layer.Name] = layer
+	}
+
+	collabLayer, ok := byName["codex_collaboration_default_system"]
+	if !ok {
+		t.Fatalf("missing codex_collaboration_default_system layer: %#v", compiled.Layers)
+	}
+	if !strings.Contains(collabLayer.Layer.Content, "- current_mode: Default") {
+		t.Fatalf("expected current_mode from runtime snapshot, got=%q", collabLayer.Layer.Content)
+	}
+	if !strings.Contains(collabLayer.Layer.Content, "- available_in_current_mode: false") {
+		t.Fatalf("expected request_user_input availability from runtime mode, got=%q", collabLayer.Layer.Content)
+	}
+
+	searchLayer, ok := byName["codex_search_tool_system"]
+	if !ok {
+		t.Fatalf("missing codex_search_tool_system layer: %#v", compiled.Layers)
+	}
+	if strings.Contains(searchLayer.Layer.Content, "{{app_names}}") {
+		t.Fatalf("expected app_names placeholder to be rendered, got=%q", searchLayer.Layer.Content)
+	}
+	if !strings.Contains(searchLayer.Layer.Content, "(calendar, docs)") {
+		t.Fatalf("expected app_names to use runtime mcp app names, got=%q", searchLayer.Layer.Content)
+	}
+}
+
+func TestBuildCodexTemplateVarsUsesRuntimeToolAvailabilityFacts(t *testing.T) {
+	runtime := newTurnRuntimeSnapshot(promptModeCodex, "session-template-vars")
+	runtime.Mode.CollaborationMode = collaborationModePlanName
+	runtime.AvailableTools = []string{"shell"}
+
+	vars := buildCodexTemplateVars(normalizeTurnRuntimeSnapshotForPromptCompiler(runtime))
+	if vars["REQUEST_USER_INPUT_AVAILABLE"] != "false" {
+		t.Fatalf("expected request_user_input unavailable without runtime tool fact, got=%q", vars["REQUEST_USER_INPUT_AVAILABLE"])
+	}
+
+	runtime.AvailableTools = []string{"shell", "request_user_input"}
+	vars = buildCodexTemplateVars(normalizeTurnRuntimeSnapshotForPromptCompiler(runtime))
+	if vars["REQUEST_USER_INPUT_AVAILABLE"] != "true" {
+		t.Fatalf("expected request_user_input availability from runtime tools, got=%q", vars["REQUEST_USER_INPUT_AVAILABLE"])
+	}
+
+	runtime.Mode.CollaborationMode = collaborationModeDefaultName
+	vars = buildCodexTemplateVars(normalizeTurnRuntimeSnapshotForPromptCompiler(runtime))
+	if vars["REQUEST_USER_INPUT_AVAILABLE"] != "false" {
+		t.Fatalf("expected request_user_input unavailable after runtime normalization in default mode, got=%q", vars["REQUEST_USER_INPUT_AVAILABLE"])
 	}
 }
 
@@ -2389,6 +2552,9 @@ func TestGetAgentSystemLayersReturnsLayersAndTokenEstimate(t *testing.T) {
 	if body.ModeVariant != promptModeVariantDefault {
 		t.Fatalf("expected mode_variant=%q, got=%q", promptModeVariantDefault, body.ModeVariant)
 	}
+	if strings.TrimSpace(body.PromptHash) == "" {
+		t.Fatalf("expected non-empty prompt_hash")
+	}
 	if len(body.Layers) < 3 {
 		t.Fatalf("expected at least 3 layers, got=%d", len(body.Layers))
 	}
@@ -2449,6 +2615,9 @@ func TestGetAgentSystemLayersSupportsCodexModeQuery(t *testing.T) {
 	}
 	if body.ModeVariant != promptModeVariantCodexV1 {
 		t.Fatalf("expected mode_variant=%q, got=%q", promptModeVariantCodexV1, body.ModeVariant)
+	}
+	if strings.TrimSpace(body.PromptHash) == "" {
+		t.Fatalf("expected non-empty prompt_hash")
 	}
 	if body.Layers[0].Name != "codex_base_system" {
 		t.Fatalf("expected first layer codex_base_system, got=%q", body.Layers[0].Name)
@@ -2516,13 +2685,40 @@ func TestGetAgentSystemLayersSupportsCodexTaskCommandQuery(t *testing.T) {
 	}
 
 	planW := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(planW, httptest.NewRequest(http.MethodGet, "/agent/system-layers?prompt_mode=codex&task_command=/plan", nil))
+	srv.Handler().ServeHTTP(planW, httptest.NewRequest(http.MethodGet, "/agent/system-layers?prompt_mode=codex&task_command=plan", nil))
+	if planW.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for task_command=plan, got=%d body=%s", planW.Code, planW.Body.String())
+	}
+	if !strings.Contains(planW.Body.String(), `"code":"invalid_request"`) || !strings.Contains(planW.Body.String(), "invalid task_command") {
+		t.Fatalf("expected invalid task_command for task_command=plan, body=%s", planW.Body.String())
+	}
+}
+
+func TestGetAgentSystemLayersSupportsCollaborationModeAndEventQuery(t *testing.T) {
+	t.Setenv("NEXTAI_DISABLE_QQ_INBOUND_SUPERVISOR", "true")
+	srv, err := NewServer(config.Config{
+		Host:                          "127.0.0.1",
+		Port:                          "0",
+		DataDir:                       t.TempDir(),
+		EnablePromptTemplates:         true,
+		EnablePromptContextIntrospect: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { srv.Close() })
+
+	planW := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(
+		planW,
+		httptest.NewRequest(http.MethodGet, "/agent/system-layers?prompt_mode=codex&collaboration_mode=plan", nil),
+	)
 	if planW.Code != http.StatusOK {
 		t.Fatalf("expected 200, got=%d body=%s", planW.Code, planW.Body.String())
 	}
 	var planBody agentSystemLayersResponse
 	if err := json.Unmarshal(planW.Body.Bytes(), &planBody); err != nil {
-		t.Fatalf("decode plan response failed: %v body=%s", err, planW.Body.String())
+		t.Fatalf("decode collaboration_mode=plan response failed: %v body=%s", err, planW.Body.String())
 	}
 	foundPlanLayer := false
 	for _, layer := range planBody.Layers {
@@ -2532,17 +2728,24 @@ func TestGetAgentSystemLayersSupportsCodexTaskCommandQuery(t *testing.T) {
 		}
 	}
 	if !foundPlanLayer {
-		t.Fatalf("expected codex_collaboration_plan_system in plan task response, got=%#v", planBody.Layers)
+		t.Fatalf("expected codex_collaboration_plan_system when collaboration_mode=plan, got=%#v", planBody.Layers)
 	}
 
 	executeW := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(executeW, httptest.NewRequest(http.MethodGet, "/agent/system-layers?prompt_mode=codex&task_command=execute", nil))
+	srv.Handler().ServeHTTP(
+		executeW,
+		httptest.NewRequest(
+			http.MethodGet,
+			"/agent/system-layers?prompt_mode=codex&collaboration_mode=plan&collaboration_event=set_execute",
+			nil,
+		),
+	)
 	if executeW.Code != http.StatusOK {
 		t.Fatalf("expected 200, got=%d body=%s", executeW.Code, executeW.Body.String())
 	}
 	var executeBody agentSystemLayersResponse
 	if err := json.Unmarshal(executeW.Body.Bytes(), &executeBody); err != nil {
-		t.Fatalf("decode execute response failed: %v body=%s", err, executeW.Body.String())
+		t.Fatalf("decode collaboration_event response failed: %v body=%s", err, executeW.Body.String())
 	}
 	foundExecuteLayer := false
 	for _, layer := range executeBody.Layers {
@@ -2552,27 +2755,48 @@ func TestGetAgentSystemLayersSupportsCodexTaskCommandQuery(t *testing.T) {
 		}
 	}
 	if !foundExecuteLayer {
-		t.Fatalf("expected codex_collaboration_execute_system in execute task response, got=%#v", executeBody.Layers)
+		t.Fatalf("expected codex_collaboration_execute_system when collaboration_event=set_execute, got=%#v", executeBody.Layers)
+	}
+}
+
+func TestGetAgentSystemLayersRejectsInvalidCollaborationQuery(t *testing.T) {
+	t.Setenv("NEXTAI_DISABLE_QQ_INBOUND_SUPERVISOR", "true")
+	srv, err := NewServer(config.Config{
+		Host:                          "127.0.0.1",
+		Port:                          "0",
+		DataDir:                       t.TempDir(),
+		EnablePromptTemplates:         true,
+		EnablePromptContextIntrospect: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { srv.Close() })
+
+	invalidModeW := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(
+		invalidModeW,
+		httptest.NewRequest(http.MethodGet, "/agent/system-layers?prompt_mode=codex&collaboration_mode=oops", nil),
+	)
+	if invalidModeW.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got=%d body=%s", invalidModeW.Code, invalidModeW.Body.String())
+	}
+	if !strings.Contains(invalidModeW.Body.String(), `"code":"invalid_request"`) ||
+		!strings.Contains(invalidModeW.Body.String(), "invalid collaboration_mode") {
+		t.Fatalf("expected invalid collaboration_mode error, body=%s", invalidModeW.Body.String())
 	}
 
-	pairW := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(pairW, httptest.NewRequest(http.MethodGet, "/agent/system-layers?prompt_mode=codex&task_command=/pair_programming", nil))
-	if pairW.Code != http.StatusOK {
-		t.Fatalf("expected 200, got=%d body=%s", pairW.Code, pairW.Body.String())
+	invalidEventW := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(
+		invalidEventW,
+		httptest.NewRequest(http.MethodGet, "/agent/system-layers?prompt_mode=codex&collaboration_event=oops", nil),
+	)
+	if invalidEventW.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got=%d body=%s", invalidEventW.Code, invalidEventW.Body.String())
 	}
-	var pairBody agentSystemLayersResponse
-	if err := json.Unmarshal(pairW.Body.Bytes(), &pairBody); err != nil {
-		t.Fatalf("decode pair_programming response failed: %v body=%s", err, pairW.Body.String())
-	}
-	foundPairLayer := false
-	for _, layer := range pairBody.Layers {
-		if layer.Name == "codex_collaboration_pair_programming_system" {
-			foundPairLayer = true
-			break
-		}
-	}
-	if !foundPairLayer {
-		t.Fatalf("expected codex_collaboration_pair_programming_system in pair task response, got=%#v", pairBody.Layers)
+	if !strings.Contains(invalidEventW.Body.String(), `"code":"invalid_request"`) ||
+		!strings.Contains(invalidEventW.Body.String(), "invalid collaboration_event") {
+		t.Fatalf("expected invalid collaboration_event error, body=%s", invalidEventW.Body.String())
 	}
 }
 
@@ -2601,6 +2825,9 @@ func TestGetAgentSystemLayersSupportsClaudeModeQuery(t *testing.T) {
 	}
 	if body.ModeVariant != promptModeVariantClaudeV1 {
 		t.Fatalf("expected mode_variant=%q, got=%q", promptModeVariantClaudeV1, body.ModeVariant)
+	}
+	if strings.TrimSpace(body.PromptHash) == "" {
+		t.Fatalf("expected non-empty prompt_hash")
 	}
 	requiredOrderedLayers := []string{
 		"claude_identity_system",
@@ -2661,6 +2888,9 @@ func TestGetAgentSystemLayersSupportsCodexModeQueryV2(t *testing.T) {
 	}
 	if body.ModeVariant != promptModeVariantCodexV2 {
 		t.Fatalf("expected mode_variant=%q, got=%q", promptModeVariantCodexV2, body.ModeVariant)
+	}
+	if strings.TrimSpace(body.PromptHash) == "" {
+		t.Fatalf("expected non-empty prompt_hash")
 	}
 	indexByName := map[string]int{}
 	sumTokens := 0
@@ -3595,7 +3825,7 @@ func TestProcessAgentCodexReviewCommandWithPromptTemplatesAddsReviewHistoryLayer
 	}
 }
 
-func TestProcessAgentCodexPlanCommandAddsPlanCollaborationLayer(t *testing.T) {
+func TestProcessAgentCodexPlanCommandDoesNotSwitchCollaborationLayer(t *testing.T) {
 	requests := make([]map[string]interface{}, 0, 1)
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || r.URL.Path != "/chat/completions" {
@@ -3636,18 +3866,17 @@ func TestProcessAgentCodexPlanCommandAddsPlanCollaborationLayer(t *testing.T) {
 	}
 
 	systemMessages := collectSystemMessagesFromModelRequest(t, requests[0])
-	foundPlanLayer := false
+	foundDefaultLayer := false
 	for _, message := range systemMessages {
 		if strings.Contains(message, "## "+codexCollabPlanRelativePath) {
-			foundPlanLayer = true
-			continue
+			t.Fatalf("expected /plan to not switch collaboration layer, got=%#v", systemMessages)
 		}
 		if strings.Contains(message, "## "+codexCollabDefaultRelativePath) {
-			t.Fatalf("expected /plan to replace default collaboration layer, got=%#v", systemMessages)
+			foundDefaultLayer = true
 		}
 	}
-	if !foundPlanLayer {
-		t.Fatalf("expected codex plan collaboration layer when /plan is requested, got=%#v", systemMessages)
+	if !foundDefaultLayer {
+		t.Fatalf("expected codex default collaboration layer when /plan is requested, got=%#v", systemMessages)
 	}
 }
 
@@ -3699,7 +3928,7 @@ func TestProcessAgentDefaultModePlanCommandDoesNotAddPlanCollaborationLayer(t *t
 	}
 }
 
-func TestProcessAgentCodexExecuteCommandAddsExecuteCollaborationLayer(t *testing.T) {
+func TestProcessAgentCodexExecuteCommandDoesNotSwitchCollaborationLayer(t *testing.T) {
 	requests := make([]map[string]interface{}, 0, 1)
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || r.URL.Path != "/chat/completions" {
@@ -3740,22 +3969,21 @@ func TestProcessAgentCodexExecuteCommandAddsExecuteCollaborationLayer(t *testing
 	}
 
 	systemMessages := collectSystemMessagesFromModelRequest(t, requests[0])
-	foundExecuteLayer := false
+	foundDefaultLayer := false
 	for _, message := range systemMessages {
 		if strings.Contains(message, "## "+codexCollabExecuteRelativePath) {
-			foundExecuteLayer = true
-			continue
+			t.Fatalf("expected /execute to not switch collaboration layer, got=%#v", systemMessages)
 		}
 		if strings.Contains(message, "## "+codexCollabDefaultRelativePath) {
-			t.Fatalf("expected /execute to replace default collaboration layer, got=%#v", systemMessages)
+			foundDefaultLayer = true
 		}
 	}
-	if !foundExecuteLayer {
-		t.Fatalf("expected codex execute collaboration layer when /execute is requested, got=%#v", systemMessages)
+	if !foundDefaultLayer {
+		t.Fatalf("expected codex default collaboration layer when /execute is requested, got=%#v", systemMessages)
 	}
 }
 
-func TestProcessAgentCodexPairProgrammingCommandAddsPairProgrammingCollaborationLayer(t *testing.T) {
+func TestProcessAgentCodexPairProgrammingCommandDoesNotSwitchCollaborationLayer(t *testing.T) {
 	requests := make([]map[string]interface{}, 0, 1)
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || r.URL.Path != "/chat/completions" {
@@ -3796,18 +4024,17 @@ func TestProcessAgentCodexPairProgrammingCommandAddsPairProgrammingCollaboration
 	}
 
 	systemMessages := collectSystemMessagesFromModelRequest(t, requests[0])
-	foundPairLayer := false
+	foundDefaultLayer := false
 	for _, message := range systemMessages {
 		if strings.Contains(message, "## "+codexCollabPairProgrammingPath) {
-			foundPairLayer = true
-			continue
+			t.Fatalf("expected /pair_programming to not switch collaboration layer, got=%#v", systemMessages)
 		}
 		if strings.Contains(message, "## "+codexCollabDefaultRelativePath) {
-			t.Fatalf("expected /pair_programming to replace default collaboration layer, got=%#v", systemMessages)
+			foundDefaultLayer = true
 		}
 	}
-	if !foundPairLayer {
-		t.Fatalf("expected codex pair_programming collaboration layer when /pair_programming is requested, got=%#v", systemMessages)
+	if !foundDefaultLayer {
+		t.Fatalf("expected codex default collaboration layer when /pair_programming is requested, got=%#v", systemMessages)
 	}
 }
 
@@ -3867,6 +4094,185 @@ func TestProcessAgentDefaultModeExecuteAndPairCommandsDoNotAddCodexCollaboration
 				}
 			}
 		})
+	}
+}
+
+func TestProcessAgentCodexCollaborationModeStatePersistsAcrossTurns(t *testing.T) {
+	requests := make([]map[string]interface{}, 0, 2)
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/chat/completions" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		defer r.Body.Close()
+		body := map[string]interface{}{}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode provider request failed: %v", err)
+		}
+		requests = append(requests, body)
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"ok"}}]}`))
+	}))
+	defer mock.Close()
+
+	t.Setenv("NEXTAI_DISABLE_QQ_INBOUND_SUPERVISOR", "true")
+	srv, err := NewServer(config.Config{
+		Host:                  "127.0.0.1",
+		Port:                  "0",
+		DataDir:               t.TempDir(),
+		EnablePromptTemplates: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { srv.Close() })
+	configureOpenAIProviderForTest(t, srv, mock.URL)
+
+	firstReq := `{"input":[{"role":"user","type":"message","content":[{"type":"text","text":"第一轮：进入计划状态"}]}],"session_id":"s-collab-state-persist","user_id":"u-collab-state-persist","channel":"console","stream":false,"biz_params":{"prompt_mode":"codex","collaboration_event":"set_plan"}}`
+	firstW := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(firstW, httptest.NewRequest(http.MethodPost, "/agent/process", strings.NewReader(firstReq)))
+	if firstW.Code != http.StatusOK {
+		t.Fatalf("first process status=%d body=%s", firstW.Code, firstW.Body.String())
+	}
+
+	secondReq := `{"input":[{"role":"user","type":"message","content":[{"type":"text","text":"第二轮：不再发送切换事件"}]}],"session_id":"s-collab-state-persist","user_id":"u-collab-state-persist","channel":"console","stream":false}`
+	secondW := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(secondW, httptest.NewRequest(http.MethodPost, "/agent/process", strings.NewReader(secondReq)))
+	if secondW.Code != http.StatusOK {
+		t.Fatalf("second process status=%d body=%s", secondW.Code, secondW.Body.String())
+	}
+
+	if len(requests) < 2 {
+		t.Fatalf("expected at least 2 provider requests, got=%d", len(requests))
+	}
+	secondSystemMessages := collectSystemMessagesFromModelRequest(t, requests[1])
+	foundPlanLayer := false
+	for _, message := range secondSystemMessages {
+		if strings.Contains(message, "## "+codexCollabPlanRelativePath) {
+			foundPlanLayer = true
+		}
+		if strings.Contains(message, "## "+codexCollabDefaultRelativePath) {
+			t.Fatalf("expected persisted plan mode to suppress default collaboration layer, got=%#v", secondSystemMessages)
+		}
+	}
+	if !foundPlanLayer {
+		t.Fatalf("expected persisted plan collaboration layer in second turn, got=%#v", secondSystemMessages)
+	}
+
+	foundMode := ""
+	foundEvent := ""
+	srv.store.Read(func(state *repo.State) {
+		for _, chat := range state.Chats {
+			if chat.SessionID != "s-collab-state-persist" || chat.UserID != "u-collab-state-persist" || chat.Channel != "console" {
+				continue
+			}
+			foundMode = strings.TrimSpace(stringValue(chat.Meta[chatMetaCollaborationModeKey]))
+			foundEvent = strings.TrimSpace(stringValue(chat.Meta[chatMetaCollaborationLastEventKey]))
+			return
+		}
+	})
+	if foundMode != collaborationModePlanName {
+		t.Fatalf("expected persisted collaboration_mode=%q, got=%q", collaborationModePlanName, foundMode)
+	}
+	if foundEvent != collaborationEventSetPlan {
+		t.Fatalf("expected persisted collaboration_last_event=%q, got=%q", collaborationEventSetPlan, foundEvent)
+	}
+}
+
+func TestProcessAgentCodexCollaborationModeCapabilitiesFollowState(t *testing.T) {
+	requests := make([]map[string]interface{}, 0, 3)
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/chat/completions" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		defer r.Body.Close()
+		body := map[string]interface{}{}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode provider request failed: %v", err)
+		}
+		requests = append(requests, body)
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"ok"}}]}`))
+	}))
+	defer mock.Close()
+
+	t.Setenv("NEXTAI_DISABLE_QQ_INBOUND_SUPERVISOR", "true")
+	srv, err := NewServer(config.Config{
+		Host:                  "127.0.0.1",
+		Port:                  "0",
+		DataDir:               t.TempDir(),
+		EnablePromptTemplates: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { srv.Close() })
+	configureOpenAIProviderForTest(t, srv, mock.URL)
+
+	makeReq := func(event string) string {
+		return fmt.Sprintf(
+			`{"input":[{"role":"user","type":"message","content":[{"type":"text","text":"切换 %s"}]}],"session_id":"s-collab-capabilities","user_id":"u-collab-capabilities","channel":"console","stream":false,"biz_params":{"prompt_mode":"codex","collaboration_event":%q}}`,
+			event,
+			event,
+		)
+	}
+
+	planW := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(planW, httptest.NewRequest(http.MethodPost, "/agent/process", strings.NewReader(makeReq(collaborationEventSetPlan))))
+	if planW.Code != http.StatusOK {
+		t.Fatalf("plan process status=%d body=%s", planW.Code, planW.Body.String())
+	}
+
+	executeW := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(executeW, httptest.NewRequest(http.MethodPost, "/agent/process", strings.NewReader(makeReq(collaborationEventSetExecute))))
+	if executeW.Code != http.StatusOK {
+		t.Fatalf("execute process status=%d body=%s", executeW.Code, executeW.Body.String())
+	}
+
+	defaultW := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(defaultW, httptest.NewRequest(http.MethodPost, "/agent/process", strings.NewReader(makeReq(collaborationEventSetDefault))))
+	if defaultW.Code != http.StatusOK {
+		t.Fatalf("default process status=%d body=%s", defaultW.Code, defaultW.Body.String())
+	}
+
+	if len(requests) < 3 {
+		t.Fatalf("expected at least 3 provider requests, got=%d", len(requests))
+	}
+	containsTool := func(tools []string, target string) bool {
+		for _, tool := range tools {
+			if tool == target {
+				return true
+			}
+		}
+		return false
+	}
+
+	planTools := collectToolNamesFromModelRequest(t, requests[0])
+	if !containsTool(planTools, "request_user_input") {
+		t.Fatalf("expected request_user_input in plan mode, got=%#v", planTools)
+	}
+	executeTools := collectToolNamesFromModelRequest(t, requests[1])
+	if containsTool(executeTools, "request_user_input") {
+		t.Fatalf("expected request_user_input to be filtered in execute mode, got=%#v", executeTools)
+	}
+	defaultTools := collectToolNamesFromModelRequest(t, requests[2])
+	if containsTool(defaultTools, "request_user_input") {
+		t.Fatalf("expected request_user_input to be filtered in default mode, got=%#v", defaultTools)
+	}
+}
+
+func TestProcessAgentRejectsCollaborationEventOutsideCodexPromptMode(t *testing.T) {
+	t.Setenv("NEXTAI_DISABLE_QQ_INBOUND_SUPERVISOR", "true")
+	srv := newTestServer(t)
+
+	procReq := `{"input":[{"role":"user","type":"message","content":[{"type":"text","text":"test"}]}],"session_id":"s-invalid-collab-mode","user_id":"u-invalid-collab-mode","channel":"console","stream":false,"biz_params":{"prompt_mode":"default","collaboration_event":"set_plan"}}`
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/agent/process", strings.NewReader(procReq)))
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got=%d body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"code":"invalid_request"`) ||
+		!strings.Contains(w.Body.String(), "collaboration mode is only supported when prompt_mode=codex") {
+		t.Fatalf("expected collaboration mode codex guard error, body=%s", w.Body.String())
 	}
 }
 
@@ -4575,13 +4981,401 @@ func TestProcessAgentPublishesClaudeToolDefinitionsOnlyInClaudeMode(t *testing.T
 	}
 
 	claudeTools := toolNamesFromRequest(requests[0])
-	if !claudeTools["Read"] || !claudeTools["Bash"] || !claudeTools["TodoWrite"] || !claudeTools["Task"] {
+	if !claudeTools["Read"] || !claudeTools["Bash"] {
 		t.Fatalf("expected claude request to include Claude tool definitions, got=%#v", claudeTools)
+	}
+	if claudeTools["Task"] || claudeTools["TodoWrite"] || claudeTools["ExitPlanMode"] {
+		t.Fatalf("expected claude request to exclude emulation-only Claude tools, got=%#v", claudeTools)
+	}
+	if claudeTools["WebSearch"] || claudeTools["WebFetch"] {
+		t.Fatalf("expected claude request to exclude network claude tools when corresponding capabilities are unavailable, got=%#v", claudeTools)
 	}
 
 	defaultTools := toolNamesFromRequest(requests[1])
-	if defaultTools["Read"] || defaultTools["Bash"] || defaultTools["TodoWrite"] || defaultTools["Task"] {
+	if defaultTools["Read"] || defaultTools["Bash"] || defaultTools["Task"] || defaultTools["TodoWrite"] || defaultTools["ExitPlanMode"] {
 		t.Fatalf("expected default request to exclude Claude-only tool definitions, got=%#v", defaultTools)
+	}
+}
+
+func TestBuildTurnRuntimeSnapshotForInputCapturesUnifiedRuntimeState(t *testing.T) {
+	srv := newTestServer(t)
+	snapshot := srv.buildTurnRuntimeSnapshotForInput(
+		promptModeCodex,
+		[]domain.AgentInputMessage{
+			{
+				Role: "user",
+				Type: "message",
+				Content: []domain.RuntimeContent{
+					{Type: "text", Text: "/plan 先拆任务"},
+				},
+			},
+		},
+		"session-runtime-snapshot",
+		collaborationModePlanName,
+		collaborationEventSetPlan,
+	)
+
+	if snapshot.Mode.PromptMode != promptModeCodex {
+		t.Fatalf("expected prompt_mode=%q, got=%q", promptModeCodex, snapshot.Mode.PromptMode)
+	}
+	if snapshot.Mode.CollaborationMode != collaborationModePlanName {
+		t.Fatalf("expected collaboration_mode=%q, got=%q", collaborationModePlanName, snapshot.Mode.CollaborationMode)
+	}
+	if snapshot.ApprovalPolicy != defaultTurnApprovalPolicy {
+		t.Fatalf("expected approval_policy=%q, got=%q", defaultTurnApprovalPolicy, snapshot.ApprovalPolicy)
+	}
+	if snapshot.SandboxPolicy != defaultTurnSandboxPolicy {
+		t.Fatalf("expected sandbox_policy=%q, got=%q", defaultTurnSandboxPolicy, snapshot.SandboxPolicy)
+	}
+	if snapshot.MCP.Enabled {
+		t.Fatalf("expected MCP disabled by default, got=%#v", snapshot.MCP)
+	}
+	if len(snapshot.AvailableTools) == 0 {
+		t.Fatalf("expected available_tools to be populated")
+	}
+}
+
+func TestListToolDefinitionsForTurnRuntimeUsesSnapshotAvailableTools(t *testing.T) {
+	srv := newTestServer(t)
+	snapshot := newTurnRuntimeSnapshot(promptModeDefault, "")
+	snapshot.AvailableTools = []string{"Read"}
+
+	defs := srv.listToolDefinitionsForTurnRuntime(snapshot)
+	if len(defs) != 1 || defs[0].Name != "Read" {
+		t.Fatalf("expected tool definitions from snapshot only, got=%#v", defs)
+	}
+}
+
+func TestApplyRuntimeToolSetToSnapshotMergesSessionAndTurnToolSets(t *testing.T) {
+	srv := newTestServer(t)
+	snapshot := newTurnRuntimeSnapshot(promptModeCodex, "session-runtime-tools")
+	snapshot.AvailableTools = []string{"view", "shell"}
+
+	sessionSet := turnRuntimeToolSet{
+		MCPStatus: "session_connected",
+		MCPTools: []turnRuntimeToolSpec{
+			{
+				Name:        "mcp__calendar__list_events",
+				Description: "List events from calendar MCP",
+				Parameters: map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"date": map[string]interface{}{"type": "string"},
+					},
+				},
+				Source: turnRuntimeToolSourceMCP,
+			},
+		},
+		DynamicTools: []turnRuntimeToolSpec{
+			{
+				Name:        "dynamic_session_weather",
+				Description: "Session weather dynamic tool",
+				Parameters: map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"city": map[string]interface{}{"type": "string"},
+					},
+				},
+				Source: turnRuntimeToolSourceDynamic,
+			},
+		},
+	}
+	turnSet := turnRuntimeToolSet{
+		MCPStatus: "turn_ready",
+		MCPTools: []turnRuntimeToolSpec{
+			{
+				Name:        "mcp__calendar__create_event",
+				Description: "Create event in calendar MCP",
+				Parameters: map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"title": map[string]interface{}{"type": "string"},
+					},
+				},
+				Source: turnRuntimeToolSourceMCP,
+			},
+		},
+		DynamicTools: []turnRuntimeToolSpec{
+			{
+				Name:        "dynamic_turn_database_query",
+				Description: "Turn dynamic database tool",
+				Parameters: map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"sql": map[string]interface{}{"type": "string"},
+					},
+				},
+				Source: turnRuntimeToolSourceDynamic,
+			},
+		},
+	}
+
+	merged := srv.applyRuntimeToolSetToSnapshot(snapshot, sessionSet, turnSet)
+	if !merged.MCP.Enabled {
+		t.Fatalf("expected merged MCP enabled, got=%#v", merged.MCP)
+	}
+	if merged.MCP.Status != "turn_ready" {
+		t.Fatalf("expected turn mcp status override, got=%q", merged.MCP.Status)
+	}
+	if len(merged.DynamicTools) != 2 {
+		t.Fatalf("expected two dynamic tools, got=%#v", merged.DynamicTools)
+	}
+
+	available := map[string]bool{}
+	for _, name := range merged.AvailableTools {
+		available[name] = true
+	}
+	for _, required := range []string{
+		"view",
+		"shell",
+		"mcp__calendar__list_events",
+		"mcp__calendar__create_event",
+		"dynamic_session_weather",
+		"dynamic_turn_database_query",
+	} {
+		if !available[required] {
+			t.Fatalf("missing merged available tool %q from %#v", required, merged.AvailableTools)
+		}
+	}
+
+	definitions := srv.listToolDefinitionsForTurnRuntime(merged)
+	byName := map[string]runner.ToolDefinition{}
+	for _, def := range definitions {
+		byName[def.Name] = def
+	}
+	if _, ok := byName["mcp__calendar__create_event"]; !ok {
+		t.Fatalf("missing runtime MCP tool definition, got=%#v", byName)
+	}
+	if _, ok := byName["dynamic_turn_database_query"]; !ok {
+		t.Fatalf("missing runtime dynamic tool definition, got=%#v", byName)
+	}
+}
+
+func TestProcessAgentAggregatesSessionAndTurnRuntimeToolsIntoModelRequest(t *testing.T) {
+	var (
+		requestMu     sync.Mutex
+		capturedModel map[string]interface{}
+	)
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/chat/completions" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		body := map[string]interface{}{}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		requestMu.Lock()
+		capturedModel = body
+		requestMu.Unlock()
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"choices": []map[string]interface{}{
+				{
+					"message": map[string]interface{}{"content": "runtime tools assembled"},
+				},
+			},
+		})
+	}))
+	defer mock.Close()
+
+	srv := newTestServer(t)
+	configureOpenAIProviderForTest(t, srv, mock.URL)
+
+	if err := srv.store.Write(func(state *repo.State) error {
+		state.Chats["chat-runtime-tools"] = domain.ChatSpec{
+			ID:        "chat-runtime-tools",
+			Name:      "runtime-tools",
+			SessionID: "s-runtime-tools",
+			UserID:    "u-runtime-tools",
+			Channel:   "console",
+			CreatedAt: nowISO(),
+			UpdatedAt: nowISO(),
+			Meta: map[string]interface{}{
+				chatMetaPromptModeKey: promptModeCodex,
+				turnRuntimeToolsKey: map[string]interface{}{
+					"mcp": map[string]interface{}{
+						"status": "connected",
+						"tools": []interface{}{
+							map[string]interface{}{
+								"name":        "mcp__calendar__list_events",
+								"description": "list mcp events",
+								"input_schema": map[string]interface{}{
+									"type": "object",
+									"properties": map[string]interface{}{
+										"date": map[string]interface{}{"type": "string"},
+									},
+								},
+							},
+						},
+					},
+					"dynamic_tools": []interface{}{
+						map[string]interface{}{
+							"name":        "dynamic_session_tool",
+							"description": "session dynamic",
+							"parameters": map[string]interface{}{
+								"type": "object",
+								"properties": map[string]interface{}{
+									"session": map[string]interface{}{"type": "string"},
+								},
+							},
+						},
+					},
+				},
+			},
+		}
+		state.Histories["chat-runtime-tools"] = []domain.RuntimeMessage{}
+		return nil
+	}); err != nil {
+		t.Fatalf("seed chat with runtime tools failed: %v", err)
+	}
+
+	processReq := `{
+		"input":[{"role":"user","type":"message","content":[{"type":"text","text":"assemble runtime tools"}]}],
+		"session_id":"s-runtime-tools",
+		"user_id":"u-runtime-tools",
+		"channel":"console",
+		"stream":false,
+		"biz_params":{
+			"prompt_mode":"codex",
+			"runtime_tools":{
+				"dynamic_tools":[
+					{
+						"name":"dynamic_turn_tool",
+						"description":"turn dynamic",
+						"parameters":{
+							"type":"object",
+							"properties":{"turn":{"type":"string"}}
+						}
+					}
+				]
+			}
+		}
+	}`
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/agent/process", strings.NewReader(processReq)))
+	if w.Code != http.StatusOK {
+		t.Fatalf("process status=%d body=%s", w.Code, w.Body.String())
+	}
+
+	requestMu.Lock()
+	modelReq := capturedModel
+	requestMu.Unlock()
+	if modelReq == nil {
+		t.Fatalf("expected captured model request")
+	}
+
+	toolNames := collectToolNamesFromModelRequest(t, modelReq)
+	toolSet := map[string]bool{}
+	for _, name := range toolNames {
+		toolSet[name] = true
+	}
+	for _, required := range []string{
+		"mcp__calendar__list_events",
+		"dynamic_session_tool",
+		"dynamic_turn_tool",
+	} {
+		if !toolSet[required] {
+			t.Fatalf("expected runtime tool %q in provider tools=%#v", required, toolNames)
+		}
+	}
+
+	systemMessages := collectSystemMessagesFromModelRequest(t, modelReq)
+	mergedSystem := strings.Join(systemMessages, "\n")
+	if !strings.Contains(mergedSystem, "runtime://turn_tools") {
+		t.Fatalf("expected runtime availability system layer, got=%s", mergedSystem)
+	}
+	if !strings.Contains(mergedSystem, "dynamic_turn_tool") || !strings.Contains(mergedSystem, "mcp__calendar__list_events") {
+		t.Fatalf("expected runtime tool names in system layer, got=%s", mergedSystem)
+	}
+}
+
+func TestProcessAgentExecutesRuntimeDynamicToolViaGatewayDelegate(t *testing.T) {
+	srv := newTestServer(t)
+	_, absPath := newToolTestPath(t, "runtime-dynamic-delegate")
+	if err := os.WriteFile(absPath, []byte("runtime-line-1\nruntime-line-2\nruntime-line-3\n"), 0o644); err != nil {
+		t.Fatalf("seed runtime dynamic tool file failed: %v", err)
+	}
+
+	processReq := fmt.Sprintf(`{
+		"input":[{"role":"user","type":"message","content":[{"type":"text","text":"run runtime dynamic tool"}]}],
+		"session_id":"s-runtime-dynamic-delegate",
+		"user_id":"u-runtime-dynamic-delegate",
+		"channel":"console",
+		"stream":false,
+		"biz_params":{
+			"prompt_mode":"codex",
+			"runtime_tools":{
+				"dynamic_tools":[
+					{
+						"name":"dynamic_runtime_view",
+						"description":"runtime dynamic view delegate",
+						"gateway_tool":"view",
+						"gateway_input":{
+							"items":[{"path":%q,"start":2,"end":2}]
+						}
+					}
+				]
+			},
+			"tool":{
+				"name":"dynamic_runtime_view",
+				"input":{}
+			}
+		}
+	}`, absPath)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/agent/process", strings.NewReader(processReq)))
+	if w.Code != http.StatusOK {
+		t.Fatalf("process status=%d body=%s", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, "2: runtime-line-2") {
+		t.Fatalf("expected delegated runtime dynamic tool output, body=%s", body)
+	}
+}
+
+func TestProcessAgentExecutesRuntimeMCPToolViaGatewayDelegate(t *testing.T) {
+	srv := newTestServer(t)
+	_, absPath := newToolTestPath(t, "runtime-mcp-delegate")
+	if err := os.WriteFile(absPath, []byte("runtime-mcp-1\nruntime-mcp-2\nruntime-mcp-3\n"), 0o644); err != nil {
+		t.Fatalf("seed runtime mcp tool file failed: %v", err)
+	}
+
+	processReq := fmt.Sprintf(`{
+		"input":[{"role":"user","type":"message","content":[{"type":"text","text":"run runtime mcp tool"}]}],
+		"session_id":"s-runtime-mcp-delegate",
+		"user_id":"u-runtime-mcp-delegate",
+		"channel":"console",
+		"stream":false,
+		"biz_params":{
+			"prompt_mode":"codex",
+			"runtime_tools":{
+				"mcp":{
+					"status":"connected",
+					"tools":[
+						{
+							"server":"calendar",
+							"tool":"list_events",
+							"description":"runtime mcp view delegate",
+							"gateway_tool":"view",
+							"gateway_input":{
+								"items":[{"path":%q,"start":3,"end":3}]
+							}
+						}
+					]
+				}
+			},
+			"tool":{
+				"name":"mcp__calendar__list_events",
+				"input":{}
+			}
+		}
+	}`, absPath)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/agent/process", strings.NewReader(processReq)))
+	if w.Code != http.StatusOK {
+		t.Fatalf("process status=%d body=%s", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, "3: runtime-mcp-3") {
+		t.Fatalf("expected delegated runtime mcp tool output, body=%s", body)
 	}
 }
 
@@ -5685,6 +6479,77 @@ func TestProcessAgentCodexModeNormalizesExecCommandAlias(t *testing.T) {
 	timeout, ok := intFromAny(item["timeout_seconds"])
 	if !ok || timeout != 2 {
 		t.Fatalf("timeout_seconds=%v want=2", item["timeout_seconds"])
+	}
+}
+
+func TestProcessAgentCodexModeNormalizesWriteStdinAlias(t *testing.T) {
+	var calls int
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if r.Method != http.MethodPost || r.URL.Path != "/chat/completions" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		if calls == 1 {
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"choices": []map[string]interface{}{
+					{
+						"message": map[string]interface{}{
+							"content": "",
+							"tool_calls": []map[string]interface{}{
+								{
+									"id":   "call_write",
+									"type": "function",
+									"function": map[string]interface{}{
+										"name":      "write_stdin",
+										"arguments": `{"session_id":1001,"chars":"echo hi\\n","yield_time_ms":250}`,
+									},
+								},
+							},
+						},
+					},
+				},
+			})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"choices": []map[string]interface{}{
+				{
+					"message": map[string]interface{}{"content": "write alias ok"},
+				},
+			},
+		})
+	}))
+	defer mock.Close()
+
+	srv := newTestServer(t)
+	var captured map[string]interface{}
+	srv.tools["shell"] = &stubToolPlugin{
+		name: "shell",
+		invoke: func(input map[string]interface{}) (map[string]interface{}, error) {
+			captured = safeMap(input)
+			return map[string]interface{}{"ok": true, "text": "shell write stub ok"}, nil
+		},
+	}
+	configureOpenAIProviderForTest(t, srv, mock.URL)
+
+	procReq := `{"input":[{"role":"user","type":"message","content":[{"type":"text","text":"run write_stdin"}]}],"session_id":"s-codex-write-alias","user_id":"u-codex-write-alias","channel":"console","stream":false,"biz_params":{"prompt_mode":"codex"}}`
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/agent/process", strings.NewReader(procReq)))
+	if w.Code != http.StatusOK {
+		t.Fatalf("process status=%d body=%s", w.Code, w.Body.String())
+	}
+	if calls < 2 {
+		t.Fatalf("expected at least 2 model calls, got=%d", calls)
+	}
+	if captured == nil {
+		t.Fatalf("shell plugin not invoked")
+	}
+	if got, ok := intFromAny(captured["session_id"]); !ok || got != 1001 {
+		t.Fatalf("session_id=%v want=1001", captured["session_id"])
+	}
+	if got, _ := captured["chars"].(string); got != "echo hi\\n" {
+		t.Fatalf("chars=%q want=%q", got, "echo hi\\n")
 	}
 }
 

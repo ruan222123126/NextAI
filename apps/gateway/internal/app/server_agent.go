@@ -46,6 +46,7 @@ type agentSystemLayerView struct {
 type agentSystemLayersResponse struct {
 	Version              string                 `json:"version"`
 	ModeVariant          string                 `json:"mode_variant,omitempty"`
+	PromptHash           string                 `json:"prompt_hash,omitempty"`
 	Layers               []agentSystemLayerView `json:"layers"`
 	EstimatedTokensTotal int                    `json:"estimated_tokens_total"`
 }
@@ -68,33 +69,26 @@ func (s *Server) getAgentSystemLayers(w http.ResponseWriter, r *http.Request) {
 		promptMode = normalizedMode
 	}
 
-	layerOptions := codexLayerBuildOptions{}
-	if promptMode == promptModeCodex {
-		if rawTaskCommand := strings.TrimSpace(r.URL.Query().Get("task_command")); rawTaskCommand != "" {
-			taskCommand, ok := normalizeSystemLayerTaskCommand(rawTaskCommand)
-			if !ok {
-				writeErr(w, http.StatusBadRequest, "invalid_request", "invalid task_command", nil)
-				return
-			}
-			switch taskCommand {
-			case reviewTaskCommand:
-				layerOptions.ReviewTask = true
-			case compactTaskCommand:
-				layerOptions.CompactTask = true
-			case memoryTaskCommand:
-				layerOptions.MemoryTask = true
-			case planTaskCommand:
-				layerOptions.CollaborationMode = collaborationModePlanName
-			case executeTaskCommand:
-				layerOptions.CollaborationMode = collaborationModeExecuteName
-			case pairTaskCommand:
-				layerOptions.CollaborationMode = collaborationModePairProgrammingName
-			}
+	runtimeSnapshot, err := s.buildTurnRuntimeSnapshotForSystemLayers(
+		promptMode,
+		r.URL.Query().Get("task_command"),
+		r.URL.Query().Get("session_id"),
+		r.URL.Query().Get(collaborationBizParamsModeKey),
+		r.URL.Query().Get(collaborationBizParamsEventKey),
+	)
+	if err != nil {
+		switch {
+		case errors.Is(err, errInvalidCollaborationMode):
+			writeErr(w, http.StatusBadRequest, "invalid_request", "invalid collaboration_mode", nil)
+		case errors.Is(err, errInvalidCollaborationEvent), errors.Is(err, errConflictingCollaborationEvent):
+			writeErr(w, http.StatusBadRequest, "invalid_request", "invalid collaboration_event", nil)
+		default:
+			writeErr(w, http.StatusBadRequest, "invalid_request", "invalid task_command", nil)
 		}
-		layerOptions.SessionID = strings.TrimSpace(r.URL.Query().Get("session_id"))
+		return
 	}
 
-	layers, err := s.buildSystemLayersForModeWithOptions(promptMode, layerOptions)
+	compiled, err := s.compileSystemLayersForTurnRuntime(runtimeSnapshot)
 	if err != nil {
 		errorCode, errorMessage := promptUnavailableErrorForMode(promptMode)
 		writeErr(w, http.StatusInternalServerError, errorCode, errorMessage, nil)
@@ -104,9 +98,11 @@ func (s *Server) getAgentSystemLayers(w http.ResponseWriter, r *http.Request) {
 	resp := agentSystemLayersResponse{
 		Version:     "v1",
 		ModeVariant: s.resolvePromptModeVariant(promptMode),
-		Layers:      make([]agentSystemLayerView, 0, len(layers)),
+		PromptHash:  compiled.Hash,
+		Layers:      make([]agentSystemLayerView, 0, len(compiled.Layers)),
 	}
-	for _, layer := range layers {
+	for _, compiledLayer := range compiled.Layers {
+		layer := compiledLayer.Layer
 		tokens := estimatePromptTokenCount(layer.Content)
 		resp.EstimatedTokensTotal += tokens
 		resp.Layers = append(resp.Layers, agentSystemLayerView{
@@ -114,7 +110,7 @@ func (s *Server) getAgentSystemLayers(w http.ResponseWriter, r *http.Request) {
 			Role:            layer.Role,
 			Source:          layer.Source,
 			ContentPreview:  summarizeLayerPreview(layer.Content, 160),
-			LayerHash:       normalizedLayerContentHash(layer.Content),
+			LayerHash:       compiledLayer.Hash,
 			EstimatedTokens: tokens,
 		})
 	}
@@ -274,18 +270,6 @@ func isReviewTaskCommand(input []domain.AgentInputMessage) bool {
 	return matchesSlashCommand(input, reviewTaskCommand)
 }
 
-func isPlanTaskCommand(input []domain.AgentInputMessage) bool {
-	return matchesSlashCommand(input, planTaskCommand)
-}
-
-func isExecuteTaskCommand(input []domain.AgentInputMessage) bool {
-	return matchesSlashCommand(input, executeTaskCommand)
-}
-
-func isPairTaskCommand(input []domain.AgentInputMessage) bool {
-	return matchesSlashCommand(input, pairTaskCommand)
-}
-
 func isCompactTaskCommand(input []domain.AgentInputMessage) bool {
 	return matchesSlashCommand(input, compactTaskCommand)
 }
@@ -336,12 +320,6 @@ func normalizeSystemLayerTaskCommand(raw string) (string, bool) {
 		return compactTaskCommand, true
 	case memoryTaskCommand:
 		return memoryTaskCommand, true
-	case planTaskCommand:
-		return planTaskCommand, true
-	case executeTaskCommand:
-		return executeTaskCommand, true
-	case pairTaskCommand, "/pair-programming":
-		return pairTaskCommand, true
 	default:
 		return "", false
 	}
@@ -681,26 +659,42 @@ func (s *Server) listToolDefinitions() []runner.ToolDefinition {
 }
 
 func (s *Server) listToolDefinitionsForPromptMode(promptMode string) []runner.ToolDefinition {
-	registeredToolNames := make([]string, 0, len(s.tools))
-	for name := range s.tools {
-		registeredToolNames = append(registeredToolNames, name)
-	}
-	names := agentprotocolservice.ListToolDefinitionNames(
-		promptMode,
-		registeredToolNames,
-		s.toolHasDeclaredCapability,
-		s.toolDisabled,
-	)
+	snapshot := newTurnRuntimeSnapshot(promptMode, "")
+	snapshot.AvailableTools = s.resolveAvailableToolDefinitionNames(snapshot.Mode.PromptMode)
+	return s.listToolDefinitionsForTurnRuntime(snapshot)
+}
 
+func (s *Server) listToolDefinitionsForTurnRuntime(snapshot TurnRuntimeSnapshot) []runner.ToolDefinition {
+	names := normalizeTurnRuntimeToolNames(snapshot.AvailableTools)
+	if len(names) == 0 {
+		names = s.resolveAvailableToolDefinitionNames(snapshot.Mode.PromptMode)
+	}
 	out := make([]runner.ToolDefinition, 0, len(names))
 	for _, name := range names {
+		if spec, ok := snapshot.runtimeToolSpecs[normalizeRuntimeToolName(name)]; ok {
+			out = append(out, runner.ToolDefinition{
+				Name:        spec.Name,
+				Description: strings.TrimSpace(spec.Description),
+				Parameters:  cloneJSONMap(spec.Parameters),
+			})
+			continue
+		}
 		out = append(out, buildToolDefinition(name))
 	}
 	return out
 }
 
-func claudeCompatibleToolDefinitionNames() []string {
-	return agentprotocolservice.ClaudeCompatibleToolDefinitionNames()
+func (s *Server) resolveAvailableToolDefinitionNames(promptMode string) []string {
+	registeredToolNames := make([]string, 0, len(s.tools))
+	for name := range s.tools {
+		registeredToolNames = append(registeredToolNames, name)
+	}
+	return agentprotocolservice.ListToolDefinitionNames(
+		promptMode,
+		registeredToolNames,
+		s.toolHasDeclaredCapability,
+		s.toolDisabled,
+	)
 }
 
 func buildToolDefinition(name string) runner.ToolDefinition {
@@ -816,6 +810,94 @@ func buildToolDefinition(name string) runner.ToolDefinition {
 					},
 				},
 				"required": []string{"items"},
+			},
+		}
+	case "exec_command":
+		return runner.ToolDefinition{
+			Name:        "exec_command",
+			Description: "Execute a shell command, optionally returning a live session_id for follow-up write_stdin calls.",
+			Parameters: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"cmd": map[string]interface{}{
+						"type":        "string",
+						"description": "Shell command text to execute.",
+					},
+					"workdir": map[string]interface{}{
+						"type":        "string",
+						"description": "Optional working directory.",
+					},
+					"shell": map[string]interface{}{
+						"type":        "string",
+						"description": "Optional shell override path.",
+					},
+					"login": map[string]interface{}{
+						"type":        "boolean",
+						"description": "Optional login shell flag.",
+					},
+					"tty": map[string]interface{}{
+						"type":        "boolean",
+						"description": "Whether the session should allow interactive stdin writes.",
+					},
+					"yield_time_ms": map[string]interface{}{
+						"type":        "integer",
+						"minimum":     1,
+						"description": "How long to wait for initial output before returning.",
+					},
+					"max_output_tokens": map[string]interface{}{
+						"type":        "integer",
+						"minimum":     1,
+						"description": "Optional output budget hint.",
+					},
+					"sandbox_permissions": map[string]interface{}{
+						"type":        "string",
+						"description": "Optional sandbox permission request.",
+					},
+					"justification": map[string]interface{}{
+						"type":        "string",
+						"description": "Optional escalation justification.",
+					},
+					"prefix_rule": map[string]interface{}{
+						"type":        "array",
+						"description": "Optional command prefix allowlist hint.",
+						"items": map[string]interface{}{
+							"type": "string",
+						},
+					},
+				},
+				"required":             []string{"cmd"},
+				"additionalProperties": true,
+			},
+		}
+	case "write_stdin":
+		return runner.ToolDefinition{
+			Name:        "write_stdin",
+			Description: "Write stdin to a live shell session (session_id) and collect incremental output.",
+			Parameters: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"session_id": map[string]interface{}{
+						"type":        "integer",
+						"minimum":     1,
+						"description": "Session id returned by exec_command.",
+					},
+					"chars": map[string]interface{}{
+						"type":        "string",
+						"description": "Bytes/chars to write to stdin; leave empty for polling output only.",
+					},
+					"yield_time_ms": map[string]interface{}{
+						"type":        "integer",
+						"minimum":     1,
+						"description": "How long to wait for additional output.",
+					},
+					"max_output_tokens": map[string]interface{}{
+						"type":        "integer",
+						"minimum":     1,
+						"description": "Optional output budget hint.",
+					},
+				},
+				"required":             []string{"session_id"},
+				"additionalProperties": true,
 			},
 		}
 	case "browser":
@@ -1061,6 +1143,164 @@ func buildToolDefinition(name string) runner.ToolDefinition {
 				"additionalProperties": true,
 			},
 		}
+	case "spawn_agent":
+		return runner.ToolDefinition{
+			Name:        "spawn_agent",
+			Description: "Spawn a managed sub-agent and immediately start its first turn.",
+			Parameters: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"agent_id":           map[string]interface{}{"type": "string"},
+					"task":               map[string]interface{}{"type": "string"},
+					"session_id":         map[string]interface{}{"type": "string"},
+					"user_id":            map[string]interface{}{"type": "string"},
+					"channel":            map[string]interface{}{"type": "string"},
+					"prompt_mode":        map[string]interface{}{"type": "string"},
+					"collaboration_mode": map[string]interface{}{"type": "string"},
+				},
+				"required":             []string{"task"},
+				"additionalProperties": false,
+			},
+		}
+	case "send_input":
+		return runner.ToolDefinition{
+			Name:        "send_input",
+			Description: "Queue a user input for a managed sub-agent.",
+			Parameters: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"agent_id": map[string]interface{}{"type": "string"},
+					"input":    map[string]interface{}{"type": "string"},
+				},
+				"required":             []string{"agent_id", "input"},
+				"additionalProperties": false,
+			},
+		}
+	case "resume_agent":
+		return runner.ToolDefinition{
+			Name:        "resume_agent",
+			Description: "Resume a managed sub-agent with its next queued input.",
+			Parameters: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"agent_id": map[string]interface{}{"type": "string"},
+					"input":    map[string]interface{}{"type": "string"},
+				},
+				"required":             []string{"agent_id"},
+				"additionalProperties": false,
+			},
+		}
+	case "wait":
+		return runner.ToolDefinition{
+			Name:        "wait",
+			Description: "Wait for a managed sub-agent state change or completion.",
+			Parameters: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"agent_id": map[string]interface{}{"type": "string"},
+					"timeout_ms": map[string]interface{}{
+						"type":    "integer",
+						"minimum": 1,
+					},
+				},
+				"required":             []string{"agent_id"},
+				"additionalProperties": false,
+			},
+		}
+	case "close_agent":
+		return runner.ToolDefinition{
+			Name:        "close_agent",
+			Description: "Close and remove a managed sub-agent.",
+			Parameters: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"agent_id": map[string]interface{}{"type": "string"},
+				},
+				"required":             []string{"agent_id"},
+				"additionalProperties": false,
+			},
+		}
+	case "request_user_input":
+		return runner.ToolDefinition{
+			Name:        "request_user_input",
+			Description: "Ask user questions and wait for explicit answers before continuing.",
+			Parameters: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"request_id": map[string]interface{}{"type": "string"},
+					"questions": map[string]interface{}{
+						"type":     "array",
+						"minItems": 1,
+						"maxItems": 3,
+						"items": map[string]interface{}{
+							"type": "object",
+							"properties": map[string]interface{}{
+								"id":       map[string]interface{}{"type": "string"},
+								"header":   map[string]interface{}{"type": "string"},
+								"question": map[string]interface{}{"type": "string"},
+								"options": map[string]interface{}{
+									"type": "array",
+									"items": map[string]interface{}{
+										"type": "object",
+										"properties": map[string]interface{}{
+											"label":       map[string]interface{}{"type": "string"},
+											"description": map[string]interface{}{"type": "string"},
+										},
+										"required":             []string{"label", "description"},
+										"additionalProperties": false,
+									},
+								},
+							},
+							"required":             []string{"id", "header", "question"},
+							"additionalProperties": false,
+						},
+					},
+				},
+				"required":             []string{"questions"},
+				"additionalProperties": false,
+			},
+		}
+	case "update_plan":
+		return runner.ToolDefinition{
+			Name:        "update_plan",
+			Description: "Update and persist the active task plan checklist.",
+			Parameters: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"explanation": map[string]interface{}{"type": "string"},
+					"plan": map[string]interface{}{
+						"type":     "array",
+						"minItems": 1,
+						"items": map[string]interface{}{
+							"type": "object",
+							"properties": map[string]interface{}{
+								"step":   map[string]interface{}{"type": "string"},
+								"status": map[string]interface{}{"type": "string", "enum": []string{"pending", "in_progress", "completed"}},
+							},
+							"required":             []string{"step", "status"},
+							"additionalProperties": false,
+						},
+					},
+				},
+				"required":             []string{"plan"},
+				"additionalProperties": false,
+			},
+		}
+	case "apply_patch":
+		return runner.ToolDefinition{
+			Name:        "apply_patch",
+			Description: "Apply a Codex-style patch payload to files on disk.",
+			Parameters: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"patch":   map[string]interface{}{"type": "string"},
+					"workdir": map[string]interface{}{"type": "string"},
+					"cwd":     map[string]interface{}{"type": "string"},
+				},
+				"required":             []string{"patch"},
+				"additionalProperties": false,
+			},
+		}
 	case "Bash":
 		return runner.ToolDefinition{
 			Name:        "Bash",
@@ -1274,61 +1514,6 @@ func buildToolDefinition(name string) runner.ToolDefinition {
 					"prompt": map[string]interface{}{"type": "string"},
 				},
 				"required":             []string{"url", "prompt"},
-				"additionalProperties": false,
-			},
-		}
-	case "Task":
-		return runner.ToolDefinition{
-			Name:        "Task",
-			Description: "Launch a sub-agent style task (emulated in NextAI).",
-			Parameters: map[string]interface{}{
-				"type": "object",
-				"properties": map[string]interface{}{
-					"description":   map[string]interface{}{"type": "string"},
-					"prompt":        map[string]interface{}{"type": "string"},
-					"subagent_type": map[string]interface{}{"type": "string"},
-				},
-				"required":             []string{"description", "prompt", "subagent_type"},
-				"additionalProperties": false,
-			},
-		}
-	case "TodoWrite":
-		return runner.ToolDefinition{
-			Name:        "TodoWrite",
-			Description: "Update todo list state (emulated in NextAI).",
-			Parameters: map[string]interface{}{
-				"type": "object",
-				"properties": map[string]interface{}{
-					"todos": map[string]interface{}{
-						"type":     "array",
-						"minItems": 1,
-						"items": map[string]interface{}{
-							"type": "object",
-							"properties": map[string]interface{}{
-								"content":  map[string]interface{}{"type": "string"},
-								"status":   map[string]interface{}{"type": "string", "enum": []string{"pending", "in_progress", "completed"}},
-								"priority": map[string]interface{}{"type": "string", "enum": []string{"high", "medium", "low"}},
-								"id":       map[string]interface{}{"type": "string"},
-							},
-							"required":             []string{"content", "status", "priority", "id"},
-							"additionalProperties": false,
-						},
-					},
-				},
-				"required":             []string{"todos"},
-				"additionalProperties": false,
-			},
-		}
-	case "ExitPlanMode":
-		return runner.ToolDefinition{
-			Name:        "ExitPlanMode",
-			Description: "Ask to exit plan mode (emulated in NextAI).",
-			Parameters: map[string]interface{}{
-				"type": "object",
-				"properties": map[string]interface{}{
-					"plan": map[string]interface{}{"type": "string"},
-				},
-				"required":             []string{"plan"},
 				"additionalProperties": false,
 			},
 		}
@@ -1704,8 +1889,18 @@ func (e *toolError) Unwrap() error {
 	return e.Err
 }
 
-func parseToolCall(bizParams map[string]interface{}, rawRequest map[string]interface{}, promptMode string) (toolCall, bool, error) {
-	call, ok, err := agentprotocolservice.ParseToolCall(bizParams, rawRequest, promptMode)
+func parseToolCall(
+	bizParams map[string]interface{},
+	rawRequest map[string]interface{},
+	promptMode string,
+	availableToolDefinitionNames []string,
+) (toolCall, bool, error) {
+	call, ok, err := agentprotocolservice.ParseToolCall(
+		bizParams,
+		rawRequest,
+		promptMode,
+		availableToolDefinitionNames,
+	)
 	if err != nil || !ok {
 		return toolCall{}, ok, err
 	}
@@ -1723,8 +1918,8 @@ func parseBizParamsToolCall(bizParams map[string]interface{}, promptMode string)
 	return toolCall{Name: call.Name, Input: call.Input}, true, nil
 }
 
-func parseShortcutToolCall(rawRequest map[string]interface{}, promptMode string) (toolCall, bool, error) {
-	call, ok, err := agentprotocolservice.ParseShortcutToolCall(rawRequest, promptMode)
+func parseShortcutToolCall(rawRequest map[string]interface{}, promptMode string, availableToolDefinitionNames []string) (toolCall, bool, error) {
+	call, ok, err := agentprotocolservice.ParseShortcutToolCall(rawRequest, promptMode, availableToolDefinitionNames)
 	if err != nil || !ok {
 		return toolCall{}, ok, err
 	}
@@ -1747,16 +1942,29 @@ func isClaudePromptMode(promptMode string) bool {
 	return agentprotocolservice.IsClaudePromptMode(promptMode)
 }
 
+const (
+	runtimeToolInputResultOverrideKey = "_nextai_runtime_result"
+	runtimeToolInputDelegateToolKey   = "_nextai_runtime_tool"
+	runtimeToolInputDelegateInputKey  = "_nextai_runtime_tool_input"
+)
+
 func (s *Server) executeToolCall(call toolCall) (string, error) {
 	return s.executeToolCallForPromptMode(promptModeDefault, call)
 }
 
 func (s *Server) executeToolCallForPromptMode(promptMode string, call toolCall) (string, error) {
+	return s.executeToolCallForPromptModeWithContext(context.Background(), promptMode, call)
+}
+
+func (s *Server) executeToolCallForPromptModeWithContext(ctx context.Context, promptMode string, call toolCall) (string, error) {
 	name := normalizeToolNameForPromptMode(strings.ToLower(strings.TrimSpace(call.Name)), promptMode)
 	if name == "" {
 		name = strings.ToLower(strings.TrimSpace(call.Name))
 	}
 	input := safeMap(call.Input)
+	if err := validateShellToolSandboxPermissions(ctx, name, input); err != nil {
+		return "", err
+	}
 
 	if isClaudePromptMode(promptMode) {
 		if result, handled, err := s.executeClaudeCompatibleToolCall(name, input); handled || err != nil {
@@ -1771,7 +1979,27 @@ func (s *Server) executeToolCallForPromptMode(promptMode string, call toolCall) 
 		}
 	}
 
+	if runtimeSpec, ok := runtimeToolSpecFromContext(ctx, name); ok {
+		return s.executeRuntimeToolCall(ctx, runtimeSpec, input)
+	}
+
 	switch name {
+	case "spawn_agent":
+		return s.executeSpawnAgentToolCall(ctx, input)
+	case "send_input":
+		return s.executeSendInputToolCall(input)
+	case "resume_agent":
+		return s.executeResumeAgentToolCall(ctx, input)
+	case "wait":
+		return s.executeWaitAgentToolCall(ctx, input)
+	case "close_agent":
+		return s.executeCloseAgentToolCall(input)
+	case "request_user_input":
+		return s.executeRequestUserInputToolCall(ctx, input)
+	case "update_plan":
+		return s.executeUpdatePlanToolCall(input)
+	case "apply_patch":
+		return s.executeApplyPatchToolCall(ctx, input)
 	case "open":
 		return s.executeOpenToolCall(input)
 	case "click", "screenshot":
@@ -1785,6 +2013,132 @@ func (s *Server) executeToolCallForPromptMode(promptMode string, call toolCall) 
 		}
 		return renderToolResult(name, result)
 	}
+}
+
+func validateShellToolSandboxPermissions(ctx context.Context, toolName string, input map[string]interface{}) error {
+	if !strings.EqualFold(strings.TrimSpace(toolName), "shell") {
+		return nil
+	}
+	if !shellToolRequestsEscalatedSandboxPermissions(input) {
+		return nil
+	}
+
+	approvalPolicy := defaultTurnApprovalPolicy
+	if policy, _, ok := runtimeToolPoliciesFromContext(ctx); ok && strings.TrimSpace(policy) != "" {
+		approvalPolicy = strings.TrimSpace(policy)
+	}
+	normalizedPolicy := strings.ToLower(strings.TrimSpace(approvalPolicy))
+	if normalizedPolicy == "on_request" || normalizedPolicy == "on-request" {
+		return nil
+	}
+	return &toolError{
+		Code:    "tool_invoke_failed",
+		Message: `tool "shell" invocation failed`,
+		Err:     plugin.ErrShellToolEscalationDenied,
+	}
+}
+
+func shellToolRequestsEscalatedSandboxPermissions(input map[string]interface{}) bool {
+	if len(input) == 0 {
+		return false
+	}
+	if isEscalatedShellSandboxPermission(stringValue(input["sandbox_permissions"])) {
+		return true
+	}
+
+	rawItems, hasItems := input["items"]
+	if !hasItems || rawItems == nil {
+		return false
+	}
+	switch value := rawItems.(type) {
+	case []interface{}:
+		for _, raw := range value {
+			item, ok := raw.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			if isEscalatedShellSandboxPermission(stringValue(item["sandbox_permissions"])) {
+				return true
+			}
+		}
+	case map[string]interface{}:
+		return isEscalatedShellSandboxPermission(stringValue(value["sandbox_permissions"]))
+	}
+	return false
+}
+
+func isEscalatedShellSandboxPermission(raw string) bool {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "require_escalated", "require_escalated_permissions":
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *Server) executeRuntimeToolCall(_ context.Context, runtimeSpec turnRuntimeToolSpec, input map[string]interface{}) (string, error) {
+	if override, exists := input[runtimeToolInputResultOverrideKey]; exists {
+		switch value := override.(type) {
+		case string:
+			text := strings.TrimSpace(value)
+			if text != "" {
+				return text, nil
+			}
+		case map[string]interface{}:
+			return renderToolResult(runtimeSpec.Name, value)
+		}
+	}
+
+	targetName, targetInput, ok := s.resolveRuntimeToolDelegate(runtimeSpec, input)
+	if !ok {
+		return "", &toolError{
+			Code:    "tool_invoke_failed",
+			Message: fmt.Sprintf("tool %q invocation failed", runtimeSpec.Name),
+			Err:     fmt.Errorf("runtime %s tool has no gateway executor configured", runtimeSpec.Source),
+		}
+	}
+
+	result, err := s.invokeRegisteredTool(targetName, targetInput)
+	if err != nil {
+		return "", err
+	}
+	return renderToolResult(runtimeSpec.Name, result)
+}
+
+func (s *Server) resolveRuntimeToolDelegate(runtimeSpec turnRuntimeToolSpec, input map[string]interface{}) (string, map[string]interface{}, bool) {
+	runtimeInput := cloneJSONMap(safeMap(input))
+	if len(runtimeInput) == 0 {
+		runtimeInput = map[string]interface{}{}
+	}
+	delete(runtimeInput, runtimeToolInputResultOverrideKey)
+
+	delegateName := normalizeRuntimeToolDelegateName(stringValue(runtimeInput[runtimeToolInputDelegateToolKey]))
+	delegateInput := schemaMapFromAny(runtimeInput[runtimeToolInputDelegateInputKey])
+	delete(runtimeInput, runtimeToolInputDelegateToolKey)
+	delete(runtimeInput, runtimeToolInputDelegateInputKey)
+	if delegateName != "" {
+		return delegateName, mergeRuntimeToolDelegateInput(delegateInput, runtimeInput), true
+	}
+
+	if runtimeSpec.GatewayTool != "" {
+		return runtimeSpec.GatewayTool, mergeRuntimeToolDelegateInput(runtimeSpec.GatewayInput, runtimeInput), true
+	}
+
+	if _, exists := s.tools[runtimeSpec.Name]; exists {
+		return runtimeSpec.Name, runtimeInput, true
+	}
+	return "", nil, false
+}
+
+func mergeRuntimeToolDelegateInput(base map[string]interface{}, overlay map[string]interface{}) map[string]interface{} {
+	if len(base) == 0 && len(overlay) == 0 {
+		return map[string]interface{}{}
+	}
+	merged := cloneJSONMap(base)
+	for key, value := range overlay {
+		merged[key] = value
+	}
+	return merged
 }
 
 func (s *Server) executeClaudeCompatibleToolCall(name string, input map[string]interface{}) (string, bool, error) {
@@ -1827,15 +2181,6 @@ func (s *Server) executeClaudeCompatibleToolCall(name string, input map[string]i
 		return out, true, err
 	case "webfetch":
 		out, err := s.executeClaudeWebFetchTool(input)
-		return out, true, err
-	case "task":
-		out, err := executeClaudeTaskTool(input)
-		return out, true, err
-	case "todowrite":
-		out, err := executeClaudeTodoWriteTool(input)
-		return out, true, err
-	case "exitplanmode":
-		out, err := executeClaudeExitPlanModeTool(input)
 		return out, true, err
 	default:
 		return "", false, nil
@@ -2740,55 +3085,6 @@ func (s *Server) executeClaudeWebFetchTool(input map[string]interface{}) (string
 		return "", err
 	}
 	return renderToolResult("WebFetch", result)
-}
-
-func executeClaudeTaskTool(input map[string]interface{}) (string, error) {
-	item := firstToolInputItem(input)
-	description := strings.TrimSpace(firstNonEmptyString(item, "description"))
-	prompt := strings.TrimSpace(firstNonEmptyString(item, "prompt"))
-	subagentType := strings.TrimSpace(firstNonEmptyString(item, "subagent_type"))
-	if description == "" && prompt == "" && subagentType == "" {
-		return "Task emulation: no task payload provided.", nil
-	}
-	lines := []string{
-		"Task emulation (NextAI single-agent fallback):",
-		fmt.Sprintf("- description: %s", defaultIfEmpty(description, "(empty)")),
-		fmt.Sprintf("- subagent_type: %s", defaultIfEmpty(subagentType, "(empty)")),
-		fmt.Sprintf("- prompt: %s", defaultIfEmpty(prompt, "(empty)")),
-		"Action: continue in current agent with explicit step-by-step progress updates.",
-	}
-	return strings.Join(lines, "\n"), nil
-}
-
-func executeClaudeTodoWriteTool(input map[string]interface{}) (string, error) {
-	item := firstToolInputItem(input)
-	rawTodos, ok := item["todos"].([]interface{})
-	if !ok || len(rawTodos) == 0 {
-		return "TodoWrite emulation: empty todo list.", nil
-	}
-	lines := make([]string, 0, len(rawTodos)+1)
-	lines = append(lines, fmt.Sprintf("TodoWrite emulation: received %d todo item(s).", len(rawTodos)))
-	for _, rawTodo := range rawTodos {
-		todo, ok := rawTodo.(map[string]interface{})
-		if !ok {
-			continue
-		}
-		content := strings.TrimSpace(stringValue(todo["content"]))
-		status := strings.TrimSpace(stringValue(todo["status"]))
-		priority := strings.TrimSpace(stringValue(todo["priority"]))
-		id := strings.TrimSpace(stringValue(todo["id"]))
-		lines = append(lines, fmt.Sprintf("- [%s] (%s/%s) %s", defaultIfEmpty(id, "-"), defaultIfEmpty(status, "pending"), defaultIfEmpty(priority, "medium"), defaultIfEmpty(content, "(empty)")))
-	}
-	return strings.Join(lines, "\n"), nil
-}
-
-func executeClaudeExitPlanModeTool(input map[string]interface{}) (string, error) {
-	item := firstToolInputItem(input)
-	plan := strings.TrimSpace(firstNonEmptyString(item, "plan"))
-	if plan == "" {
-		return "ExitPlanMode emulation: no plan content.", nil
-	}
-	return "ExitPlanMode emulation: plan ready for user confirmation.\n" + plan, nil
 }
 
 func (s *Server) ensureToolEnabled(name string) error {

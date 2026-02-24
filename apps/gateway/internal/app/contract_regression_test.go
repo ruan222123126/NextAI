@@ -587,6 +587,16 @@ func TestContractRegressionMapToolError(t *testing.T) {
 			wantMessage: "shell executor is unavailable on current host",
 		},
 		{
+			name: "tool_invoke_failed_shell_escalation_denied",
+			err: &toolError{
+				Code: "tool_invoke_failed",
+				Err:  plugin.ErrShellToolEscalationDenied,
+			},
+			wantStatus:  http.StatusBadRequest,
+			wantCode:    "tool_permission_denied",
+			wantMessage: "shell escalation requires approval policy on-request",
+		},
+		{
 			name: "tool_invoke_failed_generic",
 			err: &toolError{
 				Code:    "tool_invoke_failed",

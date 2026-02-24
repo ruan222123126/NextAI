@@ -39,10 +39,22 @@ func (s *Server) toolHasDeclaredCapability(name string, capability string) bool 
 
 func legacyToolCapabilityByName(name string, capability string) bool {
 	switch name {
+	case "shell":
+		return capability == "execute"
 	case "view":
-		return capability == "open_local"
+		return capability == "read" || capability == "open_local"
+	case "edit":
+		return capability == "write"
+	case "find":
+		return capability == "read" || capability == "file_search"
+	case "search":
+		return capability == "network" || capability == "web_search"
 	case "browser":
-		return capability == "open_url" || capability == "approx_click" || capability == "approx_screenshot"
+		return capability == "network" ||
+			capability == "open_url" ||
+			capability == "approx_click" ||
+			capability == "approx_screenshot" ||
+			capability == "web_fetch"
 	default:
 		return false
 	}

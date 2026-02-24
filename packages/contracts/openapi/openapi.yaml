@@ -101,6 +101,26 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/AgentProcessResponse' }
+  /agent/tool-input-answer:
+    post:
+      summary: Submit answer payload for a pending request_user_input tool call
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AgentToolInputAnswerRequest' }
+      responses:
+        '200':
+          description: accepted
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AgentToolInputAnswerResponse' }
+        '400':
+          description: invalid request
+        '404':
+          description: pending request not found
+        '409':
+          description: pending request ownership mismatch
   /agent/system-layers:
     get:
       parameters:
@@ -111,7 +131,22 @@ paths:
             enum: [default, codex, claude]
         - in: query
           name: task_command
-          schema: { type: string }
+          schema:
+            type: string
+            enum: [review, compact, memory]
+          description: codex mode only
+        - in: query
+          name: collaboration_mode
+          schema:
+            type: string
+            enum: [default, plan, execute, pair_programming]
+          description: codex mode only
+        - in: query
+          name: collaboration_event
+          schema:
+            type: string
+            enum: [set_default, set_plan, set_execute, set_pair_programming]
+          description: codex mode only
         - in: query
           name: session_id
           schema: { type: string }
@@ -765,6 +800,31 @@ components:
           type: array
           items: { $ref: '#/components/schemas/AgentEvent' }
       required: [reply]
+    AgentToolInputAnswer:
+      type: object
+      properties:
+        answers:
+          type: array
+          items: { type: string }
+      required: [answers]
+    AgentToolInputAnswerRequest:
+      type: object
+      properties:
+        request_id: { type: string, minLength: 1 }
+        session_id: { type: string }
+        user_id: { type: string }
+        channel: { type: string }
+        answers:
+          type: object
+          additionalProperties:
+            $ref: '#/components/schemas/AgentToolInputAnswer'
+      required: [request_id, answers]
+    AgentToolInputAnswerResponse:
+      type: object
+      properties:
+        accepted: { type: boolean }
+        request_id: { type: string }
+      required: [accepted, request_id]
     ClaudeCompatMessage:
       type: object
       properties:
