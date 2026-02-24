@@ -1,4 +1,4 @@
 # Contracts
 
 - `openapi/openapi.yaml` 是 Gateway API 的单一事实来源。
-- `jsonschema/` 与 `ts/` 目录用于后续代码生成与静态校验。
+- `ts/` 提供跨模块共享的契约类型（Web/CLI/SDK 共用）。

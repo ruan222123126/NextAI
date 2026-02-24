@@ -114,7 +114,7 @@ cd apps/gateway && go test ./...
 cd apps/cli && pnpm test
 
 # 契约测试
-cd tests/contract && pnpm test
+cd tests/contract && pnpm run lint && pnpm test
 
 # 冒烟 e2e
 cd tests/smoke && pnpm test

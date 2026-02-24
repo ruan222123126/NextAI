@@ -52,6 +52,9 @@ jobs:
           echo "pnpm install failed after retries" >&2
           exit 1
 
+      - name: Check sdk-ts generated files
+        run: pnpm --dir packages/sdk-ts run generate:check
+
       - name: Run release verification
         run: |
           cd apps/gateway && go test ./...

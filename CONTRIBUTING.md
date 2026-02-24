@@ -14,7 +14,7 @@
 2. 本地至少执行：
    - `cd apps/gateway && go test ./...`
    - `cd apps/cli && pnpm test`
-   - `cd tests/contract && pnpm test`
+   - `cd tests/contract && pnpm run lint && pnpm test`
 3. 若改动影响端到端链路，再执行：
    - `cd tests/smoke && pnpm test`
 

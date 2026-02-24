@@ -81,6 +81,332 @@
 - `nextai channels list/types/get/set`
 - `nextai tui`
 
+## 扩展点矩阵（Provider / Channel / Tool / Prompt Source / Cron Node）
+
+### 矩阵总览
+
+| 扩展点类型 | 核心职责 | 注册入口 | 标准输入 | 标准输出 | 失败语义 |
+| --- | --- | --- | --- | --- | --- |
+| Model Provider | 对接模型 API，返回文本与工具调用 | `apps/gateway/internal/runner/runner.go` | `domain.AgentProcessRequest + runner.GenerateConfig + []runner.ToolDefinition` | `runner.TurnResult` | `runner.RunnerError{code=provider_*}` |
+| Channel | 把最终文本分发到外部渠道 | `apps/gateway/internal/app/server.go` | `ctx + user_id + session_id + text + channel_cfg` | `error` | `channel_not_supported/channel_disabled/channel_dispatch_failed` |
+| Tool | 执行本地工具调用 | `apps/gateway/internal/app/server.go` | `plugin.ToolCommand` | `plugin.ToolResult` | `tool_not_supported/tool_invoke_failed/tool_invalid_result` |
+| Prompt Source | 解析系统层提示词来源（文件/目录/catalog） | `apps/gateway/internal/service/systemprompt`（Codex 由 `service/codexprompt`） | `prompt_mode + task_command + session_id + runtime env` | `[]systemprompt.Layer` | `*_prompt_unavailable` |
+| Cron Node | 执行 workflow 节点（`text_event/delay/if_event/...`） | `apps/gateway/internal/service/cron/service.go` | `ctx + CronJobSpec + CronWorkflowNode` | `CronNodeResult` | `unsupported workflow node type`/节点执行错误 |
+
+### 1) Model Provider
+
+标准接口（Runner 适配器契约）：
+
+```go
+package runner
+
+import (
+	"context"
+
+	"nextai/apps/gateway/internal/domain"
+)
+
+type ProviderAdapter interface {
+	ID() string
+	GenerateTurn(
+		ctx context.Context,
+		req domain.AgentProcessRequest,
+		cfg GenerateConfig,
+		tools []ToolDefinition,
+		runner *Runner,
+	) (TurnResult, error)
+}
+
+type StreamProviderAdapter interface {
+	ProviderAdapter
+	GenerateTurnStream(
+		ctx context.Context,
+		req domain.AgentProcessRequest,
+		cfg GenerateConfig,
+		tools []ToolDefinition,
+		runner *Runner,
+		onDelta func(string),
+	) (TurnResult, error)
+}
+```
+
+最小实现模板：
+
+```go
+package runner
+
+import (
+	"context"
+	"strings"
+
+	"nextai/apps/gateway/internal/domain"
+)
+
+type acmeCompatibleAdapter struct{}
+
+func (a *acmeCompatibleAdapter) ID() string {
+	return "acme-compatible"
+}
+
+func (a *acmeCompatibleAdapter) GenerateTurn(
+	_ context.Context,
+	req domain.AgentProcessRequest,
+	_ GenerateConfig,
+	_ []ToolDefinition,
+	_ *Runner,
+) (TurnResult, error) {
+	text := "acme: ok"
+	if len(req.Input) > 0 {
+		last := req.Input[len(req.Input)-1]
+		if len(last.Content) > 0 {
+			text = "acme: " + strings.TrimSpace(last.Content[0].Text)
+		}
+	}
+	return TurnResult{Text: text}, nil
+}
+
+func (a *acmeCompatibleAdapter) GenerateTurnStream(
+	ctx context.Context,
+	req domain.AgentProcessRequest,
+	cfg GenerateConfig,
+	tools []ToolDefinition,
+	r *Runner,
+	onDelta func(string),
+) (TurnResult, error) {
+	turn, err := a.GenerateTurn(ctx, req, cfg, tools, r)
+	if err != nil {
+		return TurnResult{}, err
+	}
+	if onDelta != nil && strings.TrimSpace(turn.Text) != "" {
+		onDelta(turn.Text)
+	}
+	return turn, nil
+}
+```
+
+注册示例（在 `runner.NewWithHTTPClient` 同包内）：
+
+```go
+r.registerAdapter(&acmeCompatibleAdapter{})
+```
+
+### 2) Channel
+
+标准接口：
+
+```go
+package plugin
+
+import "context"
+
+type ChannelPlugin interface {
+	Name() string
+	SendText(ctx context.Context, userID, sessionID, text string, cfg map[string]interface{}) error
+}
+```
+
+最小实现模板：
+
+```go
+package channel
+
+import "context"
+
+type DingTalkChannel struct{}
+
+func NewDingTalkChannel() *DingTalkChannel { return &DingTalkChannel{} }
+
+func (c *DingTalkChannel) Name() string { return "dingtalk" }
+
+func (c *DingTalkChannel) SendText(
+	_ context.Context,
+	userID string,
+	sessionID string,
+	text string,
+	cfg map[string]interface{},
+) error {
+	_ = userID
+	_ = sessionID
+	_ = text
+	_ = cfg
+	return nil
+}
+```
+
+注册示例（在 `NewServer`）：
+
+```go
+srv.registerChannelPlugin(channel.NewDingTalkChannel())
+```
+
+### 3) Tool
+
+标准接口：
+
+```go
+package plugin
+
+type ToolPlugin interface {
+	Name() string
+	Invoke(command ToolCommand) (ToolResult, error)
+}
+```
+
+最小实现模板：
+
+```go
+package plugin
+
+type EchoTool struct{}
+
+func NewEchoTool() *EchoTool { return &EchoTool{} }
+
+func (t *EchoTool) Name() string { return "echo" }
+
+func (t *EchoTool) Invoke(command ToolCommand) (ToolResult, error) {
+	return NewToolResult(map[string]interface{}{
+		"ok":   true,
+		"text": "echo tool ok",
+		"raw":  command,
+	}), nil
+}
+```
+
+注册示例（在 `NewServer`）：
+
+```go
+srv.registerToolPlugin(plugin.NewEchoTool())
+```
+
+### 4) Prompt Source
+
+标准接口（建议抽象；与 `systemprompt.Layer` 对齐）：
+
+```go
+package systemprompt
+
+import "context"
+
+type BuildRequest struct {
+	PromptMode  string
+	TaskCommand string
+	SessionID   string
+}
+
+type Source interface {
+	Name() string
+	Build(ctx context.Context, req BuildRequest) ([]Layer, error)
+}
+```
+
+最小实现模板（文件源）：
+
+```go
+package systemprompt
+
+import "context"
+
+type FileSource struct {
+	LoadRequiredLayer func(candidatePaths []string) (string, string, error)
+}
+
+func (s *FileSource) Name() string { return "file" }
+
+func (s *FileSource) Build(_ context.Context, _ BuildRequest) ([]Layer, error) {
+	basePath, baseContent, err := s.LoadRequiredLayer([]string{"prompts/AGENTS.md"})
+	if err != nil {
+		return nil, err
+	}
+	return []Layer{
+		{
+			Name:    "base_system",
+			Role:    "system",
+			Source:  basePath,
+			Content: FormatLayerSourceContent(basePath, baseContent),
+		},
+	}, nil
+}
+```
+
+接入建议：
+- `NEXTAI_CODEX_PROMPT_SOURCE=file|catalog` 作为 source selector。
+- source 内部失败返回 error；上层统一映射到 `{ error: { code, message, details } }`。
+
+### 5) Cron Node
+
+标准接口（建议抽象；与 `executeWorkflowNode` 现状对齐）：
+
+```go
+package cron
+
+import (
+	"context"
+
+	"nextai/apps/gateway/internal/domain"
+)
+
+type CronNodeResult struct {
+	Stop bool
+}
+
+type CronNodeHandler interface {
+	Type() string
+	Validate(node domain.CronWorkflowNode) error
+	Execute(ctx context.Context, job domain.CronJobSpec, node domain.CronWorkflowNode) (CronNodeResult, error)
+}
+```
+
+最小实现模板（`text_event`）：
+
+```go
+package cron
+
+import (
+	"context"
+	"errors"
+	"strings"
+
+	"nextai/apps/gateway/internal/domain"
+)
+
+type TextNodeHandler struct {
+	ExecuteTextTask func(ctx context.Context, job domain.CronJobSpec, text string) error
+}
+
+func (h *TextNodeHandler) Type() string { return "text_event" }
+
+func (h *TextNodeHandler) Validate(node domain.CronWorkflowNode) error {
+	if strings.TrimSpace(node.Text) == "" {
+		return errors.New("workflow text_event requires non-empty text")
+	}
+	return nil
+}
+
+func (h *TextNodeHandler) Execute(
+	ctx context.Context,
+	job domain.CronJobSpec,
+	node domain.CronWorkflowNode,
+) (CronNodeResult, error) {
+	if err := h.Validate(node); err != nil {
+		return CronNodeResult{}, err
+	}
+	if err := h.ExecuteTextTask(ctx, job, node.Text); err != nil {
+		return CronNodeResult{}, err
+	}
+	return CronNodeResult{}, nil
+}
+```
+
+接入建议：
+- 保持 `start` 节点仅用于拓扑起点，不执行 side effect。
+- 新节点默认要求 `Validate` 可离线运行，避免运行期才炸。
+
+### 扩展点统一约束
+- 错误模型统一：外部接口始终映射为 `{ error: { code, message, details } }`。
+- 全部扩展点必须接收 `context.Context` 并遵守超时/取消。
+- 输出数据必须是可 JSON 序列化结构，避免 `tool_invalid_result`。
+- 注册键（`Name()` / `ID()` / `Type()`）统一小写、稳定不可变，避免状态迁移与历史数据失配。
+
 ## `/agent/process` 多步 Agent 协议
 
 `POST /agent/process` 支持两种模式：
@@ -319,6 +645,17 @@ Sample response:
 
 - 生效范围：provider tool-call 执行路径（`prompt_mode=default|codex|claude`）。
 - 手工入口（`biz_params.tool` 与顶层快捷键）仍保持严格 `items` 契约，不放宽格式校验。
+
+### 注册表能力声明（Capability-Driven）
+- Provider Adapter 在注册时声明能力：`stream` / `tool_call` / `attachments` / `reasoning`。
+- 调度层按 provider capability 决策：
+  - `stream=false`：自动降级为非流式执行，并回放文本增量。
+  - `tool_call=false`：不向 provider 下发工具定义。
+  - `reasoning=false`：忽略 `reasoning_effort`。
+  - `attachments=false`：当请求包含非 `text` 内容时返回 `provider_not_supported`。
+- Tool 在注册时声明能力（示例）：`open_local` / `open_url` / `approx_click` / `approx_screenshot`。
+- `open` / `click` / `screenshot` 的暴露与路由改为按 tool capability 派生，不再仅依赖工具名硬编码。
+- 兼容性：未显式声明 capability 的旧注册项，保留 `view/browser` 名称回退映射。
 
 ### 参数归一化（provider 兜底，全 prompt_mode）
 - 包装层自动解包：`input` / `arguments` / `args`。
