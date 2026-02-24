@@ -18,6 +18,7 @@ interface ChatFeatureContext {
   reloadChatsButton: HTMLButtonElement;
   newChatButton: HTMLButtonElement;
   chatPromptModeSelect: HTMLSelectElement;
+  chatCollaborationModeSelect: HTMLSelectElement;
   composerForm: HTMLFormElement;
   composerMain: HTMLElement;
   messageInput: HTMLTextAreaElement;
@@ -26,15 +27,6 @@ interface ChatFeatureContext {
   composerAttachInput: HTMLInputElement;
   composerProviderSelect: HTMLSelectElement;
   composerModelSelect: HTMLSelectElement;
-  composerSlashPanel: HTMLElement;
-  composerSlashList: HTMLUListElement;
-  composerSlashController: {
-    isOpen: () => boolean;
-    hide: () => void;
-    render: () => void;
-    handleKeydown: (event: KeyboardEvent) => boolean;
-    handleListClick: (event: Event) => void;
-  };
 }
 
 export function createChatFeature(ctx: ChatFeatureContext): FeatureModule<any> {
@@ -49,6 +41,7 @@ export function createChatFeature(ctx: ChatFeatureContext): FeatureModule<any> {
     reloadChatsButton,
     newChatButton,
     chatPromptModeSelect,
+    chatCollaborationModeSelect,
     composerForm,
     composerMain,
     messageInput,
@@ -57,9 +50,6 @@ export function createChatFeature(ctx: ChatFeatureContext): FeatureModule<any> {
     composerAttachInput,
     composerProviderSelect,
     composerModelSelect,
-    composerSlashPanel,
-    composerSlashList,
-    composerSlashController,
   } = ctx;
 
   const domain = createChatDomain(domainContext);
@@ -78,22 +68,6 @@ export function createChatFeature(ctx: ChatFeatureContext): FeatureModule<any> {
       target.removeEventListener(type, listener, options);
     });
   };
-
-  function isComposerSlashPanelOpen(): boolean {
-    return composerSlashController.isOpen();
-  }
-
-  function hideComposerSlashPanel(): void {
-    composerSlashController.hide();
-  }
-
-  function renderComposerSlashPanel(): void {
-    composerSlashController.render();
-  }
-
-  function handleComposerSlashPanelKeydown(event: KeyboardEvent): boolean {
-    return composerSlashController.handleKeydown(event);
-  }
 
   function init(): void {
     if (initialized) {
@@ -118,6 +92,10 @@ export function createChatFeature(ctx: ChatFeatureContext): FeatureModule<any> {
       domain.setActivePromptMode(domain.normalizePromptMode(chatPromptModeSelect.value), { announce: true });
     });
 
+    on(chatCollaborationModeSelect, "change", () => {
+      domain.setActiveCollaborationMode(domain.normalizeCollaborationMode(chatCollaborationModeSelect.value), { announce: true });
+    });
+
     on(sendButton, "click", (event: Event) => {
       if (!state.sending) {
         return;
@@ -134,9 +112,6 @@ export function createChatFeature(ctx: ChatFeatureContext): FeatureModule<any> {
 
     on(messageInput, "keydown", (event: Event) => {
       const keyboardEvent = event as KeyboardEvent;
-      if (handleComposerSlashPanelKeydown(keyboardEvent)) {
-        return;
-      }
       if (
         keyboardEvent.key !== "Enter"
         || keyboardEvent.shiftKey
@@ -153,11 +128,6 @@ export function createChatFeature(ctx: ChatFeatureContext): FeatureModule<any> {
 
     on(messageInput, "input", () => {
       renderComposerTokenEstimate();
-      renderComposerSlashPanel();
-    });
-
-    on(messageInput, "focus", () => {
-      renderComposerSlashPanel();
     });
 
     on(composerAttachButton, "click", () => {
@@ -235,25 +205,6 @@ export function createChatFeature(ctx: ChatFeatureContext): FeatureModule<any> {
       const modelActions = getModelActions();
       void modelActions?.handleComposerModelSelectChange();
     });
-
-    on(composerSlashPanel, "mousedown", (event: Event) => {
-      event.preventDefault();
-    });
-
-    on(composerSlashList, "click", (event: Event) => {
-      composerSlashController.handleListClick(event);
-    });
-
-    on(document, "click", (event: Event) => {
-      if (!isComposerSlashPanelOpen()) {
-        return;
-      }
-      const target = event.target;
-      if (target instanceof Node && composerMain.contains(target)) {
-        return;
-      }
-      hideComposerSlashPanel();
-    });
   }
 
   function dispose(): void {
@@ -274,10 +225,6 @@ export function createChatFeature(ctx: ChatFeatureContext): FeatureModule<any> {
     dispose,
     actions: {
       ...domain,
-      isComposerSlashPanelOpen,
-      hideComposerSlashPanel,
-      renderComposerSlashPanel,
-      handleComposerSlashPanelKeydown,
     },
   };
 }

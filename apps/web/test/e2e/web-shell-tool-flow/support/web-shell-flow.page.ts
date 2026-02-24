@@ -20,8 +20,18 @@ export class WebShellFlowPage {
     return this.requireByID<HTMLSelectElement>("chat-prompt-mode-select");
   }
 
+  collaborationModeSelect(): HTMLSelectElement {
+    return this.requireByID<HTMLSelectElement>("chat-collaboration-mode-select");
+  }
+
   setPromptMode(value: string): void {
     const select = this.promptModeSelect();
+    select.value = value;
+    select.dispatchEvent(new Event("change", { bubbles: true }));
+  }
+
+  setCollaborationMode(value: string): void {
+    const select = this.collaborationModeSelect();
     select.value = value;
     select.dispatchEvent(new Event("change", { bubbles: true }));
   }

@@ -64,6 +64,7 @@ describe("web e2e: auto activate model then send chat", () => {
   afterEach(() => {
     vi.restoreAllMocks();
     globalThis.fetch = originalFetch;
+    delete (window as typeof window & { __NEXTAI_STREAM_RETRY_DELAY_MS__?: number }).__NEXTAI_STREAM_RETRY_DELAY_MS__;
     document.documentElement.innerHTML = "<head></head><body></body>";
   });
 
@@ -314,6 +315,87 @@ describe("web e2e: auto activate model then send chat", () => {
     expect(text).not.toBe("...");
   });
 
+  it("stream 连接中断后会自动重试并最终成功", async () => {
+    const replyText = "retry succeeded";
+    let processCallCount = 0;
+    (window as typeof window & { __NEXTAI_STREAM_RETRY_DELAY_MS__?: number }).__NEXTAI_STREAM_RETRY_DELAY_MS__ = 1;
+
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const rawURL = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      const url = new URL(rawURL);
+      const method = (init?.method ?? "GET").toUpperCase();
+
+      if (url.pathname === "/chats" && method === "GET") {
+        return jsonResponse([]);
+      }
+
+      if (url.pathname === "/models/catalog" && method === "GET") {
+        return jsonResponse({
+          providers: [],
+          provider_types: [],
+          defaults: {},
+          active_llm: {
+            provider_id: "",
+            model: "",
+          },
+        });
+      }
+
+      if (url.pathname === "/agent/process" && method === "POST") {
+        processCallCount += 1;
+        if (processCallCount === 1) {
+          const brokenStream = new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.error(new TypeError("net::ERR_INCOMPLETE_CHUNKED_ENCODING"));
+            },
+          });
+          return new Response(brokenStream, {
+            status: 200,
+            headers: {
+              "content-type": "text/event-stream",
+            },
+          });
+        }
+
+        const sse = [
+          `data: ${JSON.stringify({ type: "step_started", step: 1 })}`,
+          `data: ${JSON.stringify({ type: "assistant_delta", step: 1, delta: replyText })}`,
+          `data: ${JSON.stringify({ type: "completed", step: 1, reply: replyText })}`,
+          "data: [DONE]",
+          "",
+        ].join("\n\n");
+        return new Response(sse, {
+          status: 200,
+          headers: {
+            "content-type": "text/event-stream",
+          },
+        });
+      }
+
+      throw new Error(`unexpected request: ${method} ${url.pathname}`);
+    }) as typeof globalThis.fetch;
+
+    await import("../../src/main.ts");
+
+    const messageInput = document.getElementById("message-input") as HTMLTextAreaElement;
+    const composerForm = document.getElementById("composer") as HTMLFormElement;
+    messageInput.value = "retry me";
+    composerForm.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+
+    await waitFor(() => processCallCount === 2, 4000);
+    await waitFor(() => {
+      const assistant = document.querySelector<HTMLLIElement>("#message-list .message.assistant:last-child");
+      return (assistant?.textContent ?? "").includes(replyText);
+    }, 4000);
+
+    const assistant = document.querySelector<HTMLLIElement>("#message-list .message.assistant:last-child");
+    const text = assistant?.textContent ?? "";
+    const statusLine = document.getElementById("status-line")?.textContent ?? "";
+    expect(text).toContain(replyText);
+    expect(processCallCount).toBe(2);
+    expect(statusLine).toContain("回复接收完成");
+  });
+
   it("发送中点击发送按钮会暂停请求并恢复按钮状态", async () => {
     let processCalled = false;
     let aborted = false;
@@ -382,9 +464,7 @@ describe("web e2e: auto activate model then send chat", () => {
     expect(sendButton.getAttribute("aria-label")).toBe("发送消息");
   });
 
-  it("输入 / 会展开 slash 面板并支持键盘选择命令", async () => {
-    let processCalled = false;
-
+  it("协作模式选择器在 codex 下可用，其他 prompt_mode 下禁用", async () => {
     globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const rawURL = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
       const url = new URL(rawURL);
@@ -406,48 +486,23 @@ describe("web e2e: auto activate model then send chat", () => {
         });
       }
 
-      if (url.pathname === "/agent/process" && method === "POST") {
-        processCalled = true;
-        return new Response("data: [DONE]\n\n", {
-          status: 200,
-          headers: {
-            "content-type": "text/event-stream",
-          },
-        });
-      }
-
       throw new Error(`unexpected request: ${method} ${url.pathname}`);
     }) as typeof globalThis.fetch;
 
     await import("../../src/main.ts");
 
-    const messageInput = document.getElementById("message-input") as HTMLTextAreaElement;
-    const slashPanel = document.getElementById("composer-slash-panel") as HTMLElement;
-    const slashList = document.getElementById("composer-slash-list") as HTMLUListElement;
+    const promptModeSelect = document.getElementById("chat-prompt-mode-select") as HTMLSelectElement;
+    const collaborationModeSelect = document.getElementById("chat-collaboration-mode-select") as HTMLSelectElement;
+    expect(promptModeSelect.value).toBe("default");
+    expect(collaborationModeSelect.disabled).toBe(true);
 
-    messageInput.focus();
-    messageInput.value = "/";
-    messageInput.dispatchEvent(new Event("input", { bubbles: true }));
+    promptModeSelect.value = "codex";
+    promptModeSelect.dispatchEvent(new Event("change", { bubbles: true }));
+    await waitFor(() => collaborationModeSelect.disabled === false, 4000);
 
-    await waitFor(() => !slashPanel.classList.contains("is-hidden"));
-    const options = Array.from(slashList.querySelectorAll<HTMLButtonElement>("button[data-composer-slash-index]"));
-    expect(options.length).toBeGreaterThan(1);
-    const optionTexts = options.map((item) => item.textContent ?? "");
-    expect(optionTexts.some((text) => text.includes("/shell"))).toBe(true);
-    expect(optionTexts.some((text) => text.includes("/compact"))).toBe(true);
-    expect(optionTexts.some((text) => text.includes("/memory"))).toBe(true);
-    expect(optionTexts.some((text) => text.includes("/prompts:human-readable"))).toBe(true);
-    expect(optionTexts.some((text) => text.includes("/execute"))).toBe(true);
-    expect(optionTexts.some((text) => text.includes("/pair_programming"))).toBe(true);
-
-    messageInput.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true, cancelable: true }));
-    messageInput.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
-
-    expect(messageInput.value).toBe("/prompts:check-fix ");
-    expect(slashPanel.classList.contains("is-hidden")).toBe(true);
-
-    await new Promise((resolve) => setTimeout(resolve, 80));
-    expect(processCalled).toBe(false);
+    promptModeSelect.value = "claude";
+    promptModeSelect.dispatchEvent(new Event("change", { bubbles: true }));
+    await waitFor(() => collaborationModeSelect.disabled === true, 4000);
   });
 
   it("switches active model from composer toolbar provider and model selectors", async () => {
@@ -1136,8 +1191,8 @@ describe("web e2e: auto activate model then send chat", () => {
     }, 4000);
   });
 
-  it("codex slash 命令会驱动 task_command 级别的 system layer 估算", async () => {
-    const requestedTaskCommands: string[] = [];
+  it("codex 协作模式会驱动 collaboration_mode 级别的 system layer 估算", async () => {
+    const requestedCollaborationModes: string[] = [];
 
     globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const rawURL = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
@@ -1186,9 +1241,9 @@ describe("web e2e: auto activate model then send chat", () => {
       }
 
       if (url.pathname === "/agent/system-layers" && method === "GET") {
-        const taskCommand = url.searchParams.get("task_command") ?? "";
-        requestedTaskCommands.push(taskCommand);
-        const total = taskCommand === "review" ? 7000 : 3000;
+        const collaborationMode = url.searchParams.get("collaboration_mode") ?? "";
+        requestedCollaborationModes.push(collaborationMode);
+        const total = collaborationMode === "plan" ? 7000 : 3000;
         return jsonResponse({
           version: "v1",
           mode_variant: "codex_v1",
@@ -1208,24 +1263,24 @@ describe("web e2e: auto activate model then send chat", () => {
 
     const statusLine = document.getElementById("status-line") as HTMLElement;
     const promptModeSelect = document.getElementById("chat-prompt-mode-select") as HTMLSelectElement;
+    const collaborationModeSelect = document.getElementById("chat-collaboration-mode-select") as HTMLSelectElement;
     await waitFor(() => (statusLine.textContent ?? "").includes("草稿会话"), 4000);
 
-    const initialRequestCount = requestedTaskCommands.length;
+    const initialRequestCount = requestedCollaborationModes.length;
     promptModeSelect.value = "codex";
     promptModeSelect.dispatchEvent(new Event("change", { bubbles: true }));
     await waitFor(() => promptModeSelect.value === "codex", 4000);
-    await waitFor(() => requestedTaskCommands.length > initialRequestCount, 4000);
+    await waitFor(() => requestedCollaborationModes.length > initialRequestCount, 4000);
 
     await waitFor(() => {
       const text = document.getElementById("composer-token-estimate")?.textContent ?? "";
       return text.includes("3.0k/32.0k");
     }, 4000);
 
-    const messageInput = document.getElementById("message-input") as HTMLTextAreaElement;
-    messageInput.value = "/review check this";
-    messageInput.dispatchEvent(new Event("input", { bubbles: true }));
+    collaborationModeSelect.value = "plan";
+    collaborationModeSelect.dispatchEvent(new Event("change", { bubbles: true }));
 
-    await waitFor(() => requestedTaskCommands.includes("review"), 4000);
+    await waitFor(() => requestedCollaborationModes.includes("plan"), 4000);
     await waitFor(() => {
       const text = document.getElementById("composer-token-estimate")?.textContent ?? "";
       return text.includes("7.0k/32.0k");

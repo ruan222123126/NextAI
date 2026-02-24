@@ -1478,6 +1478,14 @@ body.workspace-import-open {
   flex: 1 1 auto;
 }
 
+.tool-call-summary-meta {
+  flex: 0 0 auto;
+  margin-top: 1px;
+  font-size: 12px;
+  color: rgba(28, 26, 23, 0.6);
+  white-space: nowrap;
+}
+
 .tool-call-toggle {
   flex: 0 0 auto;
   width: 16px;
@@ -1564,148 +1572,6 @@ body.workspace-import-open {
 .composer-main {
   position: relative;
   width: 100%;
-}
-
-.composer-slash-panel {
-  position: absolute;
-  left: 0;
-  bottom: calc(100% + 10px);
-  width: 100%;
-  border: 1px solid rgba(28, 26, 23, 0.18);
-  border-radius: 18px;
-  background: linear-gradient(152deg, rgba(255, 251, 243, 0.97), rgba(241, 228, 207, 0.94));
-  color: var(--ink);
-  box-shadow: 0 20px 38px rgba(71, 52, 37, 0.2);
-  backdrop-filter: blur(10px);
-  overflow: hidden;
-  z-index: 4;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  padding: 10px;
-  box-sizing: border-box;
-}
-
-.composer-slash-panel.is-hidden {
-  display: none;
-}
-
-.composer-slash-list {
-  margin: 0;
-  padding: 0;
-  list-style: none;
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
-  max-height: 272px;
-  overflow: auto;
-  scrollbar-gutter: auto;
-  scrollbar-width: none;
-  -ms-overflow-style: none;
-}
-
-.composer-slash-list::-webkit-scrollbar {
-  width: 0;
-  height: 0;
-}
-
-.composer-slash-group {
-  list-style: none;
-  padding: 7px 10px 3px;
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: var(--ink-subtle);
-}
-
-.composer-slash-item {
-  list-style: none;
-}
-
-.composer-slash-item-btn {
-  width: 100%;
-  border: 1px solid transparent;
-  border-radius: 11px;
-  background: transparent;
-  color: inherit;
-  text-align: left;
-  padding: 7px 10px;
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
-  align-items: center;
-  column-gap: 8px;
-  min-height: 34px;
-  cursor: pointer;
-  transition: border-color 140ms ease, background-color 140ms ease, transform 140ms ease;
-}
-
-.composer-slash-item-icon {
-  width: 8px;
-  min-width: 8px;
-  height: 8px;
-  border-radius: 999px;
-  border: 1px solid rgba(148, 57, 24, 0.45);
-  box-sizing: border-box;
-}
-
-.composer-slash-item-body {
-  min-width: 0;
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-}
-
-.composer-slash-item-btn:hover,
-.composer-slash-item-btn.is-active {
-  border-color: rgba(197, 79, 38, 0.34);
-  background: linear-gradient(160deg, rgba(197, 79, 38, 0.18), rgba(197, 79, 38, 0.06));
-  transform: translateX(1px);
-}
-
-.composer-slash-item-btn.is-active .composer-slash-item-icon {
-  background: rgba(148, 57, 24, 0.84);
-}
-
-.composer-slash-item-btn:focus-visible {
-  outline: 1px solid rgba(197, 79, 38, 0.52);
-  outline-offset: 1px;
-}
-
-.composer-slash-item-command {
-  justify-self: end;
-  margin-left: 12px;
-  font-family: "JetBrains Mono", "Fira Code", "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
-  font-size: 11px;
-  color: rgba(148, 57, 24, 0.94);
-  white-space: nowrap;
-}
-
-.composer-slash-item-title {
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--ink);
-  white-space: nowrap;
-}
-
-.composer-slash-item-desc {
-  font-size: 12px;
-  color: var(--ink-subtle);
-  min-width: 0;
-  flex: 1 1 auto;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.composer-slash-empty {
-  padding: 11px 10px;
-  border-radius: 10px;
-  font-size: 12px;
-  border: 1px dashed rgba(28, 26, 23, 0.18);
-  background: rgba(255, 255, 255, 0.5);
-  color: var(--ink-subtle);
-  text-align: center;
 }
 
 .composer #message-input {
@@ -3485,38 +3351,6 @@ body.cron-workflow-pseudo-fullscreen {
     min-height: 74px;
     padding-bottom: 48px;
     padding-right: 56px;
-  }
-
-  .composer-slash-panel {
-    width: 100%;
-    bottom: calc(100% + 8px);
-    padding: 8px;
-    gap: 6px;
-  }
-
-  .composer-slash-item-btn {
-    grid-template-columns: auto minmax(0, 1fr);
-    padding: 7px 8px;
-    row-gap: 1px;
-  }
-
-  .composer-slash-item-body {
-    grid-column: 2;
-    flex-direction: column;
-    align-items: flex-start;
-    gap: 1px;
-  }
-
-  .composer-slash-item-command {
-    grid-column: 2;
-    justify-self: start;
-    margin-left: 0;
-    font-size: 10px;
-  }
-
-  .composer-slash-item-desc {
-    flex: none;
-    width: 100%;
   }
 
   .composer-toolbar {

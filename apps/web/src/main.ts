@@ -5,10 +5,6 @@ import {
 } from "./cron-workflow.js";
 import { DEFAULT_LOCALE, getLocale, isWebMessageKey, setLocale, t } from "./i18n.js";
 import { createChatFeature } from "./main/chat-feature.js";
-import {
-  createComposerSlashController,
-  type LocalizedComposerSlashCommand,
-} from "./main/composer-slash.js";
 import { createCronFeature } from "./main/cron-feature.js";
 import { createCustomSelectController } from "./main/custom-select.js";
 import { createLogger } from "./main/logging.js";
@@ -19,6 +15,7 @@ import type {
   AgentStreamEvent,
   AgentToolCallPayload,
   AgentToolResultPayload,
+  CollaborationMode,
   ChannelsSettingsLevel,
   ChatHistoryResponse,
   ChatSpec,
@@ -72,7 +69,6 @@ import { renderMarkdownToFragment } from "./markdown.js";
 type TabKey = "chat" | "cron";
 type SettingsSectionKey = "connection" | "identity" | "display" | "models" | "channels" | "workspace";
 type I18nKey = Parameters<typeof t>[0];
-type ComposerSlashGroup = "quick" | "template" | "mode";
 
 const TRASH_ICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path fill="currentColor" d="M7 21q-.825 0-1.412-.587T5 19V6H4V4h5V3h6v1h5v2h-1v13q0 .825-.587 1.413T17 21zM17 6H7v13h10zM9 17h2V8H9zm4 0h2V8h-2zM7 6v13z"/></svg>`;
 
@@ -108,18 +104,9 @@ interface RuntimeConfigResponse {
 interface SystemPromptTokenScenario {
   promptMode: PromptMode;
   taskCommand: string;
+  collaborationMode: string;
   sessionID: string;
   cacheKey: string;
-}
-
-interface ComposerSlashCommandConfig {
-  id: string;
-  command: string;
-  insertText: string;
-  titleKey: I18nKey;
-  descriptionKey: I18nKey;
-  group: ComposerSlashGroup;
-  keywords: string[];
 }
 
 const DEFAULT_API_BASE = "http://127.0.0.1:8088";
@@ -166,116 +153,6 @@ const LOCALE_KEY = "nextai.web.locale";
 const BOOT_READY_ATTRIBUTE = "data-nextai-boot-ready";
 const BOOT_READY_EVENT = "nextai:boot-ready";
 const BUILTIN_PROVIDER_IDS = new Set(["openai"]);
-const COMPOSER_SLASH_COMMANDS: ComposerSlashCommandConfig[] = [
-  {
-    id: "shell",
-    command: "/shell",
-    insertText: "/shell ",
-    titleKey: "chat.slashShellTitle",
-    descriptionKey: "chat.slashShellDesc",
-    group: "quick",
-    keywords: ["shell", "command", "terminal", "tool", "执行", "命令"],
-  },
-  {
-    id: "prompts-check-fix",
-    command: "/prompts:check-fix",
-    insertText: "/prompts:check-fix ",
-    titleKey: "chat.slashCheckFixTitle",
-    descriptionKey: "chat.slashCheckFixDesc",
-    group: "template",
-    keywords: ["prompts", "check", "fix", "repair", "修复", "检查"],
-  },
-  {
-    id: "prompts-refactor",
-    command: "/prompts:refactor",
-    insertText: "/prompts:refactor ",
-    titleKey: "chat.slashRefactorTitle",
-    descriptionKey: "chat.slashRefactorDesc",
-    group: "template",
-    keywords: ["prompts", "refactor", "cleanup", "重构", "整理"],
-  },
-  {
-    id: "prompts-human-readable",
-    command: "/prompts:human-readable",
-    insertText: "/prompts:human-readable ",
-    titleKey: "chat.slashHumanReadableTitle",
-    descriptionKey: "chat.slashHumanReadableDesc",
-    group: "template",
-    keywords: ["prompts", "human", "readable", "rewrite", "转译", "人话", "易读"],
-  },
-  {
-    id: "new-session",
-    command: "/new",
-    insertText: "/new",
-    titleKey: "chat.slashNewSessionTitle",
-    descriptionKey: "chat.slashNewSessionDesc",
-    group: "quick",
-    keywords: ["new", "session", "chat", "清理", "新会话"],
-  },
-  {
-    id: "review",
-    command: "/review",
-    insertText: "/review ",
-    titleKey: "chat.slashReviewTitle",
-    descriptionKey: "chat.slashReviewDesc",
-    group: "mode",
-    keywords: ["review", "audit", "quality", "代码审查", "风险"],
-  },
-  {
-    id: "compact",
-    command: "/compact",
-    insertText: "/compact ",
-    titleKey: "chat.slashCompactTitle",
-    descriptionKey: "chat.slashCompactDesc",
-    group: "mode",
-    keywords: ["compact", "compress", "summary", "压缩", "总结"],
-  },
-  {
-    id: "memory",
-    command: "/memory",
-    insertText: "/memory ",
-    titleKey: "chat.slashMemoryTitle",
-    descriptionKey: "chat.slashMemoryDesc",
-    group: "mode",
-    keywords: ["memory", "remember", "recall", "记忆", "回忆"],
-  },
-  {
-    id: "plan",
-    command: "/plan",
-    insertText: "/plan ",
-    titleKey: "chat.slashPlanTitle",
-    descriptionKey: "chat.slashPlanDesc",
-    group: "mode",
-    keywords: ["plan", "roadmap", "step", "计划", "拆解"],
-  },
-  {
-    id: "execute",
-    command: "/execute",
-    insertText: "/execute ",
-    titleKey: "chat.slashExecuteTitle",
-    descriptionKey: "chat.slashExecuteDesc",
-    group: "mode",
-    keywords: ["execute", "deliver", "implement", "执行", "落地"],
-  },
-  {
-    id: "pair-programming",
-    command: "/pair_programming",
-    insertText: "/pair_programming ",
-    titleKey: "chat.slashPairProgrammingTitle",
-    descriptionKey: "chat.slashPairProgrammingDesc",
-    group: "mode",
-    keywords: ["pair", "pair programming", "collaborate", "结对", "协作"],
-  },
-  {
-    id: "status",
-    command: "/status",
-    insertText: "/status",
-    titleKey: "chat.slashStatusTitle",
-    descriptionKey: "chat.slashStatusDesc",
-    group: "quick",
-    keywords: ["status", "state", "progress", "状态", "进度"],
-  },
-];
 const TABS: TabKey[] = ["chat", "cron"];
 const scrollbarActivityTimers = new WeakMap<HTMLElement, number>();
 let chatLiveRefreshTimer: number | null = null;
@@ -320,6 +197,7 @@ const chatList = mustElement<HTMLUListElement>("chat-list");
 const chatTitle = mustElement<HTMLElement>("chat-title");
 const chatSession = mustElement<HTMLElement>("chat-session");
 const chatPromptModeSelect = mustElement<HTMLSelectElement>("chat-prompt-mode-select");
+const chatCollaborationModeSelect = mustElement<HTMLSelectElement>("chat-collaboration-mode-select");
 const searchChatInput = mustElement<HTMLInputElement>("search-chat-input");
 const searchChatResults = mustElement<HTMLUListElement>("search-chat-results");
 const messageList = mustElement<HTMLUListElement>("message-list");
@@ -327,8 +205,6 @@ const thinkingIndicator = mustElement<HTMLElement>("thinking-indicator");
 const composerForm = mustElement<HTMLFormElement>("composer");
 const composerMain = mustElement<HTMLElement>("composer-main");
 const messageInput = mustElement<HTMLTextAreaElement>("message-input");
-const composerSlashPanel = mustElement<HTMLElement>("composer-slash-panel");
-const composerSlashList = mustElement<HTMLUListElement>("composer-slash-list");
 const sendButton = mustElement<HTMLButtonElement>("send-btn");
 const composerAttachButton = mustElement<HTMLButtonElement>("composer-attach-btn");
 const composerAttachInput = mustElement<HTMLInputElement>("composer-attach-input");
@@ -438,27 +314,6 @@ const panelByTab: Record<TabKey, HTMLElement> = {
   cron: panelCron,
 };
 
-function resolveLocalizedComposerSlashCommands(): LocalizedComposerSlashCommand[] {
-  const resolveGroupLabel = (group: ComposerSlashGroup): string => {
-    if (group === "template") {
-      return t("chat.slashGroupTemplate");
-    }
-    if (group === "mode") {
-      return t("chat.slashGroupMode");
-    }
-    return t("chat.slashGroupQuick");
-  };
-  return COMPOSER_SLASH_COMMANDS.map((command) => ({
-    id: command.id,
-    command: command.command,
-    insertText: command.insertText,
-    title: t(command.titleKey),
-    description: t(command.descriptionKey),
-    groupLabel: resolveGroupLabel(command.group),
-    keywords: command.keywords,
-  }));
-}
-
 const customSelectController = createCustomSelectController({
   translate: (key) => t(key as I18nKey),
 });
@@ -467,17 +322,6 @@ const {
   syncCustomSelect,
   syncAllCustomSelects,
 } = customSelectController;
-
-const composerSlashController = createComposerSlashController({
-  messageInput,
-  composerSlashPanel,
-  composerSlashList,
-  getCommands: () => resolveLocalizedComposerSlashCommands(),
-  resolveEmptyText: () => t("chat.slashPanelEmpty"),
-  onApplied: () => {
-    renderComposerTokenEstimate();
-  },
-});
 
 const state = {
   apiBase: DEFAULT_API_BASE,
@@ -498,6 +342,7 @@ const state = {
   activeChatId: null as string | null,
   activeSessionId: newSessionID(),
   activePromptMode: "default" as PromptMode,
+  activeCollaborationMode: "default" as CollaborationMode,
   messages: [] as ViewMessage[],
   messageOutputOrder: 0,
   sending: false,
@@ -773,6 +618,7 @@ const chatFeature = createChatFeature({
   reloadChatsButton,
   newChatButton,
   chatPromptModeSelect,
+  chatCollaborationModeSelect,
   composerForm,
   composerMain,
   messageInput,
@@ -781,9 +627,6 @@ const chatFeature = createChatFeature({
   composerAttachInput,
   composerProviderSelect,
   composerModelSelect,
-  composerSlashPanel,
-  composerSlashList,
-  composerSlashController,
   domainContext: {
     state,
     t,
@@ -804,12 +647,6 @@ const chatFeature = createChatFeature({
     newSessionID,
     setSearchModalOpen,
     getBootstrapTask: () => bootstrapTask,
-    hideComposerSlashPanel: () => {
-      composerSlashController.hide();
-    },
-    renderComposerSlashPanel: () => {
-      composerSlashController.render();
-    },
     parsePositiveInteger,
     resetComposerFileDragDepth: () => {},
     runtimeFlags,
@@ -825,6 +662,7 @@ const chatFeature = createChatFeature({
     chatTitle,
     chatSession,
     chatPromptModeSelect,
+    chatCollaborationModeSelect,
     searchChatInput,
     searchChatResults,
     messageList,
@@ -848,7 +686,9 @@ const {
   handleComposerAttachmentFiles,
   extractDroppedFilePaths,
   normalizePromptMode,
+  normalizeCollaborationMode,
   setActivePromptMode,
+  setActiveCollaborationMode,
   renderChatHeader,
   renderChatList,
   renderSearchChatResults,
@@ -862,8 +702,6 @@ const {
   formatToolResultOutput,
   formatToolCallSummary,
   syncSendButtonState,
-  hideComposerSlashPanel,
-  renderComposerSlashPanel,
 } = chatFeature.actions;
 
 const cronFeature = createCronFeature({
@@ -1154,13 +992,6 @@ function normalizeSystemLayerTaskCommand(raw: string): string {
       return "compact";
     case "/memory":
       return "memory";
-    case "/plan":
-      return "plan";
-    case "/execute":
-      return "execute";
-    case "/pair_programming":
-    case "/pair-programming":
-      return "pair_programming";
     default:
       return "";
   }
@@ -1168,13 +999,15 @@ function normalizeSystemLayerTaskCommand(raw: string): string {
 
 function resolveSystemPromptTokenScenario(promptMode: PromptMode): SystemPromptTokenScenario {
   const taskCommand = promptMode === "codex" ? normalizeSystemLayerTaskCommand(messageInput.value) : "";
+  const collaborationMode = promptMode === "codex" ? state.activeCollaborationMode : "";
   const sessionID = taskCommand === "memory" ? state.activeSessionId.trim() : "";
   const tokenSourceKey = runtimeFlags.prompt_context_introspect ? "introspect" : "fallback";
   return {
     promptMode,
     taskCommand,
+    collaborationMode,
     sessionID,
-    cacheKey: `${promptMode}|${taskCommand}|${sessionID}|${tokenSourceKey}`,
+    cacheKey: `${promptMode}|${collaborationMode}|${taskCommand}|${sessionID}|${tokenSourceKey}`,
   };
 }
 
@@ -1277,6 +1110,9 @@ async function loadSystemPromptTokens(scenario: SystemPromptTokenScenario): Prom
       const query = new URLSearchParams({
         prompt_mode: scenario.promptMode,
       });
+      if (scenario.collaborationMode !== "") {
+        query.set("collaboration_mode", scenario.collaborationMode);
+      }
       if (scenario.taskCommand !== "") {
         query.set("task_command", scenario.taskCommand);
       }
@@ -1661,7 +1497,6 @@ function applyLocaleToDocument(): void {
   renderMessages({ force: true });
   renderComposerModelSelectors();
   renderComposerTokenEstimate();
-  renderComposerSlashPanel();
   syncSendButtonState();
   if (state.tabLoaded.models) {
     renderModelsPanel();

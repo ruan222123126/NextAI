@@ -173,9 +173,11 @@ describe("web e2e: shell/tool 渲染场景 - 历史回放与结果合并", () =>
       }
       const noticeCount = assistant.querySelectorAll(".tool-call-entry").length;
       const summary = assistant.querySelector<HTMLElement>(".tool-call-summary")?.textContent ?? "";
+      const summaryMeta = assistant.querySelector<HTMLElement>(".tool-call-summary-meta")?.textContent ?? "";
       return (
         noticeCount === 1 &&
         summary.includes("已浏览 1 个文件") &&
+        summaryMeta.includes("行 1-20") &&
         !summary.includes(`查看（${viewedPath}）`)
       );
     }, 4000);

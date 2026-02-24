@@ -13,6 +13,7 @@ import type {
 } from "@nextai/sdk-ts";
 
 export type PromptMode = "default" | "codex" | "claude";
+export type CollaborationMode = "default" | "plan" | "execute" | "pair_programming";
 
 export type ChatSpec = ContractChatSpec & { updated_at: string };
 
@@ -345,6 +346,7 @@ export interface WebAppState {
   activeChatId: string | null;
   activeSessionId: string;
   activePromptMode: PromptMode;
+  activeCollaborationMode: CollaborationMode;
   messages: ViewMessage[];
   messageOutputOrder: number;
   sending: boolean;
@@ -427,8 +429,6 @@ export interface WebAppContext {
   newSessionID: () => string;
   setSearchModalOpen: (open: boolean) => void;
   getBootstrapTask: () => Promise<void>;
-  hideComposerSlashPanel: () => void;
-  renderComposerSlashPanel: () => void;
   parsePositiveInteger: (value: unknown) => number | undefined;
   resetComposerFileDragDepth: () => void;
   runtimeFlags: WebAppRuntimeFlags;
@@ -444,6 +444,7 @@ export interface WebAppContext {
   chatTitle: HTMLElement;
   chatSession: HTMLElement;
   chatPromptModeSelect: HTMLSelectElement;
+  chatCollaborationModeSelect: HTMLSelectElement;
   searchChatInput: HTMLInputElement;
   searchChatResults: HTMLUListElement;
   messageList: HTMLUListElement;
@@ -592,8 +593,6 @@ export type ChatDomainContext = Pick<WebAppContext,
   | "newSessionID"
   | "setSearchModalOpen"
   | "getBootstrapTask"
-  | "hideComposerSlashPanel"
-  | "renderComposerSlashPanel"
   | "parsePositiveInteger"
   | "resetComposerFileDragDepth"
   | "runtimeFlags"
@@ -609,6 +608,7 @@ export type ChatDomainContext = Pick<WebAppContext,
   | "chatTitle"
   | "chatSession"
   | "chatPromptModeSelect"
+  | "chatCollaborationModeSelect"
   | "searchChatInput"
   | "searchChatResults"
   | "messageList"

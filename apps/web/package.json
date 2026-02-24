@@ -7,7 +7,7 @@
     "markdown-it": "^14.1.0"
   },
   "scripts": {
-    "build": "rm -rf dist && mkdir -p dist && pnpm exec tsc -p tsconfig.json && cp src/index.html dist/index.html && cp src/styles.css dist/styles.css",
+    "build": "rm -rf dist && mkdir -p dist/vendor/sdk-ts && pnpm exec tsc -p tsconfig.json && cp src/index.html dist/index.html && cp src/styles.css dist/styles.css && cp src/vendor/markdown-it-wrapper.js dist/vendor/markdown-it-wrapper.js && cp node_modules/markdown-it/dist/markdown-it.js dist/vendor/markdown-it.js && cp -R ../../packages/sdk-ts/lib/. dist/vendor/sdk-ts/",
     "test": "vitest run",
     "lint": "pnpm exec tsc -p tsconfig.json --noEmit"
   },

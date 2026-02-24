@@ -21,7 +21,16 @@ export function createChatToolCallHelpers(ctx: ChatToolCallContext) {
     bash: "shell",
     websearch: "search",
     webfetch: "browser",
+    "functions.spawn_agent": "spawn_agent",
+    "functions.send_input": "send_input",
+    "functions.resume_agent": "resume_agent",
+    "functions.wait": "wait",
+    "functions.close_agent": "close_agent",
+    "functions.request_user_input": "request_user_input",
+    "functions.update_plan": "update_plan",
+    "functions.apply_patch": "apply_patch",
   };
+  const maxSummaryLineRangeCount = 3;
 
   function isToolCallRawNotice(raw: string): boolean {
     const payload = parseToolCallRawEvent(raw);
@@ -103,6 +112,17 @@ export function createChatToolCallHelpers(ctx: ChatToolCallContext) {
     return truncateToolCallSummary(firstNonEmptyLine(raw) || fallback);
   }
 
+  function resolveToolCallSummaryMeta(toolCall: ViewToolCallNotice): string {
+    if (toolCall.outputReady === false) {
+      return "";
+    }
+    const summaryText = extractToolCallSummaryText(toolCall.raw);
+    if (summaryText === "") {
+      return "";
+    }
+    return summarizeBrowseLineRanges(summaryText);
+  }
+
   function resolveToolCallFallbackSummary(toolCall: ViewToolCallNotice): string {
     const summary = toolCall.summary.trim();
     if (summary !== "") {
@@ -144,17 +164,13 @@ export function createChatToolCallHelpers(ctx: ChatToolCallContext) {
   }
 
   function summarizeToolResultActions(text: string): string {
-    const lines = text
-      .split(/(?:\r?\n|\\n)+/g)
-      .map((line) => line.trim())
-      .filter((line) => line !== "");
+    const lines = parseSummaryLines(text);
     if (lines.length === 0) {
       return "";
     }
     const editedPaths: string[] = [];
     const writtenPaths: string[] = [];
-    let fileCount = 0;
-    let listCount = 0;
+    const browseStats = collectBrowseSummaryStats(lines);
     for (const line of lines) {
       const editResult = parseEditResultLine(line);
       if (editResult) {
@@ -164,16 +180,9 @@ export function createChatToolCallHelpers(ctx: ChatToolCallContext) {
         } else {
           pushUniquePath(editedPaths, editResult.path);
         }
-        continue;
-      }
-      if (isListBrowseLine(line)) {
-        listCount += 1;
-        continue;
-      }
-      if (isFileBrowseLine(line)) {
-        fileCount += 1;
       }
     }
+    const { fileCount, listCount } = browseStats;
     if (writtenPaths.length === 1 && editedPaths.length === 0 && fileCount === 0 && listCount === 0) {
       return t("chat.toolCallWritePath", { path: writtenPaths[0] });
     }
@@ -197,6 +206,71 @@ export function createChatToolCallHelpers(ctx: ChatToolCallContext) {
       parts.push(t("chat.toolCallSummaryListCount", { count: listCount }));
     }
     return `${t("chat.toolCallActionBrowse")} ${parts.join("，")}`;
+  }
+
+  function parseSummaryLines(text: string): string[] {
+    return text
+      .split(/(?:\r?\n|\\n)+/g)
+      .map((line) => line.trim())
+      .filter((line) => line !== "");
+  }
+
+  function collectBrowseSummaryStats(lines: string[]): {
+    fileCount: number;
+    listCount: number;
+    fileLineRanges: string[];
+  } {
+    let fileCount = 0;
+    let listCount = 0;
+    const fileLineRanges: string[] = [];
+    for (const line of lines) {
+      if (isListBrowseLine(line)) {
+        listCount += 1;
+        continue;
+      }
+      if (!isFileBrowseLine(line)) {
+        continue;
+      }
+      fileCount += 1;
+      const range = parseBrowseLineRange(line);
+      if (range !== "") {
+        pushUniquePath(fileLineRanges, range);
+      }
+    }
+    return {
+      fileCount,
+      listCount,
+      fileLineRanges,
+    };
+  }
+
+  function summarizeBrowseLineRanges(text: string): string {
+    const lines = parseSummaryLines(text);
+    if (lines.length === 0) {
+      return "";
+    }
+    const { fileCount, fileLineRanges } = collectBrowseSummaryStats(lines);
+    if (fileCount === 0 || fileLineRanges.length === 0) {
+      return "";
+    }
+    const displayRanges = fileLineRanges.slice(0, maxSummaryLineRangeCount).join(", ");
+    const rangeText = fileLineRanges.length > maxSummaryLineRangeCount
+      ? `${displayRanges} ${t("common.ellipsis")}`
+      : displayRanges;
+    return t("chat.toolCallSummaryLineRange", { range: rangeText });
+  }
+
+  function parseBrowseLineRange(line: string): string {
+    const match = line.match(/\[(\d+)-(\d+)\]/);
+    if (!match) {
+      return "";
+    }
+    const start = Number.parseInt(match[1] ?? "", 10);
+    const end = Number.parseInt(match[2] ?? "", 10);
+    if (!Number.isFinite(start) || !Number.isFinite(end)) {
+      return "";
+    }
+    return `${start}-${end}`;
   }
 
   function isListBrowseLine(line: string): boolean {
@@ -289,6 +363,28 @@ export function createChatToolCallHelpers(ctx: ChatToolCallContext) {
       return summary;
     }
     return t("chat.toolCallOutputUnavailable");
+  }
+
+  function extractToolCallSummaryText(raw: string): string {
+    const normalized = raw.trim();
+    if (
+      normalized === ""
+      || normalized === t("chat.toolCallOutputPending")
+      || normalized === t("chat.toolCallOutputUnavailable")
+    ) {
+      return "";
+    }
+    const payload = parseToolCallRawEvent(normalized);
+    if (!payload) {
+      return normalized;
+    }
+    if (payload.type !== "tool_result") {
+      return "";
+    }
+    if (typeof payload.tool_result?.summary !== "string") {
+      return "";
+    }
+    return payload.tool_result.summary.trim();
   }
 
   function formatToolCallSummary(toolCall?: AgentToolCallPayload): string {
@@ -388,6 +484,7 @@ export function createChatToolCallHelpers(ctx: ChatToolCallContext) {
     normalizeToolName,
     parseToolNameFromToolCallRaw,
     resolveToolCallSummaryLine,
+    resolveToolCallSummaryMeta,
     resolveToolCallExpandedDetail,
     formatToolResultOutput,
     formatToolCallSummary,
