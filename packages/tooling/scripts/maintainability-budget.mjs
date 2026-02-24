@@ -6,9 +6,24 @@ import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
 const DEFAULT_WARN_THRESHOLD = 1200;
 const DEFAULT_BLOCK_THRESHOLD = 1800;
 const DEFAULT_TOP_COUNT = 12;
+const DEFAULT_LEGACY_GROWTH_TOLERANCE = 20;
+const EXCLUDED_PATH_PATTERNS = [
+  /^pnpm-lock\.yaml$/i,
+  /(^|\/)package-lock\.json$/i,
+  /(^|\/)yarn\.lock$/i,
+  /(^|\/)bun\.lockb?$/i,
+  /^packages\/sdk-ts\/lib\//,
+  /(^|\/)(dist|build|coverage)\//,
+];
+const EXCLUDED_PATH_DESCRIPTIONS = [
+  "pnpm-lock.yaml",
+  "package-lock.json / yarn.lock / bun.lock*",
+  "packages/sdk-ts/lib/",
+  "dist|build|coverage 目录",
+];
 
 function printHelp() {
-  console.log(`Usage: node packages/tooling/scripts/maintainability-budget.mjs [options]\n\nOptions:\n  --warn-threshold <n>   Warning threshold in lines (default: ${DEFAULT_WARN_THRESHOLD})\n  --block-threshold <n>  Blocking threshold in lines (default: ${DEFAULT_BLOCK_THRESHOLD})\n  --top <n>              Number of largest files to show in baseline (default: ${DEFAULT_TOP_COUNT})\n  --base-ref <ref>       Baseline git ref/sha for changed-file gate\n  --report-path <path>   Write markdown report to file\n  --json-path <path>     Write machine-readable report to file\n  --summary-path <path>  Append markdown report to CI step summary\n  --no-fail-on-blocking  Never exit non-zero even when blockers exist\n  --help                 Show this help\n`);
+  console.log(`Usage: node packages/tooling/scripts/maintainability-budget.mjs [options]\n\nOptions:\n  --warn-threshold <n>         Warning threshold in lines (default: ${DEFAULT_WARN_THRESHOLD})\n  --block-threshold <n>        Blocking threshold in lines (default: ${DEFAULT_BLOCK_THRESHOLD})\n  --legacy-growth-tolerance <n>Allow growth lines for legacy oversized files (default: ${DEFAULT_LEGACY_GROWTH_TOLERANCE})\n  --top <n>                    Number of largest files to show in baseline (default: ${DEFAULT_TOP_COUNT})\n  --base-ref <ref>             Baseline git ref/sha for changed-file gate\n  --report-path <path>         Write markdown report to file\n  --json-path <path>           Write machine-readable report to file\n  --summary-path <path>        Append markdown report to CI step summary\n  --no-fail-on-blocking        Never exit non-zero even when blockers exist\n  --help                       Show this help\n`);
 }
 
 function parsePositiveInt(raw, flagName) {
@@ -19,10 +34,19 @@ function parsePositiveInt(raw, flagName) {
   return value;
 }
 
+function parseNonNegativeInt(raw, flagName) {
+  const value = Number.parseInt(raw, 10);
+  if (!Number.isFinite(value) || value < 0) {
+    throw new Error(`${flagName} expects a non-negative integer, got: ${raw}`);
+  }
+  return value;
+}
+
 function parseArgs(argv) {
   const options = {
     warnThreshold: DEFAULT_WARN_THRESHOLD,
     blockThreshold: DEFAULT_BLOCK_THRESHOLD,
+    legacyGrowthTolerance: DEFAULT_LEGACY_GROWTH_TOLERANCE,
     topCount: DEFAULT_TOP_COUNT,
     baseRef: "",
     reportPath: "",
@@ -68,6 +92,19 @@ function parseArgs(argv) {
     }
     if (arg.startsWith("--top=")) {
       options.topCount = parsePositiveInt(arg.slice("--top=".length), "--top");
+      continue;
+    }
+
+    if (arg === "--legacy-growth-tolerance") {
+      options.legacyGrowthTolerance = parseNonNegativeInt(argv[i + 1], arg);
+      i += 1;
+      continue;
+    }
+    if (arg.startsWith("--legacy-growth-tolerance=")) {
+      options.legacyGrowthTolerance = parseNonNegativeInt(
+        arg.slice("--legacy-growth-tolerance=".length),
+        "--legacy-growth-tolerance",
+      );
       continue;
     }
 
@@ -144,6 +181,26 @@ function runGit(args, allowFailure = false) {
 
 function runGitBuffer(args, allowFailure = false) {
   return runGitWithEncoding(args, null, allowFailure);
+}
+
+function normalizePath(path) {
+  return String(path ?? "")
+    .trim()
+    .replaceAll("\\", "/")
+    .replace(/^\.\/+/, "");
+}
+
+function isExcludedPath(path) {
+  const normalized = normalizePath(path);
+  if (normalized === "") {
+    return true;
+  }
+  for (const pattern of EXCLUDED_PATH_PATTERNS) {
+    if (pattern.test(normalized)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function parseNullSeparated(raw) {
@@ -228,7 +285,9 @@ function readLineCountAtRef(ref, path) {
 
 function listTrackedFiles() {
   const raw = runGit(["ls-files", "-z"]);
-  return parseNullSeparated(raw);
+  return parseNullSeparated(raw)
+    .map((path) => normalizePath(path))
+    .filter((path) => !isExcludedPath(path));
 }
 
 function getChangedPaths(baseRef) {
@@ -253,18 +312,18 @@ function getChangedPaths(baseRef) {
       continue;
     }
     if (status.startsWith("R") || status.startsWith("C")) {
-      const fromPath = fields[i] ?? "";
-      const toPath = fields[i + 1] ?? "";
+      const fromPath = normalizePath(fields[i] ?? "");
+      const toPath = normalizePath(fields[i + 1] ?? "");
       i += 2;
-      if (toPath !== "") {
+      if (toPath !== "" && !isExcludedPath(toPath)) {
         changed.push({ status, path: toPath, fromPath });
       }
       continue;
     }
 
-    const path = fields[i] ?? "";
+    const path = normalizePath(fields[i] ?? "");
     i += 1;
-    if (path !== "") {
+    if (path !== "" && !isExcludedPath(path)) {
       changed.push({ status, path });
     }
   }
@@ -313,7 +372,14 @@ function buildSnapshot(paths, warnThreshold, blockThreshold) {
   };
 }
 
-function evaluateChangedFileGate(changed, snapshotByPath, baseRef, warnThreshold, blockThreshold) {
+function evaluateChangedFileGate(
+  changed,
+  snapshotByPath,
+  baseRef,
+  warnThreshold,
+  blockThreshold,
+  legacyGrowthTolerance,
+) {
   const warnings = [];
   const blockers = [];
   const legacyTouched = [];
@@ -345,9 +411,12 @@ function evaluateChangedFileGate(changed, snapshotByPath, baseRef, warnThreshold
     };
 
     if (currentLines > blockThreshold) {
-      const legacyNoGrowth =
-        typeof baseLines === "number" && baseLines > blockThreshold && currentLines <= baseLines;
-      if (legacyNoGrowth) {
+      const legacySmallGrowth =
+        typeof baseLines === "number"
+        && baseLines > blockThreshold
+        && typeof delta === "number"
+        && delta <= legacyGrowthTolerance;
+      if (legacySmallGrowth) {
         legacyTouched.push({ ...payload, severity: "block" });
       } else {
         blockers.push(payload);
@@ -356,9 +425,12 @@ function evaluateChangedFileGate(changed, snapshotByPath, baseRef, warnThreshold
     }
 
     if (currentLines > warnThreshold) {
-      const legacyNoGrowth =
-        typeof baseLines === "number" && baseLines > warnThreshold && currentLines <= baseLines;
-      if (legacyNoGrowth) {
+      const legacySmallGrowth =
+        typeof baseLines === "number"
+        && baseLines > warnThreshold
+        && typeof delta === "number"
+        && delta <= legacyGrowthTolerance;
+      if (legacySmallGrowth) {
         legacyTouched.push({ ...payload, severity: "warn" });
       } else {
         warnings.push(payload);
@@ -430,6 +502,8 @@ function buildMarkdownReport(options, resolvedBaseRef, baseline, gate) {
   lines.push("## Maintainability Budget Gate");
   lines.push("");
   lines.push(`- 阈值：告警 > ${options.warnThreshold} 行，阻断 > ${options.blockThreshold} 行`);
+  lines.push(`- 历史超限小幅增量豁免：<= ${options.legacyGrowthTolerance} 行`);
+  lines.push(`- 默认排除：${EXCLUDED_PATH_DESCRIPTIONS.join("；")}`);
   lines.push(`- 基线提交：\`${shortSha(resolvedBaseRef)}\``);
   lines.push(`- 结论：**${budgetResult}**`);
   lines.push("");
@@ -508,6 +582,7 @@ function main() {
     resolvedBaseRef,
     options.warnThreshold,
     options.blockThreshold,
+    options.legacyGrowthTolerance,
   );
 
   const report = buildMarkdownReport(options, resolvedBaseRef, baseline, gate);
@@ -517,7 +592,9 @@ function main() {
     thresholds: {
       warn: options.warnThreshold,
       block: options.blockThreshold,
+      legacyGrowthTolerance: options.legacyGrowthTolerance,
     },
+    excludedPathRules: EXCLUDED_PATH_DESCRIPTIONS,
     baseRef: resolvedBaseRef,
     baseline: {
       textFileCount: baseline.entries.length,
