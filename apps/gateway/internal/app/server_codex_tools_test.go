@@ -339,6 +339,141 @@ func TestSubAgentToolsSendInputAndResume(t *testing.T) {
 	}
 }
 
+func TestSubAgentToolsWaitSupportsIDsAndNotFound(t *testing.T) {
+	srv := newTestServer(t)
+	const missingID = "missing-agent"
+
+	reply, waitErr := srv.executeWaitAgentToolCall(context.Background(), map[string]interface{}{
+		"ids":        []interface{}{missingID},
+		"timeout_ms": 500,
+	})
+	if waitErr != nil {
+		t.Fatalf("wait failed: %v", waitErr)
+	}
+	payload := decodeJSONMap(t, reply)
+	statusMap := decodeNestedMap(t, payload, "status")
+	gotStatus := strings.TrimSpace(stringValue(statusMap[missingID]))
+	if gotStatus != managedSubAgentStatusMissing {
+		t.Fatalf("expected status[%q]=%q, got=%#v", missingID, managedSubAgentStatusMissing, payload)
+	}
+	if timedOut, _ := payload["timed_out"].(bool); timedOut {
+		t.Fatalf("wait should not time out when missing id is final, got=%#v", payload)
+	}
+}
+
+func TestSubAgentToolsSupportCodexStyleIDAndWaitIDs(t *testing.T) {
+	srv := newTestServer(t)
+
+	spawnReply, spawnErr := srv.executeSpawnAgentToolCall(context.Background(), map[string]interface{}{
+		"message": "第一轮确认",
+	})
+	if spawnErr != nil {
+		t.Fatalf("spawn_agent failed: %v", spawnErr)
+	}
+	spawnPayload := decodeJSONMap(t, spawnReply)
+	agent := decodeNestedMap(t, spawnPayload, "agent")
+	agentID := strings.TrimSpace(stringValue(agent["agent_id"]))
+	if agentID == "" {
+		t.Fatalf("spawn_agent missing agent_id: %#v", spawnPayload)
+	}
+
+	if _, waitErr := srv.executeWaitAgentToolCall(context.Background(), map[string]interface{}{
+		"ids":        []interface{}{agentID},
+		"timeout_ms": 3000,
+	}); waitErr != nil {
+		t.Fatalf("initial wait failed: %v", waitErr)
+	}
+
+	sendReply, sendErr := srv.executeSendInputToolCall(map[string]interface{}{
+		"id":      agentID,
+		"message": "第二轮确认",
+	})
+	if sendErr != nil {
+		t.Fatalf("send_input failed: %v", sendErr)
+	}
+	sendPayload := decodeJSONMap(t, sendReply)
+	submissionID := strings.TrimSpace(stringValue(sendPayload["submission_id"]))
+	if submissionID == "" {
+		t.Fatalf("expected submission_id in send_input payload, got=%#v", sendPayload)
+	}
+
+	if _, resumeErr := srv.executeResumeAgentToolCall(context.Background(), map[string]interface{}{
+		"id": agentID,
+	}); resumeErr != nil {
+		t.Fatalf("resume_agent failed: %v", resumeErr)
+	}
+
+	if _, waitErr := srv.executeWaitAgentToolCall(context.Background(), map[string]interface{}{
+		"ids":        []interface{}{agentID},
+		"timeout_ms": 3000,
+	}); waitErr != nil {
+		t.Fatalf("second wait failed: %v", waitErr)
+	}
+
+	closeReply, closeErr := srv.executeCloseAgentToolCall(map[string]interface{}{"id": agentID})
+	if closeErr != nil {
+		t.Fatalf("close_agent failed: %v", closeErr)
+	}
+	closePayload := decodeJSONMap(t, closeReply)
+	if closed, _ := closePayload["closed"].(bool); !closed {
+		t.Fatalf("close_agent should return closed=true, got=%#v", closePayload)
+	}
+}
+
+func TestSubAgentToolsCloseThenResume(t *testing.T) {
+	srv := newTestServer(t)
+
+	spawnReply, spawnErr := srv.executeSpawnAgentToolCall(context.Background(), map[string]interface{}{
+		"task": "第一轮确认",
+	})
+	if spawnErr != nil {
+		t.Fatalf("spawn_agent failed: %v", spawnErr)
+	}
+	spawnPayload := decodeJSONMap(t, spawnReply)
+	agent := decodeNestedMap(t, spawnPayload, "agent")
+	agentID := strings.TrimSpace(stringValue(agent["agent_id"]))
+	if agentID == "" {
+		t.Fatalf("spawn_agent missing agent_id: %#v", spawnPayload)
+	}
+
+	if _, waitErr := srv.executeWaitAgentToolCall(context.Background(), map[string]interface{}{
+		"agent_id":   agentID,
+		"timeout_ms": 3000,
+	}); waitErr != nil {
+		t.Fatalf("initial wait failed: %v", waitErr)
+	}
+
+	if _, closeErr := srv.executeCloseAgentToolCall(map[string]interface{}{"id": agentID}); closeErr != nil {
+		t.Fatalf("close_agent failed: %v", closeErr)
+	}
+
+	_, sendErr := srv.executeSendInputToolCall(map[string]interface{}{
+		"id":      agentID,
+		"message": "关闭后发送",
+	})
+	if sendErr == nil {
+		t.Fatal("expected send_input to fail for closed agent")
+	}
+	var te *toolError
+	if !errors.As(sendErr, &te) {
+		t.Fatalf("expected toolError, got=%T %v", sendErr, sendErr)
+	}
+	if !errors.Is(te.Err, errMultiAgentClosed) {
+		t.Fatalf("expected errMultiAgentClosed, got=%v", te.Err)
+	}
+
+	resumeReply, resumeErr := srv.executeResumeAgentToolCall(context.Background(), map[string]interface{}{
+		"id": agentID,
+	})
+	if resumeErr != nil {
+		t.Fatalf("resume_agent failed: %v", resumeErr)
+	}
+	resumePayload := decodeJSONMap(t, resumeReply)
+	if status := strings.TrimSpace(stringValue(resumePayload["status"])); status == managedSubAgentStatusClosed {
+		t.Fatalf("resume_agent should reopen closed agent, got=%#v", resumePayload)
+	}
+}
+
 func decodeJSONMap(t *testing.T, raw string) map[string]interface{} {
 	t.Helper()
 	out := map[string]interface{}{}

@@ -57,7 +57,7 @@ func TestParsePromptModeFromBizParamsInvalid(t *testing.T) {
 		"prompt_mode",
 		"default",
 		func(raw string) (string, bool) {
-			if raw == "default" || raw == "codex" || raw == "claude" {
+			if raw == "default" || raw == "codex" {
 				return raw, true
 			}
 			return "", false
@@ -108,33 +108,6 @@ func TestListToolDefinitionNamesUsesDeclaredCapabilities(t *testing.T) {
 	}
 	if has["click"] || has["screenshot"] {
 		t.Fatalf("expected click/screenshot not derived without explicit capability, got=%v", names)
-	}
-}
-
-func TestListToolDefinitionNamesClaudeModeBuildsFromCapabilities(t *testing.T) {
-	t.Parallel()
-
-	names := ListToolDefinitionNames(
-		"claude",
-		[]string{"shell", "view", "edit", "find"},
-		nil,
-		func(name string) bool { return false },
-	)
-	has := map[string]bool{}
-	for _, name := range names {
-		has[name] = true
-	}
-	for _, required := range []string{
-		"Bash", "Read", "NotebookRead",
-		"Write", "Edit", "MultiEdit", "NotebookEdit",
-		"LS", "Glob", "Grep",
-	} {
-		if !has[required] {
-			t.Fatalf("missing claude-derived tool %q from %v", required, names)
-		}
-	}
-	if has["WebSearch"] || has["WebFetch"] {
-		t.Fatalf("expected WebSearch/WebFetch excluded without declared capabilities, got=%v", names)
 	}
 }
 
@@ -203,17 +176,6 @@ func TestParseShortcutToolCallUsesAvailableDefinitions(t *testing.T) {
 	}
 	if ok {
 		t.Fatalf("expected no shortcut match when tool is unavailable, got=%+v", call)
-	}
-
-	call, ok, err = ParseShortcutToolCall(rawRequest, "claude", []string{"Read"})
-	if err != nil {
-		t.Fatalf("parse shortcut failed: %v", err)
-	}
-	if !ok {
-		t.Fatal("expected shortcut match for available claude tool")
-	}
-	if call.Name != "read" {
-		t.Fatalf("unexpected tool name: %q", call.Name)
 	}
 }
 

@@ -10,8 +10,7 @@ import (
 )
 
 const (
-	promptModeClaude = "claude"
-	promptModeCodex  = "codex"
+	promptModeCodex = "codex"
 
 	ToolCapabilityRead             = "read"
 	ToolCapabilityWrite            = "write"
@@ -486,21 +485,8 @@ func NormalizeToolName(name string) string {
 }
 
 func NormalizeToolNameForPromptMode(name string, promptMode string) string {
-	normalized := NormalizeToolName(strings.ToLower(strings.TrimSpace(name)))
-	if !IsClaudePromptMode(promptMode) {
-		return normalized
-	}
-	switch normalized {
-	case "bash", "read", "write", "glob", "grep", "ls", "task", "todowrite", "exitplanmode",
-		"websearch", "webfetch", "multiedit", "notebookread", "notebookedit":
-		return normalized
-	default:
-		return normalized
-	}
-}
-
-func IsClaudePromptMode(promptMode string) bool {
-	return strings.EqualFold(strings.TrimSpace(promptMode), promptModeClaude)
+	_ = promptMode
+	return NormalizeToolName(strings.ToLower(strings.TrimSpace(name)))
 }
 
 type toolDefinitionBuildSpec struct {
@@ -567,66 +553,6 @@ var baseToolDefinitionBuildSpecs = []toolDefinitionBuildSpec{
 		Name:                    "apply_patch",
 		PromptMode:              promptModeCodex,
 		RequiredAnyCapabilities: []string{ToolCapabilityWrite},
-	},
-	{
-		Name:                    "Bash",
-		PromptMode:              promptModeClaude,
-		RequiredAnyCapabilities: []string{ToolCapabilityExecute},
-	},
-	{
-		Name:                    "Read",
-		PromptMode:              promptModeClaude,
-		RequiredAnyCapabilities: []string{ToolCapabilityOpenLocal},
-	},
-	{
-		Name:                    "NotebookRead",
-		PromptMode:              promptModeClaude,
-		RequiredAnyCapabilities: []string{ToolCapabilityOpenLocal},
-	},
-	{
-		Name:                    "Write",
-		PromptMode:              promptModeClaude,
-		RequiredAnyCapabilities: []string{ToolCapabilityWrite},
-	},
-	{
-		Name:                    "Edit",
-		PromptMode:              promptModeClaude,
-		RequiredAnyCapabilities: []string{ToolCapabilityWrite},
-	},
-	{
-		Name:                    "MultiEdit",
-		PromptMode:              promptModeClaude,
-		RequiredAnyCapabilities: []string{ToolCapabilityWrite},
-	},
-	{
-		Name:                    "NotebookEdit",
-		PromptMode:              promptModeClaude,
-		RequiredAnyCapabilities: []string{ToolCapabilityWrite},
-	},
-	{
-		Name:                    "LS",
-		PromptMode:              promptModeClaude,
-		RequiredAnyCapabilities: []string{ToolCapabilityFileSearch},
-	},
-	{
-		Name:                    "Glob",
-		PromptMode:              promptModeClaude,
-		RequiredAnyCapabilities: []string{ToolCapabilityFileSearch},
-	},
-	{
-		Name:                    "Grep",
-		PromptMode:              promptModeClaude,
-		RequiredAnyCapabilities: []string{ToolCapabilityFileSearch},
-	},
-	{
-		Name:                    "WebSearch",
-		PromptMode:              promptModeClaude,
-		RequiredAnyCapabilities: []string{ToolCapabilityWebSearch},
-	},
-	{
-		Name:                    "WebFetch",
-		PromptMode:              promptModeClaude,
-		RequiredAnyCapabilities: []string{ToolCapabilityWebFetch},
 	},
 }
 

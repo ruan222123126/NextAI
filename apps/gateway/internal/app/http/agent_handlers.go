@@ -13,8 +13,6 @@ type AgentHandlers struct {
 	GetChat               stdhttp.HandlerFunc
 	UpdateChat            stdhttp.HandlerFunc
 	DeleteChat            stdhttp.HandlerFunc
-	ClaudeMessages        stdhttp.HandlerFunc
-	ClaudeCountTokens     stdhttp.HandlerFunc
 	ProcessAgent          stdhttp.HandlerFunc
 	GetAgentSystemLayers  stdhttp.HandlerFunc
 	BootstrapSession      stdhttp.HandlerFunc
@@ -36,8 +34,6 @@ func registerAgentRoutes(api chi.Router, handlers AgentHandlers) {
 		r.Delete("/{chat_id}", mustHandler("delete-chat", handlers.DeleteChat))
 	})
 
-	api.Post("/v1/messages", mustHandler("claude-messages", handlers.ClaudeMessages))
-	api.Post("/v1/messages/count_tokens", mustHandler("claude-count-tokens", handlers.ClaudeCountTokens))
 	api.Post("/agent/process", mustHandler("process-agent", handlers.ProcessAgent))
 	api.Get("/agent/system-layers", mustHandler("get-agent-system-layers", handlers.GetAgentSystemLayers))
 	api.Post("/agent/self/sessions/bootstrap", mustHandler("selfops-bootstrap-session", handlers.BootstrapSession))

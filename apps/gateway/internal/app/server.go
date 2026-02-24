@@ -67,12 +67,6 @@ const (
 	aiToolsGuideLegacyV0RelativePath     = "docs/AI/AGENTS.md"
 	aiToolsGuideLegacyV1RelativePath     = "docs/AI/ai-tools.md"
 	aiToolsGuideLegacyV2RelativePath     = "docs/ai-tools.md"
-	claudeReversePromptRootRelativePath  = "prompts/claude/claude-code-reverse/results/prompts"
-	claudeIdentityPromptRelativePath     = claudeReversePromptRootRelativePath + "/system-identity.prompt.md"
-	claudeWorkflowPromptRelativePath     = claudeReversePromptRootRelativePath + "/system-workflow.prompt.md"
-	claudeReminderStartRelativePath      = claudeReversePromptRootRelativePath + "/system-reminder-start.prompt.md"
-	claudeReminderEndRelativePath        = claudeReversePromptRootRelativePath + "/system-reminder-end.prompt.md"
-	claudeNextAIToolAdapterRelativePath  = "prompts/claude/claude-code-reverse/tool-adapter-nextai.md"
 	codexBasePromptRelativePath          = "prompts/codex/codex-rs/core/prompt.md"
 	codexOrchestratorRelativePath        = "prompts/codex/codex-rs/core/templates/agents/orchestrator.md"
 	codexModelTemplateRelativePath       = "prompts/codex/codex-rs/core/templates/model_instructions/gpt-5.2-codex_instructions_template.md"
@@ -101,11 +95,9 @@ const (
 	defaultCodexPersonality              = codexpromptservice.PersonalityPragmatic
 	promptModeDefault                    = "default"
 	promptModeCodex                      = "codex"
-	promptModeClaude                     = "claude"
 	promptModeVariantDefault             = "default"
 	promptModeVariantCodexV1             = "codex_v1"
 	promptModeVariantCodexV2             = "codex_v2"
-	promptModeVariantClaudeV1            = "claude_v1"
 	collaborationModeDefaultName         = "Default"
 	collaborationModePlanName            = "Plan"
 	collaborationModeExecuteName         = "Execute"
@@ -190,6 +182,10 @@ type Server struct {
 	closeOnce        sync.Once
 }
 
+func codexPromptModeEnabled() bool {
+	return false
+}
+
 func NewServer(cfg config.Config) (*Server, error) {
 	store, err := repo.NewStore(cfg.DataDir)
 	if err != nil {
@@ -212,7 +208,7 @@ func NewServer(cfg config.Config) (*Server, error) {
 		cronDone:         make(chan struct{}),
 	}
 	srv.cfg.CodexPromptSource = normalizeCodexPromptSource(srv.cfg.CodexPromptSource)
-	if srv.cfg.CodexPromptSource == codexPromptSourceCatalog || srv.cfg.EnableCodexPromptShadowCompare {
+	if codexPromptModeEnabled() && (srv.cfg.CodexPromptSource == codexPromptSourceCatalog || srv.cfg.EnableCodexPromptShadowCompare) {
 		resolver, resolverErr := codexpromptservice.NewResolver(codexRuntimeCatalogRelativePath)
 		if resolverErr != nil {
 			if srv.cfg.CodexPromptSource == codexPromptSourceCatalog {
@@ -348,8 +344,6 @@ func (s *Server) Handler() http.Handler {
 				GetChat:               s.getChat,
 				UpdateChat:            s.updateChat,
 				DeleteChat:            s.deleteChat,
-				ClaudeMessages:        s.claudeMessages,
-				ClaudeCountTokens:     s.claudeCountTokens,
 				ProcessAgent:          s.processAgent,
 				GetAgentSystemLayers:  s.getAgentSystemLayers,
 				BootstrapSession:      s.bootstrapSession,

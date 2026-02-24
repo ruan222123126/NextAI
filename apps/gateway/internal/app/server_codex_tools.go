@@ -101,6 +101,8 @@ const (
 	managedSubAgentStatusIdle    = "idle"
 	managedSubAgentStatusRunning = "running"
 	managedSubAgentStatusFailed  = "failed"
+	managedSubAgentStatusMissing = "not_found"
+	managedSubAgentStatusClosed  = "closed"
 )
 
 type requestUserInputQuestionOption struct {
@@ -528,18 +530,15 @@ func (s *Server) executeSpawnAgentToolCall(ctx context.Context, input map[string
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	item := firstToolInputItem(input)
-	task := strings.TrimSpace(firstNonEmptyString(item, "task", "input", "message", "prompt"))
-	if task == "" {
-		task = strings.TrimSpace(firstNonEmptyString(input, "task", "input", "message", "prompt"))
-	}
-	if task == "" {
+	task, err := parseSubAgentTurnInput(input, true, true, errMultiAgentTaskRequired)
+	if err != nil {
 		return "", &toolError{
 			Code:    "tool_invoke_failed",
 			Message: `tool "spawn_agent" invocation failed`,
-			Err:     errMultiAgentTaskRequired,
+			Err:     err,
 		}
 	}
+	candidates := multiAgentInputCandidates(input)
 
 	parentDepth := parseToolInputAgentDepth(input)
 	if parentDepth >= maxSubAgentDepth {
@@ -556,18 +555,12 @@ func (s *Server) executeSpawnAgentToolCall(ctx context.Context, input map[string
 	parentPromptMode := strings.TrimSpace(stringValue(input[requestUserInputMetaPromptModeKey]))
 	parentCollaborationMode := strings.TrimSpace(stringValue(input[requestUserInputMetaCollaborationModeKey]))
 
-	agentID := strings.TrimSpace(firstNonEmptyString(item, "agent_id"))
-	if agentID == "" {
-		agentID = strings.TrimSpace(firstNonEmptyString(input, "agent_id"))
-	}
+	agentID := strings.TrimSpace(firstNonEmptyStringFromCandidates(candidates, "id", "agent_id"))
 	if agentID == "" {
 		agentID = newID("agent")
 	}
 
-	sessionID := strings.TrimSpace(firstNonEmptyString(item, "session_id"))
-	if sessionID == "" {
-		sessionID = strings.TrimSpace(firstNonEmptyString(input, "session_id"))
-	}
+	sessionID := strings.TrimSpace(firstNonEmptyStringFromCandidates(candidates, "session_id"))
 	if sessionID == "" {
 		seed := strings.TrimSpace(parentSessionID)
 		if seed == "" {
@@ -576,10 +569,7 @@ func (s *Server) executeSpawnAgentToolCall(ctx context.Context, input map[string
 		sessionID = seed + "::" + agentID
 	}
 
-	userID := strings.TrimSpace(firstNonEmptyString(item, "user_id"))
-	if userID == "" {
-		userID = strings.TrimSpace(firstNonEmptyString(input, "user_id"))
-	}
+	userID := strings.TrimSpace(firstNonEmptyStringFromCandidates(candidates, "user_id"))
 	if userID == "" {
 		userID = parentUserID
 	}
@@ -587,10 +577,7 @@ func (s *Server) executeSpawnAgentToolCall(ctx context.Context, input map[string
 		userID = "subagent"
 	}
 
-	channel := strings.TrimSpace(firstNonEmptyString(item, "channel"))
-	if channel == "" {
-		channel = strings.TrimSpace(firstNonEmptyString(input, "channel"))
-	}
+	channel := strings.TrimSpace(firstNonEmptyStringFromCandidates(candidates, "channel"))
 	if channel == "" {
 		channel = parentChannel
 	}
@@ -598,15 +585,12 @@ func (s *Server) executeSpawnAgentToolCall(ctx context.Context, input map[string
 		channel = defaultProcessChannel
 	}
 
-	promptMode := strings.TrimSpace(firstNonEmptyString(item, "prompt_mode"))
-	if promptMode == "" {
-		promptMode = strings.TrimSpace(firstNonEmptyString(input, "prompt_mode"))
-	}
+	promptMode := strings.TrimSpace(firstNonEmptyStringFromCandidates(candidates, "prompt_mode"))
 	if promptMode == "" {
 		promptMode = parentPromptMode
 	}
 	if promptMode == "" {
-		promptMode = promptModeCodex
+		promptMode = promptModeDefault
 	}
 	normalizedPromptMode, ok := normalizePromptMode(promptMode)
 	if !ok {
@@ -617,10 +601,7 @@ func (s *Server) executeSpawnAgentToolCall(ctx context.Context, input map[string
 		}
 	}
 
-	collaborationMode := strings.TrimSpace(firstNonEmptyString(item, "collaboration_mode"))
-	if collaborationMode == "" {
-		collaborationMode = strings.TrimSpace(firstNonEmptyString(input, "collaboration_mode"))
-	}
+	collaborationMode := strings.TrimSpace(firstNonEmptyStringFromCandidates(candidates, "collaboration_mode"))
 	if collaborationMode == "" {
 		collaborationMode = parentCollaborationMode
 	}
@@ -679,18 +660,16 @@ func (s *Server) executeSpawnAgentToolCall(ctx context.Context, input map[string
 		}
 	}
 	return encodeSubAgentToolPayload(map[string]interface{}{
-		"ok":      true,
-		"spawned": true,
-		"agent":   snapshot,
+		"ok":       true,
+		"spawned":  true,
+		"id":       snapshot.AgentID,
+		"agent_id": snapshot.AgentID,
+		"agent":    snapshot,
 	})
 }
 
 func (s *Server) executeSendInputToolCall(input map[string]interface{}) (string, error) {
-	item := firstToolInputItem(input)
-	agentID := strings.TrimSpace(firstNonEmptyString(item, "agent_id"))
-	if agentID == "" {
-		agentID = strings.TrimSpace(firstNonEmptyString(input, "agent_id"))
-	}
+	agentID := parseSubAgentTargetID(input)
 	if agentID == "" {
 		return "", &toolError{
 			Code:    "tool_invoke_failed",
@@ -698,17 +677,16 @@ func (s *Server) executeSendInputToolCall(input map[string]interface{}) (string,
 			Err:     errMultiAgentIDRequired,
 		}
 	}
-	queuedInput := strings.TrimSpace(firstNonEmptyString(item, "input", "message", "task", "prompt"))
-	if queuedInput == "" {
-		queuedInput = strings.TrimSpace(firstNonEmptyString(input, "input", "message", "task", "prompt"))
-	}
-	if queuedInput == "" {
+	queuedInput, err := parseSubAgentTurnInput(input, true, true, errMultiAgentInputRequired)
+	if err != nil {
 		return "", &toolError{
 			Code:    "tool_invoke_failed",
 			Message: `tool "send_input" invocation failed`,
-			Err:     errMultiAgentInputRequired,
+			Err:     err,
 		}
 	}
+	interrupt := parseSubAgentInterrupt(input)
+	submissionID := newID("submission")
 
 	s.subAgentMu.Lock()
 	agent, exists := s.subAgents[agentID]
@@ -720,7 +698,18 @@ func (s *Server) executeSendInputToolCall(input map[string]interface{}) (string,
 			Err:     errMultiAgentNotFound,
 		}
 	}
+	if agent.Status == managedSubAgentStatusClosed {
+		s.subAgentMu.Unlock()
+		return "", &toolError{
+			Code:    "tool_invoke_failed",
+			Message: `tool "send_input" invocation failed`,
+			Err:     errMultiAgentClosed,
+		}
+	}
 	agent.PendingInputs = append(agent.PendingInputs, queuedInput)
+	if interrupt && agent.cancelCurrentTurn != nil {
+		agent.cancelCurrentTurn()
+	}
 	agent.UpdatedAt = nowISO()
 	snapshot := snapshotFromManagedSubAgent(agent)
 	s.subAgentMu.Unlock()
@@ -728,11 +717,14 @@ func (s *Server) executeSendInputToolCall(input map[string]interface{}) (string,
 	s.notifySubAgentUpdate(agent)
 
 	return encodeSubAgentToolPayload(map[string]interface{}{
-		"ok":           true,
-		"accepted":     true,
-		"agent_id":     agentID,
-		"agent":        snapshot,
-		"queued_input": queuedInput,
+		"ok":            true,
+		"accepted":      true,
+		"id":            agentID,
+		"agent_id":      agentID,
+		"submission_id": submissionID,
+		"interrupt":     interrupt,
+		"agent":         snapshot,
+		"queued_input":  queuedInput,
 	})
 }
 
@@ -740,11 +732,7 @@ func (s *Server) executeResumeAgentToolCall(ctx context.Context, input map[strin
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	item := firstToolInputItem(input)
-	agentID := strings.TrimSpace(firstNonEmptyString(item, "agent_id"))
-	if agentID == "" {
-		agentID = strings.TrimSpace(firstNonEmptyString(input, "agent_id"))
-	}
+	agentID := parseSubAgentTargetID(input)
 	if agentID == "" {
 		return "", &toolError{
 			Code:    "tool_invoke_failed",
@@ -752,14 +740,18 @@ func (s *Server) executeResumeAgentToolCall(ctx context.Context, input map[strin
 			Err:     errMultiAgentIDRequired,
 		}
 	}
-	optionalInput := strings.TrimSpace(firstNonEmptyString(item, "input", "message", "task", "prompt"))
-	if optionalInput == "" {
-		optionalInput = strings.TrimSpace(firstNonEmptyString(input, "input", "message", "task", "prompt"))
+	optionalInput, parseErr := parseSubAgentTurnInput(input, true, false, errMultiAgentInputRequired)
+	if parseErr != nil {
+		return "", &toolError{
+			Code:    "tool_invoke_failed",
+			Message: `tool "resume_agent" invocation failed`,
+			Err:     parseErr,
+		}
 	}
 	if optionalInput != "" {
 		if _, err := s.executeSendInputToolCall(map[string]interface{}{
-			"agent_id": agentID,
-			"input":    optionalInput,
+			"id":      agentID,
+			"message": optionalInput,
 		}); err != nil {
 			return "", err
 		}
@@ -782,6 +774,8 @@ func (s *Server) executeResumeAgentToolCall(ctx context.Context, input map[strin
 	return encodeSubAgentToolPayload(map[string]interface{}{
 		"ok":      true,
 		"resumed": true,
+		"id":      snapshot.AgentID,
+		"status":  snapshot.Status,
 		"agent":   snapshot,
 	})
 }
@@ -790,108 +784,82 @@ func (s *Server) executeWaitAgentToolCall(ctx context.Context, input map[string]
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	item := firstToolInputItem(input)
-	agentID := strings.TrimSpace(firstNonEmptyString(item, "agent_id"))
-	if agentID == "" {
-		agentID = strings.TrimSpace(firstNonEmptyString(input, "agent_id"))
-	}
-	if agentID == "" {
+	agentIDs, err := parseSubAgentTargetIDs(input)
+	if err != nil {
 		return "", &toolError{
 			Code:    "tool_invoke_failed",
 			Message: `tool "wait" invocation failed`,
-			Err:     errMultiAgentIDRequired,
+			Err:     err,
 		}
 	}
-
-	timeout := agentWaitDefaultTimeout
-	if timeoutMS, ok := firstPositiveInt(item, "timeout_ms", "timeout", "yield_time_ms"); ok {
-		timeout = time.Duration(timeoutMS) * time.Millisecond
-	} else if timeoutMS, ok := firstPositiveInt(input, "timeout_ms", "timeout", "yield_time_ms"); ok {
-		timeout = time.Duration(timeoutMS) * time.Millisecond
-	}
-	if timeout > agentWaitMaxTimeout {
-		timeout = agentWaitMaxTimeout
-	}
-	if timeout <= 0 {
-		timeout = agentWaitDefaultTimeout
-	}
+	timeout := parseSubAgentWaitTimeout(input)
 	deadline := time.Now().Add(timeout)
 
 	for {
-		s.subAgentMu.Lock()
-		agent, exists := s.subAgents[agentID]
-		if !exists {
-			s.subAgentMu.Unlock()
+		finalStatuses, snapshots, waitChs := s.collectSubAgentWaitState(agentIDs)
+		if len(finalStatuses) > 0 {
+			return encodeSubAgentToolPayload(buildSubAgentWaitPayload(agentIDs, finalStatuses, snapshots, false))
+		}
+
+		timedOut, waitErr := waitForAnySubAgentUpdate(ctx, waitChs, deadline)
+		if waitErr != nil {
 			return "", &toolError{
 				Code:    "tool_invoke_failed",
 				Message: `tool "wait" invocation failed`,
-				Err:     errMultiAgentNotFound,
+				Err:     waitErr,
 			}
 		}
-		snapshot := snapshotFromManagedSubAgent(agent)
-		if agent.Status != managedSubAgentStatusRunning {
-			s.subAgentMu.Unlock()
-			return encodeSubAgentToolPayload(map[string]interface{}{
-				"ok":        true,
-				"ready":     true,
-				"timed_out": false,
-				"agent":     snapshot,
-			})
-		}
-		waitCh := agent.waitCh
-		s.subAgentMu.Unlock()
-
-		remaining := time.Until(deadline)
-		if remaining <= 0 {
-			timeoutSnapshot, _ := s.getSubAgentSnapshot(agentID)
-			return encodeSubAgentToolPayload(map[string]interface{}{
-				"ok":        true,
-				"ready":     false,
-				"timed_out": true,
-				"agent":     timeoutSnapshot,
-			})
-		}
-
-		timer := time.NewTimer(remaining)
-		select {
-		case <-ctx.Done():
-			if !timer.Stop() {
-				select {
-				case <-timer.C:
-				default:
-				}
-			}
-			return "", &toolError{
-				Code:    "tool_invoke_failed",
-				Message: `tool "wait" invocation failed`,
-				Err:     ctx.Err(),
-			}
-		case <-waitCh:
-			if !timer.Stop() {
-				select {
-				case <-timer.C:
-				default:
-				}
-			}
-			continue
-		case <-timer.C:
-			timeoutSnapshot, _ := s.getSubAgentSnapshot(agentID)
-			return encodeSubAgentToolPayload(map[string]interface{}{
-				"ok":        true,
-				"ready":     false,
-				"timed_out": true,
-				"agent":     timeoutSnapshot,
-			})
+		if timedOut {
+			_, timeoutSnapshots, _ := s.collectSubAgentWaitState(agentIDs)
+			return encodeSubAgentToolPayload(buildSubAgentWaitPayload(agentIDs, map[string]string{}, timeoutSnapshots, true))
 		}
 	}
 }
 
-func (s *Server) executeCloseAgentToolCall(input map[string]interface{}) (string, error) {
-	item := firstToolInputItem(input)
-	agentID := strings.TrimSpace(firstNonEmptyString(item, "agent_id"))
-	if agentID == "" {
-		agentID = strings.TrimSpace(firstNonEmptyString(input, "agent_id"))
+func (s *Server) collectSubAgentWaitState(agentIDs []string) (map[string]string, map[string]managedSubAgentSnapshot, []chan struct{}) {
+	finalStatuses := map[string]string{}
+	snapshots := map[string]managedSubAgentSnapshot{}
+	waitChs := make([]chan struct{}, 0, len(agentIDs))
+	waitSeen := map[chan struct{}]struct{}{}
+
+	s.subAgentMu.Lock()
+	defer s.subAgentMu.Unlock()
+
+	for _, rawID := range agentIDs {
+		agentID := strings.TrimSpace(rawID)
+		if agentID == "" {
+			continue
+		}
+		agent, exists := s.subAgents[agentID]
+		if !exists {
+			finalStatuses[agentID] = managedSubAgentStatusMissing
+			continue
+		}
+		snapshot := snapshotFromManagedSubAgent(agent)
+		snapshots[agentID] = snapshot
+		if agent.Status != managedSubAgentStatusRunning {
+			status := strings.TrimSpace(agent.Status)
+			if status == "" {
+				status = managedSubAgentStatusIdle
+			}
+			finalStatuses[agentID] = status
+			continue
+		}
+		if agent.waitCh == nil {
+			continue
+		}
+		if _, seen := waitSeen[agent.waitCh]; seen {
+			continue
+		}
+		waitSeen[agent.waitCh] = struct{}{}
+		waitChs = append(waitChs, agent.waitCh)
 	}
+
+	return finalStatuses, snapshots, waitChs
+}
+
+func (s *Server) executeCloseAgentToolCall(input map[string]interface{}) (string, error) {
+	agentID := parseSubAgentTargetID(input)
 	if agentID == "" {
 		return "", &toolError{
 			Code:    "tool_invoke_failed",
@@ -900,7 +868,7 @@ func (s *Server) executeCloseAgentToolCall(input map[string]interface{}) (string
 		}
 	}
 
-	snapshot, err := s.removeSubAgent(agentID)
+	snapshot, err := s.closeSubAgent(agentID)
 	if err != nil {
 		return "", &toolError{
 			Code:    "tool_invoke_failed",
@@ -911,6 +879,8 @@ func (s *Server) executeCloseAgentToolCall(input map[string]interface{}) (string
 	return encodeSubAgentToolPayload(map[string]interface{}{
 		"ok":       true,
 		"closed":   true,
+		"id":       snapshot.AgentID,
+		"status":   snapshot.Status,
 		"agent":    snapshot,
 		"agent_id": agentID,
 	})
@@ -974,6 +944,33 @@ func (s *Server) removeSubAgent(agentID string) (managedSubAgentSnapshot, error)
 	return snapshot, nil
 }
 
+func (s *Server) closeSubAgent(agentID string) (managedSubAgentSnapshot, error) {
+	agentID = strings.TrimSpace(agentID)
+	if agentID == "" {
+		return managedSubAgentSnapshot{}, errMultiAgentIDRequired
+	}
+
+	s.subAgentMu.Lock()
+	agent, exists := s.subAgents[agentID]
+	if !exists {
+		s.subAgentMu.Unlock()
+		return managedSubAgentSnapshot{}, errMultiAgentNotFound
+	}
+	if agent.cancelCurrentTurn != nil {
+		agent.cancelCurrentTurn()
+		agent.cancelCurrentTurn = nil
+	}
+	agent.Status = managedSubAgentStatusClosed
+	agent.CurrentInput = ""
+	agent.PendingInputs = []string{}
+	agent.UpdatedAt = nowISO()
+	snapshot := snapshotFromManagedSubAgent(agent)
+	s.subAgentMu.Unlock()
+
+	s.notifySubAgentUpdate(agent)
+	return snapshot, nil
+}
+
 func (s *Server) startSubAgentTurn(agentID string, rawInput string) error {
 	agentID = strings.TrimSpace(agentID)
 	if agentID == "" {
@@ -989,6 +986,10 @@ func (s *Server) startSubAgentTurn(agentID string, rawInput string) error {
 	if !exists {
 		s.subAgentMu.Unlock()
 		return errMultiAgentNotFound
+	}
+	if agent.Status == managedSubAgentStatusClosed {
+		s.subAgentMu.Unlock()
+		return errMultiAgentClosed
 	}
 	if agent.Status == managedSubAgentStatusRunning {
 		s.subAgentMu.Unlock()
@@ -1016,24 +1017,36 @@ func (s *Server) resumeSubAgent(agentID string) error {
 		return errMultiAgentIDRequired
 	}
 
+	var (
+		agent     *managedSubAgent
+		nextInput string
+	)
 	s.subAgentMu.Lock()
-	agent, exists := s.subAgents[agentID]
+	var exists bool
+	agent, exists = s.subAgents[agentID]
 	if !exists {
 		s.subAgentMu.Unlock()
 		return errMultiAgentNotFound
 	}
 	if agent.Status == managedSubAgentStatusRunning {
 		s.subAgentMu.Unlock()
-		return errMultiAgentBusy
+		return nil
 	}
-	if len(agent.PendingInputs) == 0 {
-		s.subAgentMu.Unlock()
-		return errMultiAgentNoPendingInput
+	if agent.Status == managedSubAgentStatusClosed {
+		agent.Status = managedSubAgentStatusIdle
+		agent.LastError = ""
 	}
-	nextInput := strings.TrimSpace(agent.PendingInputs[0])
-	agent.PendingInputs = append([]string{}, agent.PendingInputs[1:]...)
+	for len(agent.PendingInputs) > 0 && nextInput == "" {
+		nextInput = strings.TrimSpace(agent.PendingInputs[0])
+		agent.PendingInputs = append([]string{}, agent.PendingInputs[1:]...)
+	}
+	agent.UpdatedAt = nowISO()
 	s.subAgentMu.Unlock()
+	s.notifySubAgentUpdate(agent)
 
+	if nextInput == "" {
+		return nil
+	}
 	return s.startSubAgentTurn(agentID, nextInput)
 }
 
@@ -1086,7 +1099,25 @@ func (s *Server) runSubAgentTurn(ctx context.Context, agentID string, inputText 
 	current.cancelCurrentTurn = nil
 	current.CurrentInput = ""
 	current.UpdatedAt = nowISO()
+	interrupted := ctx.Err() != nil
+	if current.Status == managedSubAgentStatusClosed {
+		current.LastReply = ""
+		if processErr != nil && !interrupted {
+			current.LastError = formatSubAgentProcessError(processErr)
+		}
+		s.subAgentMu.Unlock()
+		s.notifySubAgentUpdate(agent)
+		return
+	}
 	if processErr != nil {
+		if interrupted {
+			current.Status = managedSubAgentStatusIdle
+			current.LastReply = ""
+			current.LastError = ""
+			s.subAgentMu.Unlock()
+			s.notifySubAgentUpdate(agent)
+			return
+		}
 		current.Status = managedSubAgentStatusFailed
 		current.LastError = formatSubAgentProcessError(processErr)
 	} else {
