@@ -215,6 +215,8 @@ describe("cli e2e", () => {
           "http://127.0.0.1:19001/v1",
           "--enabled",
           "true",
+          "--reasoning-effort",
+          "high",
           "--timeout-ms",
           "32000",
           "--header",
@@ -288,6 +290,7 @@ describe("cli e2e", () => {
       api_key: "sk-openai",
       base_url: "http://127.0.0.1:19001/v1",
       enabled: true,
+      reasoning_effort: "high",
       timeout_ms: 32000,
       headers: { "X-Tenant": "team-a" },
       model_aliases: {

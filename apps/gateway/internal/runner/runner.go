@@ -8,10 +8,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"sort"
 	"strings"
 	"time"
+	"unicode"
 
 	"nextai/apps/gateway/internal/domain"
 	"nextai/apps/gateway/internal/provider"
@@ -99,6 +101,7 @@ type GenerateConfig struct {
 	AdapterID          string
 	Headers            map[string]string
 	TimeoutMS          int
+	ReasoningEffort    string
 	Store              bool
 	PromptCacheKey     string
 	PreviousResponseID string
@@ -138,12 +141,12 @@ type Runner struct {
 }
 
 func New() *Runner {
-	return NewWithHTTPClient(&http.Client{Timeout: 30 * time.Second})
+	return NewWithHTTPClient(&http.Client{})
 }
 
 func NewWithHTTPClient(client *http.Client) *Runner {
 	if client == nil {
-		client = &http.Client{Timeout: 30 * time.Second}
+		client = &http.Client{}
 	}
 	r := &Runner{
 		httpClient: client,
@@ -349,6 +352,29 @@ func generateDemoReply(req domain.AgentProcessRequest) string {
 	return "Echo: " + strings.Join(parts, " ")
 }
 
+func shouldApplyOpenAICompatibleCache(cfg GenerateConfig) bool {
+	if !cfg.Store {
+		return false
+	}
+	return !strings.EqualFold(strings.TrimSpace(cfg.ProviderID), ProviderOpenAI)
+}
+
+func applyOpenAICompatibleCacheConfig(payload *openAIChatRequest, cfg GenerateConfig) {
+	if payload == nil || !shouldApplyOpenAICompatibleCache(cfg) {
+		return
+	}
+	payload.Store = true
+	payload.PromptCacheKey = strings.TrimSpace(cfg.PromptCacheKey)
+	payload.PreviousResponseID = strings.TrimSpace(cfg.PreviousResponseID)
+}
+
+func applyReasoningEffort(payload *openAIChatRequest, cfg GenerateConfig) {
+	if payload == nil {
+		return
+	}
+	payload.ReasoningEffort = normalizeReasoningEffort(cfg.ReasoningEffort)
+}
+
 func (r *Runner) generateOpenAICompatibleTurn(ctx context.Context, req domain.AgentProcessRequest, cfg GenerateConfig, tools []ToolDefinition) (TurnResult, error) {
 	apiKey := strings.TrimSpace(cfg.APIKey)
 	if apiKey == "" {
@@ -365,6 +391,8 @@ func (r *Runner) generateOpenAICompatibleTurn(ctx context.Context, req domain.Ag
 		Messages: toOpenAIMessages(req.Input),
 		Tools:    toOpenAITools(tools),
 	}
+	applyReasoningEffort(&payload, cfg)
+	applyOpenAICompatibleCacheConfig(&payload, cfg)
 	if len(payload.Messages) == 0 {
 		return TurnResult{Text: generateDemoReply(req)}, nil
 	}
@@ -462,7 +490,11 @@ func (r *Runner) generateOpenAICompatibleTurn(ctx context.Context, req domain.Ag
 		}
 	}
 
-	return TurnResult{Text: text, ToolCalls: toolCalls}, nil
+	return TurnResult{
+		Text:       text,
+		ToolCalls:  toolCalls,
+		ResponseID: strings.TrimSpace(completion.ID),
+	}, nil
 }
 
 func (r *Runner) generateOpenAICompatibleTurnStream(
@@ -488,6 +520,8 @@ func (r *Runner) generateOpenAICompatibleTurnStream(
 		Tools:    toOpenAITools(tools),
 		Stream:   true,
 	}
+	applyReasoningEffort(&payload, cfg)
+	applyOpenAICompatibleCacheConfig(&payload, cfg)
 	if len(payload.Messages) == 0 {
 		return TurnResult{Text: generateDemoReply(req)}, nil
 	}
@@ -548,13 +582,17 @@ func (r *Runner) generateOpenAICompatibleTurnStream(
 
 	var replyBuilder strings.Builder
 	toolCalls := map[int]*openAIToolCall{}
+	responseID := ""
 	processData := func(data string) error {
-		if data == "[DONE]" {
+		if isSSEControlToken(data) {
 			return nil
 		}
 		var chunk openAIChatStreamResponse
 		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
-			return fmt.Errorf("provider stream chunk is not valid json: %w", err)
+			return fmt.Errorf("provider stream chunk is not valid json: %w; payload=%q", err, truncateText(data, 512))
+		}
+		if id := strings.TrimSpace(chunk.ID); id != "" {
+			responseID = id
 		}
 		if len(chunk.Choices) == 0 {
 			return nil
@@ -595,11 +633,7 @@ func (r *Runner) generateOpenAICompatibleTurnStream(
 	}
 
 	if err := consumeSSEData(resp.Body, processData); err != nil {
-		return TurnResult{}, &RunnerError{
-			Code:    ErrorCodeProviderInvalidReply,
-			Message: "provider stream response is invalid",
-			Err:     err,
-		}
+		return TurnResult{}, mapStreamConsumeError(err)
 	}
 
 	orderedIndexes := make([]int, 0, len(toolCalls))
@@ -633,7 +667,11 @@ func (r *Runner) generateOpenAICompatibleTurnStream(
 		}
 	}
 
-	return TurnResult{Text: reply, ToolCalls: parsedToolCalls}, nil
+	return TurnResult{
+		Text:       reply,
+		ToolCalls:  parsedToolCalls,
+		ResponseID: responseID,
+	}, nil
 }
 
 func (r *Runner) generateCodexCompatibleTurn(ctx context.Context, req domain.AgentProcessRequest, cfg GenerateConfig, tools []ToolDefinition) (TurnResult, error) {
@@ -673,6 +711,9 @@ func (r *Runner) generateCodexCompatibleTurnStream(
 		Store:              cfg.Store,
 		Stream:             true,
 		PromptCacheKey:     strings.TrimSpace(cfg.PromptCacheKey),
+	}
+	if effort := normalizeReasoningEffort(cfg.ReasoningEffort); effort != "" {
+		payload.Reasoning = &codexReasoningConfig{Effort: effort}
 	}
 
 	body, err := json.Marshal(payload)
@@ -736,12 +777,12 @@ func (r *Runner) generateCodexCompatibleTurnStream(
 	responseID := ""
 
 	processData := func(data string) error {
-		if data == "[DONE]" {
+		if isSSEControlToken(data) {
 			return nil
 		}
 		var event codexResponsesStreamEvent
 		if err := json.Unmarshal([]byte(data), &event); err != nil {
-			return fmt.Errorf("provider stream chunk is not valid json: %w", err)
+			return fmt.Errorf("provider stream chunk is not valid json: %w; payload=%q", err, truncateText(data, 512))
 		}
 
 		switch event.Type {
@@ -792,11 +833,7 @@ func (r *Runner) generateCodexCompatibleTurnStream(
 	}
 
 	if err := consumeSSEData(resp.Body, processData); err != nil {
-		return TurnResult{}, &RunnerError{
-			Code:    ErrorCodeProviderInvalidReply,
-			Message: "provider stream response is invalid",
-			Err:     err,
-		}
+		return TurnResult{}, mapStreamConsumeError(err)
 	}
 
 	toolCalls, err := parseCodexToolCalls(rawToolCalls)
@@ -944,11 +981,16 @@ type codexResponsesRequest struct {
 	PreviousResponseID string                    `json:"previous_response_id,omitempty"`
 	Input              []codexResponsesInputItem `json:"input"`
 	Tools              []codexToolDefinition     `json:"tools,omitempty"`
+	Reasoning          *codexReasoningConfig     `json:"reasoning,omitempty"`
 	ToolChoice         string                    `json:"tool_choice,omitempty"`
 	ParallelToolCalls  bool                      `json:"parallel_tool_calls"`
 	Store              bool                      `json:"store"`
 	Stream             bool                      `json:"stream"`
 	PromptCacheKey     string                    `json:"prompt_cache_key,omitempty"`
+}
+
+type codexReasoningConfig struct {
+	Effort string `json:"effort,omitempty"`
 }
 
 type codexResponsesInputItem struct {
@@ -1006,10 +1048,14 @@ type codexResponseFunctionCall struct {
 }
 
 type openAIChatRequest struct {
-	Model    string                 `json:"model"`
-	Messages []openAIMessage        `json:"messages"`
-	Tools    []openAIToolDefinition `json:"tools,omitempty"`
-	Stream   bool                   `json:"stream,omitempty"`
+	Model              string                 `json:"model"`
+	Messages           []openAIMessage        `json:"messages"`
+	Tools              []openAIToolDefinition `json:"tools,omitempty"`
+	ReasoningEffort    string                 `json:"reasoning_effort,omitempty"`
+	Stream             bool                   `json:"stream,omitempty"`
+	Store              bool                   `json:"store,omitempty"`
+	PromptCacheKey     string                 `json:"prompt_cache_key,omitempty"`
+	PreviousResponseID string                 `json:"previous_response_id,omitempty"`
 }
 
 type openAIMessage struct {
@@ -1043,6 +1089,7 @@ type openAIFunctionCall struct {
 }
 
 type openAIChatResponse struct {
+	ID      string `json:"id,omitempty"`
 	Choices []struct {
 		Message struct {
 			Content   json.RawMessage  `json:"content"`
@@ -1052,6 +1099,7 @@ type openAIChatResponse struct {
 }
 
 type openAIChatStreamResponse struct {
+	ID      string `json:"id,omitempty"`
 	Choices []struct {
 		Delta struct {
 			Content   json.RawMessage        `json:"content"`
@@ -1223,6 +1271,21 @@ func metadataString(metadata map[string]interface{}, key string) string {
 	return strings.TrimSpace(text)
 }
 
+func normalizeReasoningEffort(raw string) string {
+	return strings.ToLower(strings.TrimSpace(raw))
+}
+
+func truncateText(text string, limit int) string {
+	if limit <= 0 {
+		return ""
+	}
+	runes := []rune(text)
+	if len(runes) <= limit {
+		return text
+	}
+	return string(runes[:limit]) + "...(truncated)"
+}
+
 func normalizeToolParameters(in map[string]interface{}) map[string]interface{} {
 	if len(in) == 0 {
 		return map[string]interface{}{
@@ -1335,8 +1398,11 @@ func consumeSSEData(reader io.Reader, onData func(string) error) error {
 		if len(dataLines) == 0 {
 			return nil
 		}
-		payload := strings.Join(dataLines, "\n")
+		payload := strings.TrimSpace(strings.Join(dataLines, "\n"))
 		dataLines = dataLines[:0]
+		if payload == "" {
+			return nil
+		}
 		if onData == nil {
 			return nil
 		}
@@ -1367,4 +1433,58 @@ func consumeSSEData(reader io.Reader, onData func(string) error) error {
 		return err
 	}
 	return nil
+}
+
+func isSSEControlToken(data string) bool {
+	token := strings.TrimSpace(data)
+	if token == "" {
+		return true
+	}
+	if strings.EqualFold(token, "[DONE]") {
+		return true
+	}
+	if len(token) < 2 || token[0] != '[' || token[len(token)-1] != ']' {
+		return false
+	}
+	inner := strings.TrimSpace(token[1 : len(token)-1])
+	if inner == "" {
+		return true
+	}
+	for _, r := range inner {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) || unicode.IsSpace(r) || r == '_' || r == '-' || r == '.' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func mapStreamConsumeError(err error) *RunnerError {
+	if isStreamReadTimeout(err) {
+		return &RunnerError{
+			Code:    ErrorCodeProviderRequestFailed,
+			Message: "provider stream request failed",
+			Err:     err,
+		}
+	}
+	return &RunnerError{
+		Code:    ErrorCodeProviderInvalidReply,
+		Message: "provider stream response is invalid",
+		Err:     err,
+	}
+}
+
+func isStreamReadTimeout(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		return true
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return true
+	}
+	msg := strings.ToLower(strings.TrimSpace(err.Error()))
+	return strings.Contains(msg, "client.timeout")
 }

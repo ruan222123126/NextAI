@@ -16,6 +16,7 @@ export function registerModelsCommand(program: Command, client: ApiClient): void
     .option("--api-key <apiKey>")
     .option("--base-url <baseUrl>")
     .option("--enabled <enabled>", "true|false", parseBooleanOption)
+    .option("--reasoning-effort <effort>", "minimal|low|medium|high", parseReasoningEffortOption)
     .option("--timeout-ms <timeoutMS>", ">= 0", parseTimeoutMSOption)
     .option("--header <key:value>", "repeatable custom header", collectHeaderOption, {})
     .option("--model-alias <alias=model>", "repeatable model alias mapping", collectModelAliasOption, {})
@@ -26,6 +27,7 @@ export function registerModelsCommand(program: Command, client: ApiClient): void
           apiKey?: string;
           baseUrl?: string;
           enabled?: boolean;
+          reasoningEffort?: string;
           timeoutMs?: number;
           header?: Record<string, string>;
           modelAlias?: Record<string, string>;
@@ -40,6 +42,9 @@ export function registerModelsCommand(program: Command, client: ApiClient): void
         }
         if (typeof opts.enabled === "boolean") {
           payload.enabled = opts.enabled;
+        }
+        if (typeof opts.reasoningEffort === "string") {
+          payload.reasoning_effort = opts.reasoningEffort;
         }
         if (typeof opts.timeoutMs === "number") {
           payload.timeout_ms = opts.timeoutMs;
@@ -89,6 +94,14 @@ function parseTimeoutMSOption(raw: string): number {
     throw new InvalidArgumentError("timeout-ms must be an integer >= 0");
   }
   return parsed;
+}
+
+function parseReasoningEffortOption(raw: string): string {
+  const normalized = raw.trim().toLowerCase();
+  if (normalized === "minimal" || normalized === "low" || normalized === "medium" || normalized === "high") {
+    return normalized;
+  }
+  throw new InvalidArgumentError("reasoning-effort must be one of: minimal|low|medium|high");
 }
 
 function collectHeaderOption(raw: string, previous: Record<string, string>): Record<string, string> {

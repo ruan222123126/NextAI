@@ -1233,6 +1233,132 @@ describe("web e2e: /shell command sends biz_params.tool", () => {
     }, 4000);
   });
 
+  it("claude Read 工具调用文案展示文件路径", async () => {
+    let processCalled = false;
+    const viewedPath = "/mnt/Files/NextAI/README.md";
+
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const rawURL = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      const url = new URL(rawURL);
+      const method = (init?.method ?? "GET").toUpperCase();
+
+      if (url.pathname === "/models/catalog" && method === "GET") {
+        return jsonResponse({
+          providers: [],
+          provider_types: [],
+          defaults: {},
+          active_llm: {
+            provider_id: "",
+            model: "",
+          },
+        });
+      }
+
+      if (url.pathname === "/chats" && method === "GET") {
+        if (!processCalled) {
+          return jsonResponse([]);
+        }
+        return jsonResponse([
+          {
+            id: "chat-claude-read-1",
+            name: "claude-read",
+            session_id: "session-claude-read",
+            user_id: "user-claude-read",
+            channel: "console",
+            created_at: "2026-02-23T10:00:00Z",
+            updated_at: "2026-02-23T10:00:10Z",
+            meta: {
+              prompt_mode: "claude",
+            },
+          },
+        ]);
+      }
+
+      if (url.pathname === "/agent/process" && method === "POST") {
+        processCalled = true;
+        const sse = [
+          `data: ${JSON.stringify({ type: "tool_call", step: 1, tool_call: { name: "Read", input: { file_path: viewedPath } } })}`,
+          `data: ${JSON.stringify({ type: "tool_result", step: 1, tool_result: { name: "Read", ok: true, summary: "1\\t# NextAI\\n2\\tMonorepo" } })}`,
+          `data: ${JSON.stringify({ type: "assistant_delta", step: 1, delta: "已读取" })}`,
+          `data: ${JSON.stringify({ type: "completed", step: 1, reply: "已读取" })}`,
+          "data: [DONE]",
+          "",
+        ].join("\n\n");
+        return new Response(sse, {
+          status: 200,
+          headers: {
+            "content-type": "text/event-stream",
+          },
+        });
+      }
+
+      if (url.pathname === "/chats/chat-claude-read-1" && method === "GET") {
+        const rawToolCall = JSON.stringify({
+          type: "tool_call",
+          step: 1,
+          tool_call: {
+            name: "Read",
+            input: {
+              file_path: viewedPath,
+            },
+          },
+        });
+        return jsonResponse({
+          messages: [
+            {
+              id: "msg-user",
+              role: "user",
+              type: "message",
+              content: [{ type: "text", text: "阅读 README" }],
+            },
+            {
+              id: "msg-assistant",
+              role: "assistant",
+              type: "message",
+              content: [{ type: "text", text: "已读取" }],
+              metadata: {
+                tool_call_notices: [{ raw: rawToolCall }],
+                tool_order: 1,
+                text_order: 2,
+              },
+            },
+          ],
+        });
+      }
+
+      throw new Error(`unexpected request: ${method} ${url.pathname}`);
+    }) as typeof globalThis.fetch;
+
+    await import("../../src/main.ts");
+
+    const messageInput = document.getElementById("message-input") as HTMLTextAreaElement;
+    messageInput.value = "读 README";
+    messageInput.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+
+    await waitFor(() => processCalled, 4000);
+
+    await waitFor(() => {
+      const assistant = document.querySelector<HTMLLIElement>("#message-list .message.assistant:last-child");
+      if (!assistant) {
+        return false;
+      }
+      const summary = assistant.querySelector<HTMLElement>(".tool-call-summary")?.textContent ?? "";
+      return summary.includes(`查看（${viewedPath}）`) && !summary.includes("1\t# NextAI");
+    }, 4000);
+
+    const chatItemButton = document.querySelector<HTMLButtonElement>("#chat-list .chat-item-btn");
+    chatItemButton?.click();
+
+    await waitFor(() => {
+      const assistant = document.querySelector<HTMLLIElement>("#message-list .message.assistant:last-child");
+      if (!assistant) {
+        return false;
+      }
+      const summary = assistant.querySelector<HTMLElement>(".tool-call-summary")?.textContent ?? "";
+      return summary.includes(`查看（${viewedPath}）`);
+    }, 4000);
+  });
+
   it("历史回放仅有 tool_call 且助手正文存在时显示暂无执行输出", async () => {
     const viewedPath = "/mnt/Files/NextAI/AGENTS.md";
 
@@ -2888,12 +3014,13 @@ describe("web e2e: /shell command sends biz_params.tool", () => {
     await waitFor(() => codexFileLoaded, 4000);
   });
 
-  it("工作区应新增 claude code 提示词卡片并支持打开文件", async () => {
+  it("工作区应新增 claude code 提示词卡片并支持文件夹层层展开", async () => {
     const claudeFilePaths = [
-      "prompts/claude/main.md",
-      "prompts/claude/tool-usage-policy.md",
+      "prompts/claude/claude-code-reverse/tool-adapter-nextai.md",
+      "prompts/claude/claude-code-reverse/results/prompts/system-workflow.prompt.md",
+      "prompts/claude/claude-code-reverse/results/tools/Read.tool.yaml",
     ];
-    const openFilePath = claudeFilePaths[0];
+    const openFilePath = claudeFilePaths[1];
     let claudeFileLoaded = false;
 
     globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -2947,14 +3074,46 @@ describe("web e2e: /shell command sends biz_params.tool", () => {
 
     await waitFor(() => {
       const button = document.querySelector<HTMLButtonElement>('button[data-workspace-action="open-claude"]');
-      return Boolean(button && (button.textContent ?? "").includes("2"));
+      return Boolean(button && (button.textContent ?? "").includes("3"));
     }, 4000);
     const openClaudeButton = document.querySelector<HTMLButtonElement>('button[data-workspace-action="open-claude"]');
     expect(openClaudeButton).not.toBeNull();
-    expect(openClaudeButton?.textContent ?? "").toContain("2");
+    expect(openClaudeButton?.textContent ?? "").toContain("3");
     openClaudeButton?.click();
 
     await waitFor(() => document.getElementById("workspace-level2-claude-view")?.hasAttribute("hidden") === false, 4000);
+    await waitFor(() => document.querySelector('button[data-workspace-claude-folder-toggle="claude-code-reverse"]') !== null, 4000);
+
+    const rootFolderToggle = document.querySelector<HTMLButtonElement>(
+      'button[data-workspace-claude-folder-toggle="claude-code-reverse"]',
+    );
+    expect(rootFolderToggle).not.toBeNull();
+    expect(rootFolderToggle?.getAttribute("aria-expanded")).toBe("true");
+
+    const resultsFolderToggle = document.querySelector<HTMLButtonElement>(
+      'button[data-workspace-claude-folder-toggle="claude-code-reverse/results"]',
+    );
+    expect(resultsFolderToggle).not.toBeNull();
+    expect(resultsFolderToggle?.getAttribute("aria-expanded")).toBe("false");
+    resultsFolderToggle?.click();
+
+    await waitFor(
+      () => document.querySelector<HTMLButtonElement>('button[data-workspace-claude-folder-toggle="claude-code-reverse/results/prompts"]') !== null,
+      4000,
+    );
+    const promptsFolderToggle = document.querySelector<HTMLButtonElement>(
+      'button[data-workspace-claude-folder-toggle="claude-code-reverse/results/prompts"]',
+    );
+    expect(promptsFolderToggle).not.toBeNull();
+    expect(promptsFolderToggle?.getAttribute("aria-expanded")).toBe("false");
+    promptsFolderToggle?.click();
+
+    await waitFor(
+      () => document.querySelector<HTMLButtonElement>(`button[data-workspace-open="${claudeFilePaths[0]}"]`) !== null,
+      4000,
+    );
+    const rootFileButton = document.querySelector<HTMLButtonElement>(`button[data-workspace-open="${claudeFilePaths[0]}"]`);
+    expect(rootFileButton).not.toBeNull();
 
     const openFileButton = document.querySelector<HTMLButtonElement>(`button[data-workspace-open="${openFilePath}"]`);
     expect(openFileButton).not.toBeNull();

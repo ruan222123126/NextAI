@@ -747,6 +747,7 @@ func normalizeProviderSetting(setting *repo.ProviderSetting) {
 	setting.DisplayName = strings.TrimSpace(setting.DisplayName)
 	setting.APIKey = strings.TrimSpace(setting.APIKey)
 	setting.BaseURL = strings.TrimSpace(setting.BaseURL)
+	setting.ReasoningEffort = strings.ToLower(strings.TrimSpace(setting.ReasoningEffort))
 	if setting.Enabled == nil {
 		enabled := true
 		setting.Enabled = &enabled

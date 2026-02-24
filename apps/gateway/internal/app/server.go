@@ -31,6 +31,7 @@ import (
 	cronservice "nextai/apps/gateway/internal/service/cron"
 	modelservice "nextai/apps/gateway/internal/service/model"
 	"nextai/apps/gateway/internal/service/ports"
+	selfopsservice "nextai/apps/gateway/internal/service/selfops"
 	systempromptservice "nextai/apps/gateway/internal/service/systemprompt"
 	workspaceservice "nextai/apps/gateway/internal/service/workspace"
 )
@@ -64,13 +65,12 @@ const (
 	aiToolsGuideLegacyV0RelativePath     = "docs/AI/AGENTS.md"
 	aiToolsGuideLegacyV1RelativePath     = "docs/AI/ai-tools.md"
 	aiToolsGuideLegacyV2RelativePath     = "docs/ai-tools.md"
-	claudeBasePromptRelativePath         = "prompts/claude/main.md"
-	claudeDoingTasksRelativePath         = "prompts/claude/doing-tasks.md"
-	claudeExecutionCareRelativePath      = "prompts/claude/executing-actions-with-care.md"
-	claudeToolUsageRelativePath          = "prompts/claude/tool-usage-policy.md"
-	claudeToneStyleRelativePath          = "prompts/claude/tone-and-style.md"
-	claudeLocalPolicyRelativePath        = aiToolsGuideRelativePath
-	claudeToolGuideRelativePath          = aiToolsGuideLegacyRelativePath
+	claudeReversePromptRootRelativePath  = "prompts/claude/claude-code-reverse/results/prompts"
+	claudeIdentityPromptRelativePath     = claudeReversePromptRootRelativePath + "/system-identity.prompt.md"
+	claudeWorkflowPromptRelativePath     = claudeReversePromptRootRelativePath + "/system-workflow.prompt.md"
+	claudeReminderStartRelativePath      = claudeReversePromptRootRelativePath + "/system-reminder-start.prompt.md"
+	claudeReminderEndRelativePath        = claudeReversePromptRootRelativePath + "/system-reminder-end.prompt.md"
+	claudeNextAIToolAdapterRelativePath  = "prompts/claude/claude-code-reverse/tool-adapter-nextai.md"
 	codexBasePromptRelativePath          = "prompts/codex/codex-rs/core/prompt.md"
 	codexOrchestratorRelativePath        = "prompts/codex/codex-rs/core/templates/agents/orchestrator.md"
 	codexModelTemplateRelativePath       = "prompts/codex/codex-rs/core/templates/model_instructions/gpt-5.2-codex_instructions_template.md"
@@ -167,6 +167,7 @@ type Server struct {
 	agentService        *agentservice.Service
 	cronService         *cronservice.Service
 	modelService        *modelservice.Service
+	selfOpsService      *selfopsservice.Service
 	systemPromptService *systempromptservice.Service
 	workspaceService    *workspaceservice.Service
 	codexPromptResolver codexpromptservice.CodexInstructionResolver
@@ -239,6 +240,7 @@ func NewServer(cfg config.Config) (*Server, error) {
 	srv.agentService = srv.newAgentService()
 	srv.cronService = srv.newCronService()
 	srv.modelService = srv.newModelService()
+	srv.selfOpsService = srv.newSelfOpsService()
 	srv.systemPromptService = srv.newSystemPromptService()
 	srv.workspaceService = srv.newWorkspaceService()
 	srv.startCronScheduler()
@@ -317,8 +319,14 @@ func (s *Server) Handler() http.Handler {
 				GetChat:              s.getChat,
 				UpdateChat:           s.updateChat,
 				DeleteChat:           s.deleteChat,
+				ClaudeMessages:       s.claudeMessages,
+				ClaudeCountTokens:    s.claudeCountTokens,
 				ProcessAgent:         s.processAgent,
 				GetAgentSystemLayers: s.getAgentSystemLayers,
+				BootstrapSession:     s.bootstrapSession,
+				SetSessionModel:      s.setSessionModel,
+				PreviewMutation:      s.previewMutation,
+				ApplyMutation:        s.applyMutation,
 				ProcessQQInbound:     s.processQQInbound,
 				GetQQInboundState:    s.getQQInboundState,
 			},

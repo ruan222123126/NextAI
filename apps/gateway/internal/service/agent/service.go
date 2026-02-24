@@ -116,7 +116,11 @@ func (s *Service) Process(
 				Input: safeMap(params.RequestedToolCall.Input),
 			},
 		})
-		toolReply, err := s.deps.ToolRuntime.ExecuteToolCall(params.RequestedToolCall.Name, params.RequestedToolCall.Input)
+		toolInput := safeMap(params.RequestedToolCall.Input)
+		if strings.EqualFold(strings.TrimSpace(params.RequestedToolCall.Name), "self_ops") {
+			toolInput = enrichSelfOpsToolInput(toolInput, params.Request)
+		}
+		toolReply, err := s.deps.ToolRuntime.ExecuteToolCall(params.PromptMode, params.RequestedToolCall.Name, toolInput)
 		if err != nil {
 			status, code, message := s.deps.ErrorMapper.MapToolError(err)
 			return ProcessResult{}, &ProcessError{Status: status, Code: code, Message: message}
@@ -152,7 +156,7 @@ func (s *Service) Process(
 			runErr error
 		)
 		if params.Streaming {
-			turn, runErr = s.deps.Runner.GenerateTurnStream(ctx, turnReq, generateConfig, s.deps.ToolRuntime.ListToolDefinitions(), func(delta string) {
+			turn, runErr = s.deps.Runner.GenerateTurnStream(ctx, turnReq, generateConfig, s.deps.ToolRuntime.ListToolDefinitions(params.PromptMode), func(delta string) {
 				if delta == "" {
 					return
 				}
@@ -164,7 +168,7 @@ func (s *Service) Process(
 				})
 			})
 		} else {
-			turn, runErr = s.deps.Runner.GenerateTurn(ctx, turnReq, generateConfig, s.deps.ToolRuntime.ListToolDefinitions())
+			turn, runErr = s.deps.Runner.GenerateTurn(ctx, turnReq, generateConfig, s.deps.ToolRuntime.ListToolDefinitions(params.PromptMode))
 		}
 		if runErr != nil {
 			if recoveredCall, recovered := s.deps.ToolRuntime.RecoverInvalidProviderToolCall(runErr, step); recovered {
@@ -217,7 +221,12 @@ func (s *Service) Process(
 				continue
 			}
 			status, code, message := s.deps.ErrorMapper.MapRunnerError(runErr)
-			return ProcessResult{}, &ProcessError{Status: status, Code: code, Message: message}
+			return ProcessResult{}, &ProcessError{
+				Status:  status,
+				Code:    code,
+				Message: message,
+				Details: buildRunnerErrorDetails(runErr),
+			}
 		}
 		if responseID := strings.TrimSpace(turn.ResponseID); responseID != "" {
 			providerResponseID = responseID
@@ -254,6 +263,9 @@ func (s *Service) Process(
 		for _, call := range turn.ToolCalls {
 			execName := normalizeProviderToolName(call.Name)
 			execInput := normalizeProviderToolInput(execName, strings.TrimSpace(params.PromptMode), safeMap(call.Arguments))
+			if execName == "self_ops" {
+				execInput = enrichSelfOpsToolInput(execInput, params.Request)
+			}
 			appendEvent(domain.AgentEvent{
 				Type: "tool_call",
 				Step: step,
@@ -262,7 +274,7 @@ func (s *Service) Process(
 					Input: safeMap(call.Arguments),
 				},
 			})
-			toolReply, toolErr := s.deps.ToolRuntime.ExecuteToolCall(execName, execInput)
+			toolReply, toolErr := s.deps.ToolRuntime.ExecuteToolCall(params.PromptMode, execName, execInput)
 			if toolErr != nil {
 				toolReply = s.deps.ToolRuntime.FormatToolErrorFeedback(toolErr)
 				appendEvent(domain.AgentEvent{
@@ -365,6 +377,31 @@ func cloneAgentInputMessages(input []domain.AgentInputMessage) []domain.AgentInp
 		out = append(out, cloned)
 	}
 	return out
+}
+
+func buildRunnerErrorDetails(err error) interface{} {
+	if err == nil {
+		return nil
+	}
+	var runnerErr *runner.RunnerError
+	if errors.As(err, &runnerErr) && runnerErr != nil {
+		details := map[string]interface{}{}
+		if msg := strings.TrimSpace(runnerErr.Message); msg != "" {
+			details["runner_message"] = msg
+		}
+		if runnerErr.Err != nil {
+			if cause := strings.TrimSpace(runnerErr.Err.Error()); cause != "" {
+				details["cause"] = cause
+			}
+		}
+		if len(details) > 0 {
+			return details
+		}
+	}
+	if cause := strings.TrimSpace(err.Error()); cause != "" {
+		return map[string]interface{}{"cause": cause}
+	}
+	return nil
 }
 
 func toAgentToolCallMetadata(calls []runner.ToolCall) []map[string]interface{} {
@@ -702,4 +739,29 @@ func parsePositiveIntFromAny(raw interface{}) (int, bool) {
 		}
 	}
 	return 0, false
+}
+
+func enrichSelfOpsToolInput(input map[string]interface{}, req domain.AgentProcessRequest) map[string]interface{} {
+	out := safeMap(input)
+	if strings.TrimSpace(stringifyToolInputValue(out["session_id"])) == "" && strings.TrimSpace(req.SessionID) != "" {
+		out["session_id"] = req.SessionID
+	}
+	if strings.TrimSpace(stringifyToolInputValue(out["user_id"])) == "" && strings.TrimSpace(req.UserID) != "" {
+		out["user_id"] = req.UserID
+	}
+	if strings.TrimSpace(stringifyToolInputValue(out["channel"])) == "" && strings.TrimSpace(req.Channel) != "" {
+		out["channel"] = req.Channel
+	}
+	return out
+}
+
+func stringifyToolInputValue(raw interface{}) string {
+	switch value := raw.(type) {
+	case string:
+		return value
+	case fmt.Stringer:
+		return value.String()
+	default:
+		return ""
+	}
 }

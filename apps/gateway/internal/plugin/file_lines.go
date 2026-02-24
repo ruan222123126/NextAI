@@ -206,21 +206,25 @@ func (t *EditFileLinesTool) editOne(input map[string]interface{}) (map[string]in
 	raw, err := os.ReadFile(absPath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, fmt.Errorf("%w: %s", ErrFileLinesToolFileNotFound, relPath)
+			raw = []byte{}
+		} else {
+			return nil, fmt.Errorf("%w: %v", ErrFileLinesToolFileRead, err)
 		}
-		return nil, fmt.Errorf("%w: %v", ErrFileLinesToolFileRead, err)
 	}
 	lines, hadTrailingNewline := splitFileLines(string(raw))
 	total := len(lines)
-	if total == 0 || start > total || end > total {
-		return nil, fmt.Errorf("%w: path=%s total=%d range=%d-%d", ErrFileLinesToolOutOfRange, relPath, total, start, end)
-	}
-
 	replLines, _ := splitFileLines(content)
-	updatedLines := make([]string, 0, len(lines)-((end-start)+1)+len(replLines))
-	updatedLines = append(updatedLines, lines[:start-1]...)
-	updatedLines = append(updatedLines, replLines...)
-	updatedLines = append(updatedLines, lines[end:]...)
+	updatedLines := make([]string, 0, max(len(lines), len(replLines)))
+	if total == 0 {
+		updatedLines = append(updatedLines, replLines...)
+	} else {
+		if start > total || end > total {
+			return nil, fmt.Errorf("%w: path=%s total=%d range=%d-%d", ErrFileLinesToolOutOfRange, relPath, total, start, end)
+		}
+		updatedLines = append(updatedLines, lines[:start-1]...)
+		updatedLines = append(updatedLines, replLines...)
+		updatedLines = append(updatedLines, lines[end:]...)
+	}
 
 	output := strings.Join(updatedLines, "\n")
 	if hadTrailingNewline && len(updatedLines) > 0 {
@@ -231,11 +235,17 @@ func (t *EditFileLinesTool) editOne(input map[string]interface{}) (map[string]in
 	if info, statErr := os.Stat(absPath); statErr == nil {
 		perm = info.Mode().Perm()
 	}
+	if err := os.MkdirAll(filepath.Dir(absPath), 0o755); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrFileLinesToolFileWrite, err)
+	}
 	if err := os.WriteFile(absPath, []byte(output), perm); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrFileLinesToolFileWrite, err)
 	}
 
-	changed := end - start + 1
+	changed := 0
+	if total > 0 {
+		changed = end - start + 1
+	}
 	text := fmt.Sprintf("edit %s [%d-%d] replaced %d line(s).", relPath, start, end, changed)
 	return map[string]interface{}{
 		"ok":                true,

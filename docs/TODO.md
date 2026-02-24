@@ -1,6 +1,6 @@
 # NextAI TODO
 
-更新时间：2026-02-23 17:50:32 +0800
+更新时间：2026-02-23 19:51:05 +0800
 
 ## 执行约定
 - 接手前必读本文件与 `/home/ruan/.codex/handoff/latest.md`
@@ -31,6 +31,28 @@
 ## 6. 近期完成项（摘要）
 
 ### 2026-02-23
+- Claude 提示词全量补齐：将 `/mnt/Files/claude-code-system-prompts` 完整镜像到 `prompts/claude/claude-code-system-prompts/`（排除 `.git`），并保留源码分类（`system-prompts/`、`tools/`、根文档）。
+- Claude 运行时核心层升级为完整版：`prompts/claude/main.md`、`prompts/claude/doing-tasks.md`、`prompts/claude/executing-actions-with-care.md`、`prompts/claude/tool-usage-policy.md`、`prompts/claude/tone-and-style.md` 由源仓库对应 `system-prompts/system-prompt-*.md` 直拷覆盖。
+- 同步校验通过：源目录非 `.git` 文件数 `161`，目标镜像文件数 `161`；确保“按 codex 一样的来源分目录分类 + 完整复制”同时满足。
+- Web 工作区 Claude 卡片展示对齐 Codex：`apps/web/src/main/workspace-domain.ts` 为 `prompts/claude/*` 新增目录树数据结构与渲染链路（文件夹可折叠、同款文件按钮样式、根文件与子目录混合展示），并独立维护 `workspaceClaudeExpandedFolders`，避免与 Codex 展开状态互相污染。
+- Web 事件与模板同步：`apps/web/src/main.ts` 新增 `toggleWorkspaceClaudeFolder` 事件分支与状态字段；`apps/web/src/index.html` 将 `workspace-claude-body` 容器改为与 Codex 一致的树形列表样式类。
+- Web e2e 同步增强：`apps/web/test/e2e/web-shell-tool-flow.test.ts` 的 Claude 卡片用例升级为“文件夹层层展开”场景，新增 `data-workspace-claude-folder-toggle` 断言并覆盖根文件可见性。
+- 验证通过：`pnpm -C apps/web exec tsc -p tsconfig.json --noEmit`、`pnpm -C apps/web exec vitest run test/e2e/web-shell-tool-flow.test.ts --testNamePattern="工作区应新增 codex 提示词卡片并支持文件夹层层展开|工作区应新增 claude code 提示词卡片并支持文件夹层层展开"`。
+- Provider API 配置新增思考强度：`apps/gateway/internal/repo/store.go`、`apps/gateway/internal/service/model/service.go`、`apps/gateway/internal/app/server_admin.go`、`apps/gateway/internal/app/server_agent.go` 新增 `reasoning_effort` 配置透传与校验（支持 `minimal|low|medium|high`，仅 OpenAI/Codex 兼容链路生效）。
+- Runner 请求透传补齐：`apps/gateway/internal/runner/runner.go` 在 OpenAI-compatible `POST /chat/completions` 透传 `reasoning_effort`，在 Codex-compatible `POST /responses` 透传 `reasoning.effort`。
+- Web/CLI 配置入口补齐：`apps/web/src/index.html`、`apps/web/src/main.ts`、`apps/web/src/main/model-domain.ts` 新增“思考强度”表单项并按 provider 类型显隐；`apps/cli/src/commands/models.ts` 新增 `--reasoning-effort`。
+- 契约与文档同步：`packages/contracts/openapi/openapi.yaml`、`tests/contract/openapi.lint.mjs`、`docs/contracts.md` 增加 `reasoning_effort` 字段说明与约束。
+- 回归补测：`apps/gateway/internal/runner/runner_test.go`、`apps/gateway/internal/service/model/service_test.go`、`apps/gateway/internal/repo/store_test.go`、`apps/gateway/internal/app/server_test.go`、`apps/gateway/internal/app/contract_regression_test.go`、`apps/cli/test/e2e/smoke.test.ts` 补充 `reasoning_effort` 相关断言。
+- 验证通过：`cd apps/gateway && go test ./internal/runner -run 'TestGenerateReplyOpenAISuccess|TestGenerateReplyCodexCompatibleSuccess' -count=1`、`cd apps/gateway && go test ./internal/service/model -run 'TestConfigureProviderSupportsReasoningEffort|TestConfigureProviderRejectsInvalidReasoningEffort|TestConfigureProviderSupportsStoreFlag|TestConfigureProviderRejectsInvalidTimeout' -count=1`、`cd apps/gateway && go test ./internal/repo -run 'TestLoadKeepsCustomProviderAndActiveProvider' -count=1`、`cd apps/gateway && go test ./internal/app -run 'TestConfigureProviderExposesModelAliasesInProviderInfo|TestContractRegressionModelsEndpointErrors' -count=1`、`cd apps/gateway && go test ./internal/service/workspace -run TestNope -count=1`、`pnpm -C apps/web exec tsc -p tsconfig.json --noEmit`、`pnpm -C apps/cli exec tsc -p tsconfig.json --noEmit`、`pnpm -C apps/cli exec vitest run test/e2e/smoke.test.ts --testNamePattern='covers models alias/custom-provider config with chat chain'`、`pnpm -C apps/web exec vitest run test/e2e/web-active-model-chat-flow.test.ts --testNamePattern='adding codex-compatible provider uses codex-compatible id and type'`、`pnpm --filter @nextai/tests-contract run lint`、`pnpm --filter @nextai/tests-contract run test`。
+- OpenAI-compatible 缓存链路补齐：`apps/gateway/internal/runner/runner.go` 在 `store=true` 且 provider 非内置 `openai` 时，向 `/chat/completions` 透传 `store`、`prompt_cache_key`、`previous_response_id`；并解析 `id` 回传为 `TurnResult.ResponseID`（同步支持流式 chunk 的 `id` 捕获）。
+- OpenAI-compatible 跨轮续接落地：`apps/gateway/internal/app/server_test.go` 新增 `TestProcessAgentOpenAICompatibleUsesPromptCacheAndPreviousResponseID`，验证同 session 下二次请求会携带首轮 `provider_response_id` 到 `previous_response_id`。
+- Web 模型配置开关放开：`apps/web/src/main/model-domain.ts` 将 `providerSupportsStore` 从仅 `codex-compatible` 扩展到 `openai-compatible`，并支持按 provider 实例类型回填（覆盖编辑 `my-compat` 这类自定义 ID 场景）。
+- Web e2e 回归补测：`apps/web/test/e2e/web-active-model-chat-flow.test.ts` 的 openai-compatible 新增 provider 用例增加 `store` 开关显隐与 payload 断言，确保前端确实发出 `store=true`。
+- Gateway Runner 回归补测：`apps/gateway/internal/runner/runner_test.go` 新增 openai-compatible 缓存字段透传、内置 openai 不透传缓存字段、流式 `ResponseID` 捕获三条用例。
+- 验证通过：`cd apps/gateway && go test ./internal/runner -run 'TestGenerateTurnOpenAICompatibleWithStoreIncludesCacheFields|TestGenerateTurnOpenAIBuiltinSkipsCacheFields|TestGenerateTurnStreamOpenAICompatibleWithStoreCapturesResponseID' -count=1`、`cd apps/gateway && go test ./internal/app -run 'TestProcessAgentOpenAICompatibleUsesPromptCacheAndPreviousResponseID|TestProcessAgentCodexCompatibleUsesPromptCacheAndPreviousResponseID' -count=1`、`pnpm -C apps/web exec vitest run test/e2e/web-active-model-chat-flow.test.ts --testNamePattern='adding openai-compatible provider does not overwrite existing same-type config|adding codex-compatible provider uses codex-compatible id and type'`、`pnpm -C apps/web exec tsc -p tsconfig.json --noEmit`。
+- Gateway codex v1 注入本地身份层：`apps/gateway/internal/app/server_admin.go` 调整 `buildCodexSystemLayers`，无论 `NEXTAI_ENABLE_PROMPT_TEMPLATES` 是否开启，`prompt_mode=codex` 且 `mode_variant=codex_v1` 均追加 `codex_local_policy_system`（`prompts/AGENTS.md`）。
+- Codex v1 断言与契约同步：`apps/gateway/internal/app/server_test.go` 更新 v1 system layer 断言（新增本地策略层存在性检查），`docs/contracts.md` 更新 codex_v1 注入规则说明。
+- 验证通过：`cd apps/gateway && go test ./internal/app -run 'TestBuildSystemLayersForCodexModeUsesSingleLayerWhenPromptTemplatesDisabled|TestBuildSystemLayersForCodexModeIncludesTemplateLayersWhenFeatureEnabled|TestGetAgentSystemLayersSupportsCodexModeQuery' -count=1`，`cd apps/gateway && go test ./internal/app -run 'Codex|codex' -count=1`。
 - 工作区分批提交完成：按 Gateway/Web/Prompts/TODO 四批提交 `3471ad3`、`2e02a0f`、`0dba6c2`、`4985eb6`，本地工作区已清空。
 - 远端同步完成：执行 `git push origin refactor/gateway-stage1-transport`，分支已推进到 `4985eb6`。
 - PR 已创建：`#22 feat: codex orchestration + web modularization refresh`（`https://github.com/ruan222123126/NextAI/pull/22`）。

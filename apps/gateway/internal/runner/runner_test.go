@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"nextai/apps/gateway/internal/domain"
 	"nextai/apps/gateway/internal/provider"
@@ -31,10 +32,22 @@ func TestGenerateReplyDemo(t *testing.T) {
 	}
 }
 
+func TestNewRunnerUsesNoGlobalHTTPTimeout(t *testing.T) {
+	t.Parallel()
+	r := New()
+	if r.httpClient == nil {
+		t.Fatal("httpClient should not be nil")
+	}
+	if r.httpClient.Timeout != 0 {
+		t.Fatalf("expected no global timeout for streaming, got=%s", r.httpClient.Timeout)
+	}
+}
+
 func TestGenerateReplyOpenAISuccess(t *testing.T) {
 	t.Parallel()
 	var auth string
 	var model string
+	var reasoningEffort string
 
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		auth = r.Header.Get("Authorization")
@@ -47,6 +60,7 @@ func TestGenerateReplyOpenAISuccess(t *testing.T) {
 			t.Fatalf("decode request: %v", err)
 		}
 		model, _ = req["model"].(string)
+		reasoningEffort, _ = req["reasoning_effort"].(string)
 		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"hello from provider"}}]}`))
 	}))
 	defer mock.Close()
@@ -59,10 +73,11 @@ func TestGenerateReplyOpenAISuccess(t *testing.T) {
 			Content: []domain.RuntimeContent{{Type: "text", Text: "hello"}},
 		}},
 	}, GenerateConfig{
-		ProviderID: ProviderOpenAI,
-		Model:      "gpt-4o-mini",
-		APIKey:     "sk-test",
-		BaseURL:    mock.URL,
+		ProviderID:      ProviderOpenAI,
+		Model:           "gpt-4o-mini",
+		APIKey:          "sk-test",
+		BaseURL:         mock.URL,
+		ReasoningEffort: "low",
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -75,6 +90,9 @@ func TestGenerateReplyOpenAISuccess(t *testing.T) {
 	}
 	if model != "gpt-4o-mini" {
 		t.Fatalf("unexpected model: %s", model)
+	}
+	if reasoningEffort != "low" {
+		t.Fatalf("unexpected reasoning_effort: %q", reasoningEffort)
 	}
 }
 
@@ -166,12 +184,175 @@ func TestGenerateReplyCustomProviderWithAdapter(t *testing.T) {
 	}
 }
 
+func TestGenerateTurnOpenAICompatibleWithStoreIncludesCacheFields(t *testing.T) {
+	t.Parallel()
+	var store bool
+	var promptCacheKey string
+	var previousResponseID string
+
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/chat/completions" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		var req map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		store, _ = req["store"].(bool)
+		promptCacheKey, _ = req["prompt_cache_key"].(string)
+		previousResponseID, _ = req["previous_response_id"].(string)
+		_, _ = w.Write([]byte(`{"id":"chatcmpl_1","choices":[{"message":{"content":"hello from compat cache"}}]}`))
+	}))
+	defer mock.Close()
+
+	r := NewWithHTTPClient(mock.Client())
+	turn, err := r.GenerateTurn(context.Background(), domain.AgentProcessRequest{
+		Input: []domain.AgentInputMessage{{
+			Role:    "user",
+			Type:    "message",
+			Content: []domain.RuntimeContent{{Type: "text", Text: "hello"}},
+		}},
+	}, GenerateConfig{
+		ProviderID:         "openai-compatible",
+		Model:              "ark-code-latest",
+		APIKey:             "sk-test",
+		BaseURL:            mock.URL,
+		Store:              true,
+		PromptCacheKey:     "session-1",
+		PreviousResponseID: "resp_prev",
+	}, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if strings.TrimSpace(turn.Text) != "hello from compat cache" {
+		t.Fatalf("unexpected reply: %q", turn.Text)
+	}
+	if turn.ResponseID != "chatcmpl_1" {
+		t.Fatalf("unexpected response id: %q", turn.ResponseID)
+	}
+	if !store {
+		t.Fatalf("expected store=true for openai-compatible request")
+	}
+	if promptCacheKey != "session-1" {
+		t.Fatalf("unexpected prompt_cache_key: %q", promptCacheKey)
+	}
+	if previousResponseID != "resp_prev" {
+		t.Fatalf("unexpected previous_response_id: %q", previousResponseID)
+	}
+}
+
+func TestGenerateTurnOpenAIBuiltinSkipsCacheFields(t *testing.T) {
+	t.Parallel()
+	var req map[string]interface{}
+
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/chat/completions" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		_, _ = w.Write([]byte(`{"id":"chatcmpl_openai","choices":[{"message":{"content":"hello openai"}}]}`))
+	}))
+	defer mock.Close()
+
+	r := NewWithHTTPClient(mock.Client())
+	turn, err := r.GenerateTurn(context.Background(), domain.AgentProcessRequest{
+		Input: []domain.AgentInputMessage{{
+			Role:    "user",
+			Type:    "message",
+			Content: []domain.RuntimeContent{{Type: "text", Text: "hello"}},
+		}},
+	}, GenerateConfig{
+		ProviderID:         ProviderOpenAI,
+		Model:              "gpt-4o-mini",
+		APIKey:             "sk-test",
+		BaseURL:            mock.URL,
+		Store:              true,
+		PromptCacheKey:     "session-1",
+		PreviousResponseID: "resp_prev",
+	}, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if turn.ResponseID != "chatcmpl_openai" {
+		t.Fatalf("unexpected response id: %q", turn.ResponseID)
+	}
+	if _, ok := req["store"]; ok {
+		t.Fatalf("builtin openai request should not carry store, got=%#v", req["store"])
+	}
+	if _, ok := req["prompt_cache_key"]; ok {
+		t.Fatalf("builtin openai request should not carry prompt_cache_key, got=%#v", req["prompt_cache_key"])
+	}
+	if _, ok := req["previous_response_id"]; ok {
+		t.Fatalf("builtin openai request should not carry previous_response_id, got=%#v", req["previous_response_id"])
+	}
+}
+
+func TestGenerateTurnStreamOpenAICompatibleWithStoreCapturesResponseID(t *testing.T) {
+	t.Parallel()
+	var requestBody map[string]interface{}
+
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/chat/completions" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		if err := json.NewDecoder(r.Body).Decode(&requestBody); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprint(w, "data: {\"id\":\"chatcmpl_stream_1\",\"choices\":[{\"delta\":{\"content\":\"hello \"}}]}\n\n")
+		_, _ = fmt.Fprint(w, "data: {\"id\":\"chatcmpl_stream_1\",\"choices\":[{\"delta\":{\"content\":\"stream\"}}]}\n\n")
+		_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer mock.Close()
+
+	r := NewWithHTTPClient(mock.Client())
+	turn, err := r.GenerateTurnStream(context.Background(), domain.AgentProcessRequest{
+		Input: []domain.AgentInputMessage{{
+			Role:    "user",
+			Type:    "message",
+			Content: []domain.RuntimeContent{{Type: "text", Text: "hello"}},
+		}},
+	}, GenerateConfig{
+		ProviderID:         "openai-compatible",
+		Model:              "ark-code-latest",
+		APIKey:             "sk-test",
+		BaseURL:            mock.URL,
+		Store:              true,
+		PromptCacheKey:     "session-stream",
+		PreviousResponseID: "resp_prev",
+	}, nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if turn.ResponseID != "chatcmpl_stream_1" {
+		t.Fatalf("unexpected response id: %q", turn.ResponseID)
+	}
+	if strings.TrimSpace(turn.Text) != "hello stream" {
+		t.Fatalf("unexpected reply: %q", turn.Text)
+	}
+	if store, _ := requestBody["store"].(bool); !store {
+		t.Fatalf("expected stream request store=true, got=%#v", requestBody["store"])
+	}
+	if got, _ := requestBody["prompt_cache_key"].(string); got != "session-stream" {
+		t.Fatalf("unexpected stream prompt_cache_key: %q", got)
+	}
+	if got, _ := requestBody["previous_response_id"].(string); got != "resp_prev" {
+		t.Fatalf("unexpected stream previous_response_id: %q", got)
+	}
+}
+
 func TestGenerateReplyCodexCompatibleSuccess(t *testing.T) {
 	t.Parallel()
 	var auth string
 	var model string
 	var stream bool
 	var store bool
+	var reasoningEffort string
 	var promptCacheKey string
 	var previousResponseID string
 
@@ -188,6 +369,9 @@ func TestGenerateReplyCodexCompatibleSuccess(t *testing.T) {
 		model, _ = req["model"].(string)
 		stream, _ = req["stream"].(bool)
 		store, _ = req["store"].(bool)
+		if rawReasoning, ok := req["reasoning"].(map[string]interface{}); ok {
+			reasoningEffort, _ = rawReasoning["effort"].(string)
+		}
 		promptCacheKey, _ = req["prompt_cache_key"].(string)
 		previousResponseID, _ = req["previous_response_id"].(string)
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -210,6 +394,7 @@ func TestGenerateReplyCodexCompatibleSuccess(t *testing.T) {
 		Model:              "gpt-5-codex",
 		APIKey:             "sk-test",
 		BaseURL:            mock.URL,
+		ReasoningEffort:    "high",
 		Store:              true,
 		PromptCacheKey:     "session-1",
 		PreviousResponseID: "resp_prev",
@@ -231,6 +416,9 @@ func TestGenerateReplyCodexCompatibleSuccess(t *testing.T) {
 	}
 	if !store {
 		t.Fatalf("expected store=true for codex-compatible request")
+	}
+	if reasoningEffort != "high" {
+		t.Fatalf("expected reasoning.effort=high for codex-compatible request, got=%q", reasoningEffort)
 	}
 	if promptCacheKey != "session-1" {
 		t.Fatalf("unexpected prompt_cache_key: %q", promptCacheKey)
@@ -587,6 +775,76 @@ func TestGenerateTurnStreamOpenAISendsNativeDeltas(t *testing.T) {
 	}
 }
 
+func TestGenerateTurnStreamOpenAIIgnoresEmptyDataHeartbeat(t *testing.T) {
+	t.Parallel()
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/chat/completions" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprint(w, "data:\n\n")
+		_, _ = fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n")
+		_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer mock.Close()
+
+	r := NewWithHTTPClient(mock.Client())
+	turn, err := r.GenerateTurnStream(context.Background(), domain.AgentProcessRequest{
+		Input: []domain.AgentInputMessage{{
+			Role:    "user",
+			Type:    "message",
+			Content: []domain.RuntimeContent{{Type: "text", Text: "heartbeat test"}},
+		}},
+	}, GenerateConfig{
+		ProviderID: ProviderOpenAI,
+		Model:      "gpt-4o-mini",
+		APIKey:     "sk-test",
+		BaseURL:    mock.URL,
+	}, nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if turn.Text != "ok" {
+		t.Fatalf("unexpected turn text: %q", turn.Text)
+	}
+}
+
+func TestGenerateTurnStreamOpenAIIgnoresBracketControlToken(t *testing.T) {
+	t.Parallel()
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/chat/completions" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprint(w, "data: [PING]\n\n")
+		_, _ = fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n")
+		_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer mock.Close()
+
+	r := NewWithHTTPClient(mock.Client())
+	turn, err := r.GenerateTurnStream(context.Background(), domain.AgentProcessRequest{
+		Input: []domain.AgentInputMessage{{
+			Role:    "user",
+			Type:    "message",
+			Content: []domain.RuntimeContent{{Type: "text", Text: "control token test"}},
+		}},
+	}, GenerateConfig{
+		ProviderID: ProviderOpenAI,
+		Model:      "gpt-4o-mini",
+		APIKey:     "sk-test",
+		BaseURL:    mock.URL,
+	}, nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if turn.Text != "ok" {
+		t.Fatalf("unexpected turn text: %q", turn.Text)
+	}
+}
+
 func TestGenerateTurnStreamOpenAIAggregatesToolCalls(t *testing.T) {
 	t.Parallel()
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -629,6 +887,36 @@ func TestGenerateTurnStreamOpenAIAggregatesToolCalls(t *testing.T) {
 	if got := turn.ToolCalls[0].Arguments["command"]; got != "echo hi" {
 		t.Fatalf("unexpected tool argument command: %#v", got)
 	}
+}
+
+func TestGenerateTurnStreamOpenAITimeoutMappedToRequestFailed(t *testing.T) {
+	t.Parallel()
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/chat/completions" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n")
+		time.Sleep(120 * time.Millisecond)
+		_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer mock.Close()
+
+	r := NewWithHTTPClient(&http.Client{Timeout: 50 * time.Millisecond})
+	_, err := r.GenerateTurnStream(context.Background(), domain.AgentProcessRequest{
+		Input: []domain.AgentInputMessage{{
+			Role:    "user",
+			Type:    "message",
+			Content: []domain.RuntimeContent{{Type: "text", Text: "timeout test"}},
+		}},
+	}, GenerateConfig{
+		ProviderID: ProviderOpenAI,
+		Model:      "gpt-4o-mini",
+		APIKey:     "sk-test",
+		BaseURL:    mock.URL,
+	}, nil, nil)
+	assertRunnerCode(t, err, ErrorCodeProviderRequestFailed)
 }
 
 func TestGenerateTurnStreamCodexCompatibleFallsBackToMessageOutputItem(t *testing.T) {
