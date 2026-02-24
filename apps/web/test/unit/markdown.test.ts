@@ -109,7 +109,7 @@ describe("renderMarkdownToFragment", () => {
         "E=BLv",
         "\\]",
         "",
-        "I=\\frac{E}{R+r}=\\frac{BLv}{R+r}",
+        "\\(I=\\frac{E}{R+r}=\\frac{BLv}{R+r}\\)",
         "",
         "行内 \\(\\frac{a+b}{c}\\) 结束",
         "",
