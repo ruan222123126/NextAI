@@ -1,46 +1,20 @@
-type WorkspaceEditorMode = "json" | "text";
-type WorkspaceSettingsLevel = "list" | "config" | "prompt" | "codex" | "claude";
-type WorkspaceCardKey = "config" | "prompt" | "codex" | "claude";
-
-interface WorkspaceFileInfo {
-  path: string;
-  kind: "config" | "skill";
-  size: number | null;
-}
-
-interface WorkspaceCodexTreeNode {
-  name: string;
-  path: string;
-  folders: WorkspaceCodexTreeNode[];
-  files: WorkspaceFileInfo[];
-}
+import type {
+  WorkspaceDomainContext,
+  WorkspaceCardKey,
+  WorkspaceCodexTreeNode,
+  WorkspaceEditorMode,
+  WorkspaceFileCatalog,
+  WorkspaceFileInfo,
+  WorkspaceSettingsLevel,
+  WorkspaceTextPayload,
+} from "./types.js";
 
 interface WorkspaceFileTree {
   folders: WorkspaceCodexTreeNode[];
   rootFiles: WorkspaceFileInfo[];
 }
 
-interface WorkspaceFileCatalog {
-  files: WorkspaceFileInfo[];
-  configFiles: WorkspaceFileInfo[];
-  promptFiles: WorkspaceFileInfo[];
-  codexFiles: WorkspaceFileInfo[];
-  claudeFiles: WorkspaceFileInfo[];
-  codexTree: WorkspaceCodexTreeNode[];
-  codexRootFiles: WorkspaceFileInfo[];
-  codexFolderPaths: Set<string>;
-  codexTopLevelFolderPaths: Set<string>;
-  claudeTree: WorkspaceCodexTreeNode[];
-  claudeRootFiles: WorkspaceFileInfo[];
-  claudeFolderPaths: Set<string>;
-  claudeTopLevelFolderPaths: Set<string>;
-}
-
-interface WorkspaceTextPayload {
-  content: string;
-}
-
-export function createWorkspaceDomain(ctx: any) {
+export function createWorkspaceDomain(ctx: WorkspaceDomainContext) {
   const {
     state,
     t,

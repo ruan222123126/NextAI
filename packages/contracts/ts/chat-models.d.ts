@@ -1,15 +1,12 @@
-import type { ApiErrorEnvelope } from "./chat-models.js";
-
-export type ApiErrorShape = ApiErrorEnvelope;
-
 export type {
   AgentStreamEvent,
   AgentStreamEventMeta,
   AgentToolCallPayload,
   AgentToolResultPayload,
+  ApiErrorEnvelope,
   ChatHistoryResponse,
   ChatSpec,
   DeleteResult,
   RuntimeContent,
   RuntimeMessage,
-} from "./chat-models.js";
+} from "@nextai/sdk-ts";

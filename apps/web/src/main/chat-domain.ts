@@ -1,106 +1,28 @@
-// @ts-nocheck
 import { createChatToolCallHelpers } from "./chat-tool-call.js";
+import type {
+  AgentStreamEvent,
+  ChatDomainContext,
+  ChatHistoryResponse,
+  ChatSpec,
+  DeleteResult,
+  PromptMode,
+  ViewMessage,
+  ViewMessageTimelineEntry,
+  ViewToolCallNotice,
+  WebAppTranslate,
+  WorkspaceUploadResponse,
+} from "./types.js";
 
-type PromptMode = "default" | "codex" | "claude";
-type I18nKey = string;
+type I18nKey = Parameters<WebAppTranslate>[0];
 
-interface ChatSpec {
-  id: string;
-  name: string;
-  session_id: string;
-  user_id: string;
-  channel: string;
-  updated_at: string;
-  meta?: Record<string, unknown>;
-}
-
-interface RuntimeContent {
-  type?: string;
-  text?: string;
-}
-
-interface RuntimeMessage {
-  id?: string;
-  role?: string;
-  content?: RuntimeContent[];
-  metadata?: Record<string, unknown>;
-}
-
-interface ChatHistoryResponse {
-  messages: RuntimeMessage[];
-}
-
-interface DeleteResult {
-  deleted: boolean;
-}
-
-interface WorkspaceUploadResponse {
-  uploaded?: boolean;
-  path?: string;
-  name?: string;
-  size?: number;
-}
-
-interface ViewMessage {
-  id: string;
-  role: "user" | "assistant";
-  text: string;
-  toolCalls: ViewToolCallNotice[];
-  textOrder?: number;
-  toolOrder?: number;
-  timeline: ViewMessageTimelineEntry[];
-}
-
-interface ViewToolCallNotice {
-  summary: string;
-  raw: string;
-  step?: number;
-  toolName?: string;
-  outputReady?: boolean;
-  order?: number;
-}
-
-interface ViewMessageTimelineEntry {
-  type: "text" | "tool_call";
-  order: number;
-  text?: string;
-  toolCall?: ViewToolCallNotice;
-}
-
-interface AgentToolCallPayload {
-  name?: string;
-  input?: Record<string, unknown>;
-}
-
-interface AgentToolResultPayload {
-  name?: string;
-  output?: string;
-  input?: Record<string, unknown>;
-}
-
-interface AgentStreamEvent {
-  type?: string;
-  step?: number;
-  delta?: string;
-  raw?: string;
-  tool_call?: AgentToolCallPayload;
-  tool_result?: AgentToolResultPayload;
-  meta?: {
-    code?: string;
-    message?: string;
-  };
-}
-
-export function createChatDomain(ctx: any) {
+export function createChatDomain(ctx: ChatDomainContext) {
   const {
     state,
     t,
     setStatus,
     asErrorMessage,
     requestJSON,
-    toAbsoluteURL,
-    applyTransportDefaultHeaders,
-    parseErrorMessage,
+    openStream,
     logAgentRawRequest,
     logAgentRawResponse,
     toViewMessage,
@@ -809,27 +731,15 @@ async function streamReply(
   };
   payload.biz_params = mergePromptModeBizParams(bizParams, state.activePromptMode);
 
-  const headers = new Headers({
-    "content-type": "application/json",
-    accept: "text/event-stream,application/json",
-  });
-  applyTransportDefaultHeaders(headers);
   const requestBody = JSON.stringify(payload);
   logAgentRawRequest(requestBody);
 
-  const response = await fetch(toAbsoluteURL("/agent/process"), {
+  const response = await openStream("/agent/process", {
     method: "POST",
-    headers,
-    body: requestBody,
+    body: payload,
+    accept: "text/event-stream,application/json",
     signal,
   });
-
-  if (!response.ok) {
-    const fallback = t("error.requestFailed", { status: response.status });
-    const raw = await response.text();
-    logAgentRawResponse(raw);
-    throw new Error(parseErrorMessage(raw, response.status, fallback));
-  }
   if (!response.body) {
     throw new Error(t("error.streamUnsupported"));
   }

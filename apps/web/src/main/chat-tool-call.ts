@@ -1,28 +1,12 @@
-// @ts-nocheck
-interface AgentToolCallPayload {
-  name?: string;
-  input?: Record<string, unknown>;
-}
+import type {
+  AgentStreamEvent,
+  AgentToolCallPayload,
+  AgentToolResultPayload,
+  ChatToolCallContext,
+  ViewToolCallNotice,
+} from "./types.js";
 
-interface AgentToolResultPayload {
-  name?: string;
-  summary?: string;
-}
-
-interface AgentStreamEvent {
-  type?: string;
-  tool_call?: AgentToolCallPayload;
-  tool_result?: AgentToolResultPayload;
-}
-
-interface ViewToolCallNotice {
-  summary: string;
-  raw: string;
-  toolName?: string;
-  outputReady?: boolean;
-}
-
-export function createChatToolCallHelpers(ctx: any) {
+export function createChatToolCallHelpers(ctx: ChatToolCallContext) {
   const { t } = ctx;
   const toolNameAliases: Record<string, string> = {
     read: "view",

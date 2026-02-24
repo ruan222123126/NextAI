@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Box, Static, Text, useApp, useInput, useStdout } from "ink";
 import stringWidth from "string-width";
+import { appendQuery, fillPath } from "@nextai/sdk-ts";
 import { ApiClient, ApiClientError } from "../client/api-client.js";
 import { resolveLocale, setLocale, t, type Locale } from "../i18n.js";
 import { applyAgentEvent, appendUserMessage, beginAssistantMessage, historyToViewMessages, settleAssistantMessage } from "./state.js";
@@ -298,15 +299,10 @@ export function TUIApp({ client, bootstrap }: TUIAppProps): React.ReactElement {
 
   const fetchSessions = useCallback(
     async (userID: string, channel: string): Promise<ChatSpec[]> => {
-      const query = new URLSearchParams();
-      if (userID.trim() !== "") {
-        query.set("user_id", userID.trim());
-      }
-      if (channel.trim() !== "") {
-        query.set("channel", channel.trim());
-      }
-      const suffix = query.toString() ? `?${query.toString()}` : "";
-      return client.get<ChatSpec[]>(`/chats${suffix}`);
+      return client.get<ChatSpec[]>(appendQuery("/chats", {
+        user_id: userID.trim() || undefined,
+        channel: channel.trim() || undefined,
+      }));
     },
     [client],
   );
@@ -318,7 +314,7 @@ export function TUIApp({ client, bootstrap }: TUIAppProps): React.ReactElement {
         return;
       }
       setStatus(t("tui.status.loading_history"));
-      const history = await client.get<ChatHistoryResponse>(`/chats/${encodeURIComponent(chatID)}`);
+      const history = await client.get<ChatHistoryResponse>(fillPath("/chats/{chat_id}", { chat_id: chatID }));
       const list = Array.isArray(history?.messages) ? history.messages : [];
       setMessages(historyToViewMessages(list));
       setStatus(t("tui.status.ready"));
@@ -503,14 +499,13 @@ export function TUIApp({ client, bootstrap }: TUIAppProps): React.ReactElement {
         channel: settings.channel,
         stream: true,
       };
-      const request = client.buildRequest("/agent/process", {
+      const res = await client.openStream("/agent/process", {
         method: "POST",
-        body: JSON.stringify(payload),
+        body: payload,
+        accept: "text/event-stream,application/json",
       });
-      const res = await fetch(request.url, request.init);
-      if (!res.ok || !res.body) {
-        const body = await res.text();
-        throw new Error(`${res.status} ${res.statusText} ${body}`.trim());
+      if (!res.body) {
+        throw new Error("stream unsupported");
       }
 
       setStatus(t("tui.status.streaming"));

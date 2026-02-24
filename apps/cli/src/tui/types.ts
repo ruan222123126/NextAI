@@ -1,39 +1,21 @@
 import type { Locale } from "../i18n.js";
+import type {
+  AgentStreamEvent as ContractAgentStreamEvent,
+  ChatHistoryResponse as ContractChatHistoryResponse,
+  ChatSpec as ContractChatSpec,
+  RuntimeContent as ContractRuntimeContent,
+  RuntimeMessage as ContractRuntimeMessage,
+} from "@nextai/sdk-ts";
 
-export interface ChatSpec {
-  id: string;
-  name: string;
-  session_id: string;
-  user_id: string;
-  channel: string;
-  updated_at?: string;
-}
+export type ChatSpec = ContractChatSpec;
 
-export interface RuntimeContent {
-  type?: string;
-  text?: string;
-}
+export type RuntimeContent = ContractRuntimeContent;
 
-export interface RuntimeMessage {
-  role?: string;
-  content?: RuntimeContent[];
-}
+export type RuntimeMessage = ContractRuntimeMessage;
 
-export interface ChatHistoryResponse {
-  messages?: RuntimeMessage[];
-}
+export type ChatHistoryResponse = ContractChatHistoryResponse;
 
-export interface AgentStreamEvent {
-  type?: string;
-  delta?: string;
-  reply?: string;
-  meta?: {
-    code?: string;
-    message?: string;
-    [k: string]: unknown;
-  };
-  [k: string]: unknown;
-}
+export type AgentStreamEvent = ContractAgentStreamEvent;
 
 export interface TUIMessage {
   role: "user" | "assistant";

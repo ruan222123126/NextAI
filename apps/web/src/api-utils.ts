@@ -1,10 +1,4 @@
-export interface ErrorEnvelope {
-  error?: {
-    code?: string;
-    message?: string;
-    details?: unknown;
-  };
-}
+import type { ApiErrorEnvelope } from "@nextai/sdk-ts";
 
 export interface EnvMapErrorMessages {
   invalidJSON: string;
@@ -33,7 +27,7 @@ export function parseErrorMessage(raw: string, status: number, fallbackMessage?:
     return raw;
   }
 
-  const errorBody = (parsed as ErrorEnvelope).error;
+  const errorBody = (parsed as ApiErrorEnvelope).error;
   const code = typeof errorBody?.code === "string" ? errorBody.code : "";
   const message = typeof errorBody?.message === "string" ? errorBody.message : "";
   if (code !== "" && message !== "") {

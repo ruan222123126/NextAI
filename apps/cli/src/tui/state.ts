@@ -1,11 +1,11 @@
-import type { AgentStreamEvent, RuntimeMessage, TUIMessage } from "./types.js";
+import type { AgentStreamEvent, RuntimeContent, RuntimeMessage, TUIMessage } from "./types.js";
 
 function toMessageText(message: RuntimeMessage): string {
   const content = Array.isArray(message.content) ? message.content : [];
   return content
-    .filter((item) => item?.type === "text" && typeof item.text === "string")
-    .map((item) => item.text?.trim() ?? "")
-    .filter((text) => text !== "")
+    .filter((item: RuntimeContent) => item?.type === "text" && typeof item.text === "string")
+    .map((item: RuntimeContent) => item.text?.trim() ?? "")
+    .filter((text: string) => text !== "")
     .join("\n");
 }
 

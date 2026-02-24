@@ -2,6 +2,7 @@ import { Command } from "commander";
 import { render } from "ink";
 import React from "react";
 import { ApiClient } from "../client/api-client.js";
+import { DEFAULT_CHANNEL, DEFAULT_USER_ID } from "../constants.js";
 import { getLocale, resolveLocale, setLocale } from "../i18n.js";
 import { TUIApp } from "../tui/app.js";
 import type { TUIBootstrapOptions } from "../tui/types.js";
@@ -53,8 +54,8 @@ export function registerTUICommand(
         });
         const bootstrap: TUIBootstrapOptions = {
           sessionID: opts.sessionId?.trim() || undefined,
-          userID: opts.userId?.trim() || process.env.NEXTAI_USER_ID?.trim() || "demo-user",
-          channel: opts.channel?.trim() || process.env.NEXTAI_CHANNEL?.trim() || "console",
+          userID: opts.userId?.trim() || process.env.NEXTAI_USER_ID?.trim() || DEFAULT_USER_ID,
+          channel: opts.channel?.trim() || process.env.NEXTAI_CHANNEL?.trim() || DEFAULT_CHANNEL,
           apiBase: tuiClient.getBaseURL(),
           apiKey: tuiClient.getAPIKey(),
           locale,

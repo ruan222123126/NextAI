@@ -1,107 +1,19 @@
-type CronModalMode = "create" | "edit";
+import type {
+  CronDomainContext,
+  CronDispatchSpec,
+  CronJobSpec,
+  CronJobState,
+  CronModalMode,
+  CronRuntimeSpec,
+  CronScheduleSpec,
+  CronWorkflowExecution,
+  CronWorkflowNodeExecution,
+  CronWorkflowSpec,
+  DeleteResult,
+  WebAppCronWorkflowCanvasInstance,
+} from "./types.js";
 
-interface CronScheduleSpec {
-  type: string;
-  cron: string;
-  timezone?: string;
-}
-
-interface CronDispatchTarget {
-  user_id: string;
-  session_id: string;
-}
-
-interface CronDispatchSpec {
-  type?: string;
-  channel?: string;
-  target: CronDispatchTarget;
-  mode?: string;
-  meta?: Record<string, unknown>;
-}
-
-interface CronRuntimeSpec {
-  max_concurrency?: number;
-  timeout_seconds?: number;
-  misfire_grace_seconds?: number;
-}
-
-interface CronWorkflowViewport {
-  pan_x?: number;
-  pan_y?: number;
-  zoom?: number;
-}
-
-interface CronWorkflowNode {
-  id: string;
-  type: "start" | "text_event" | "delay" | "if_event";
-  title?: string;
-  x: number;
-  y: number;
-  text?: string;
-  delay_seconds?: number;
-  if_condition?: string;
-  continue_on_error?: boolean;
-}
-
-interface CronWorkflowEdge {
-  id: string;
-  source: string;
-  target: string;
-}
-
-interface CronWorkflowSpec {
-  version: "v1";
-  viewport?: CronWorkflowViewport;
-  nodes: CronWorkflowNode[];
-  edges: CronWorkflowEdge[];
-}
-
-interface CronWorkflowNodeExecution {
-  node_id: string;
-  node_type: "text_event" | "delay" | "if_event";
-  status: "succeeded" | "failed" | "skipped";
-  continue_on_error: boolean;
-  started_at: string;
-  finished_at?: string;
-  error?: string;
-}
-
-interface CronWorkflowExecution {
-  run_id: string;
-  started_at: string;
-  finished_at?: string;
-  had_failures: boolean;
-  nodes: CronWorkflowNodeExecution[];
-}
-
-interface CronJobSpec {
-  id: string;
-  name: string;
-  enabled: boolean;
-  schedule: CronScheduleSpec;
-  task_type: "text" | "workflow";
-  text?: string;
-  workflow?: CronWorkflowSpec;
-  dispatch: CronDispatchSpec;
-  runtime: CronRuntimeSpec;
-  meta?: Record<string, unknown>;
-}
-
-interface CronJobState {
-  next_run_at?: string;
-  last_run_at?: string;
-  last_status?: string;
-  last_error?: string;
-  last_result?: string;
-  last_workflow?: CronWorkflowExecution;
-  last_execution?: CronWorkflowExecution;
-}
-
-interface DeleteResult {
-  deleted: boolean;
-}
-
-export function createCronDomain(ctx: any) {
+export function createCronDomain(ctx: CronDomainContext) {
   const {
     state,
     t,
@@ -151,7 +63,7 @@ export function createCronDomain(ctx: any) {
     cronWorkflowExecutionList,
     cronWorkbench,
   } = ctx;
-  let cronWorkflowEditor: any = null;
+  let cronWorkflowEditor: WebAppCronWorkflowCanvasInstance | null = null;
   let cronWorkflowPseudoFullscreen = false;
 
 function bindCronEvents(): void {
@@ -475,13 +387,13 @@ async function refreshCronJobs(): Promise<void> {
   ensureCronSessionID();
 
   try {
-    const jobs = await requestJSON("/cron/jobs");
+    const jobs = await requestJSON<CronJobSpec[]>("/cron/jobs");
     state.cronJobs = jobs;
 
     const statePairs = await Promise.all(
       jobs.map(async (job: CronJobSpec) => {
         try {
-          const jobState = await requestJSON(`/cron/jobs/${encodeURIComponent(job.id)}/state`);
+          const jobState = await requestJSON<CronJobState>(`/cron/jobs/${encodeURIComponent(job.id)}/state`);
           return [job.id, jobState] as const;
         } catch {
           return [job.id, null] as const;
@@ -711,8 +623,9 @@ async function saveCronJob(): Promise<boolean> {
       setStatus(t("error.cronWorkflowEditorMissing"), "error");
       return false;
     }
-    workflowPayload = cronWorkflowEditor.getWorkflow();
-    const issue = validateCronWorkflowSpec(workflowPayload);
+    const nextWorkflow = cronWorkflowEditor.getWorkflow();
+    workflowPayload = nextWorkflow;
+    const issue = validateCronWorkflowSpec(nextWorkflow);
     if (issue) {
       setStatus(t("error.cronWorkflowInvalid", { reason: issue }), "error");
       return false;
@@ -842,7 +755,7 @@ async function deleteCronJob(jobID: string): Promise<void> {
   }
 
   try {
-    const result = await requestJSON(`/cron/jobs/${encodeURIComponent(jobID)}`, {
+    const result = await requestJSON<DeleteResult>(`/cron/jobs/${encodeURIComponent(jobID)}`, {
       method: "DELETE",
     });
     await refreshCronJobs();
@@ -861,7 +774,7 @@ async function deleteCronJob(jobID: string): Promise<void> {
 async function runCronJob(jobID: string): Promise<void> {
   syncControlState();
   try {
-    const result = await requestJSON(`/cron/jobs/${encodeURIComponent(jobID)}/run`, {
+    const result = await requestJSON<{ started?: boolean }>(`/cron/jobs/${encodeURIComponent(jobID)}/run`, {
       method: "POST",
     });
     await refreshCronJobs();
