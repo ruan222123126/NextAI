@@ -1,6 +1,7 @@
 package repo
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -228,4 +229,91 @@ func TestLoadEnsuresDefaultCronJob(t *testing.T) {
 			t.Fatalf("default cron meta.system_default should be true, meta=%#v", job.Meta)
 		}
 	})
+}
+
+func TestLoadMigratesLegacyStateWithoutSchemaVersion(t *testing.T) {
+	dir := t.TempDir()
+	statePath := filepath.Join(dir, "state.json")
+	raw := `{
+  "providers": {
+    "OpenAI": {"enabled": true}
+  },
+  "active_llm": {"provider_id": "OpenAI", "model": "gpt-4o-mini"}
+}`
+	if err := os.WriteFile(statePath, []byte(raw), 0o644); err != nil {
+		t.Fatalf("write state failed: %v", err)
+	}
+
+	store, err := NewStore(dir)
+	if err != nil {
+		t.Fatalf("new store failed: %v", err)
+	}
+
+	store.Read(func(st *State) {
+		if st.SchemaVersion != currentStateSchemaVersion {
+			t.Fatalf("expected schema_version=%d, got=%d", currentStateSchemaVersion, st.SchemaVersion)
+		}
+		if st.ActiveLLM.ProviderID != "openai" {
+			t.Fatalf("expected normalized active provider, got=%q", st.ActiveLLM.ProviderID)
+		}
+	})
+
+	persistedRaw, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatalf("read migrated state failed: %v", err)
+	}
+	var persisted map[string]interface{}
+	if err := json.Unmarshal(persistedRaw, &persisted); err != nil {
+		t.Fatalf("decode migrated state failed: %v", err)
+	}
+	gotVersion, ok := persisted["schema_version"].(float64)
+	if !ok {
+		t.Fatalf("expected schema_version to be persisted")
+	}
+	if int(gotVersion) != currentStateSchemaVersion {
+		t.Fatalf("expected persisted schema_version=%d, got=%v", currentStateSchemaVersion, gotVersion)
+	}
+}
+
+func TestNewStoreWritesSchemaVersionOnNewFile(t *testing.T) {
+	dir := t.TempDir()
+
+	if _, err := NewStore(dir); err != nil {
+		t.Fatalf("new store failed: %v", err)
+	}
+
+	statePath := filepath.Join(dir, "state.json")
+	raw, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatalf("read state failed: %v", err)
+	}
+	var persisted map[string]interface{}
+	if err := json.Unmarshal(raw, &persisted); err != nil {
+		t.Fatalf("decode state failed: %v", err)
+	}
+	gotVersion, ok := persisted["schema_version"].(float64)
+	if !ok {
+		t.Fatalf("expected schema_version to be persisted")
+	}
+	if int(gotVersion) != currentStateSchemaVersion {
+		t.Fatalf("expected schema_version=%d, got=%v", currentStateSchemaVersion, gotVersion)
+	}
+}
+
+func TestLoadRejectsFutureSchemaVersion(t *testing.T) {
+	dir := t.TempDir()
+	statePath := filepath.Join(dir, "state.json")
+	raw := `{
+  "schema_version": 999,
+  "providers": {
+    "openai": {"enabled": true}
+  }
+}`
+	if err := os.WriteFile(statePath, []byte(raw), 0o644); err != nil {
+		t.Fatalf("write state failed: %v", err)
+	}
+
+	if _, err := NewStore(dir); err == nil {
+		t.Fatalf("expected new store to fail for future schema version")
+	}
 }

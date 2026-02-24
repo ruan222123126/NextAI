@@ -122,8 +122,8 @@ func (s *Service) ConfigureProvider(input ConfigureProviderInput) (domain.Provid
 	}
 
 	var out domain.ProviderInfo
-	if err := s.deps.Store.Write(func(st *repo.State) error {
-		setting := getProviderSettingByID(st, providerID)
+	if err := s.deps.Store.WriteSettings(func(st *ports.SettingsAggregate) error {
+		setting := getProviderSettingByID(st.Providers, providerID)
 		normalizeProviderSetting(&setting)
 		if input.APIKey != nil {
 			setting.APIKey = strings.TrimSpace(*input.APIKey)
@@ -177,7 +177,7 @@ func (s *Service) DeleteProvider(providerID string) (bool, error) {
 	}
 
 	deleted := false
-	if err := s.deps.Store.Write(func(st *repo.State) error {
+	if err := s.deps.Store.WriteSettings(func(st *ports.SettingsAggregate) error {
 		for key := range st.Providers {
 			if normalizeProviderID(key) == providerID {
 				delete(st.Providers, key)
@@ -200,7 +200,7 @@ func (s *Service) GetActiveModels() (domain.ActiveModelsInfo, error) {
 	}
 
 	out := domain.ActiveModelsInfo{}
-	s.deps.Store.Read(func(st *repo.State) {
+	s.deps.Store.ReadSettings(func(st ports.SettingsAggregate) {
 		out = domain.ActiveModelsInfo{ActiveLLM: st.ActiveLLM}
 	})
 	return out, nil
@@ -221,8 +221,8 @@ func (s *Service) SetActiveModels(body domain.ModelSlotConfig) (domain.ActiveMod
 	}
 
 	var out domain.ModelSlotConfig
-	if err := s.deps.Store.Write(func(st *repo.State) error {
-		setting, ok := findProviderSettingByID(st, body.ProviderID)
+	if err := s.deps.Store.WriteSettings(func(st *ports.SettingsAggregate) error {
+		setting, ok := findProviderSettingByID(st.Providers, body.ProviderID)
 		if !ok {
 			return ErrProviderNotFound
 		}
@@ -255,7 +255,7 @@ func (s *Service) collectProviderCatalog() ([]domain.ProviderInfo, map[string]st
 	defaults := map[string]string{}
 	active := domain.ModelSlotConfig{}
 
-	s.deps.Store.Read(func(st *repo.State) {
+	s.deps.Store.ReadSettings(func(st ports.SettingsAggregate) {
 		active = st.ActiveLLM
 		settingsByID := map[string]repo.ProviderSetting{}
 
@@ -441,8 +441,8 @@ func normalizeReasoningEffort(raw string) string {
 	return strings.ToLower(strings.TrimSpace(raw))
 }
 
-func getProviderSettingByID(st *repo.State, providerID string) repo.ProviderSetting {
-	if setting, ok := findProviderSettingByID(st, providerID); ok {
+func getProviderSettingByID(providers map[string]repo.ProviderSetting, providerID string) repo.ProviderSetting {
+	if setting, ok := findProviderSettingByID(providers, providerID); ok {
 		return setting
 	}
 	setting := repo.ProviderSetting{}
@@ -450,14 +450,14 @@ func getProviderSettingByID(st *repo.State, providerID string) repo.ProviderSett
 	return setting
 }
 
-func findProviderSettingByID(st *repo.State, providerID string) (repo.ProviderSetting, bool) {
-	if st == nil {
+func findProviderSettingByID(providers map[string]repo.ProviderSetting, providerID string) (repo.ProviderSetting, bool) {
+	if providers == nil {
 		return repo.ProviderSetting{}, false
 	}
-	if setting, ok := st.Providers[providerID]; ok {
+	if setting, ok := providers[providerID]; ok {
 		return setting, true
 	}
-	for key, setting := range st.Providers {
+	for key, setting := range providers {
 		if normalizeProviderID(key) == providerID {
 			return setting, true
 		}

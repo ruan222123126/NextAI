@@ -8,6 +8,7 @@ import (
 
 	"nextai/apps/gateway/internal/domain"
 	"nextai/apps/gateway/internal/repo"
+	"nextai/apps/gateway/internal/service/adapters"
 )
 
 func TestPutFileRejectsInvalidEnvKey(t *testing.T) {
@@ -108,7 +109,7 @@ func newTestService(t *testing.T, deps Dependencies) *Service {
 	store, dataDir := newTestStore(t)
 
 	if deps.Store == nil {
-		deps.Store = store
+		deps.Store = adapters.NewRepoStateStore(store)
 	}
 	if deps.DataDir == "" {
 		deps.DataDir = dataDir

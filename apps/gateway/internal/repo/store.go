@@ -3,6 +3,7 @@ package repo
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -24,16 +25,19 @@ type ProviderSetting struct {
 	ModelAliases    map[string]string `json:"model_aliases,omitempty"`
 }
 
+const currentStateSchemaVersion = 1
+
 type State struct {
-	Chats      map[string]domain.ChatSpec         `json:"chats"`
-	Histories  map[string][]domain.RuntimeMessage `json:"histories"`
-	CronJobs   map[string]domain.CronJobSpec      `json:"cron_jobs"`
-	CronStates map[string]domain.CronJobState     `json:"cron_states"`
-	Providers  map[string]ProviderSetting         `json:"providers"`
-	ActiveLLM  domain.ModelSlotConfig             `json:"active_llm"`
-	Envs       map[string]string                  `json:"envs"`
-	Skills     map[string]domain.SkillSpec        `json:"skills"`
-	Channels   domain.ChannelConfigMap            `json:"channels"`
+	SchemaVersion int                                `json:"schema_version"`
+	Chats         map[string]domain.ChatSpec         `json:"chats"`
+	Histories     map[string][]domain.RuntimeMessage `json:"histories"`
+	CronJobs      map[string]domain.CronJobSpec      `json:"cron_jobs"`
+	CronStates    map[string]domain.CronJobState     `json:"cron_states"`
+	Providers     map[string]ProviderSetting         `json:"providers"`
+	ActiveLLM     domain.ModelSlotConfig             `json:"active_llm"`
+	Envs          map[string]string                  `json:"envs"`
+	Skills        map[string]domain.SkillSpec        `json:"skills"`
+	Channels      domain.ChannelConfigMap            `json:"channels"`
 }
 
 type Store struct {
@@ -58,10 +62,11 @@ func NewStore(dataDir string) (*Store, error) {
 
 func defaultState(dataDir string) State {
 	state := State{
-		Chats:      map[string]domain.ChatSpec{},
-		Histories:  map[string][]domain.RuntimeMessage{},
-		CronJobs:   map[string]domain.CronJobSpec{},
-		CronStates: map[string]domain.CronJobState{},
+		SchemaVersion: currentStateSchemaVersion,
+		Chats:         map[string]domain.ChatSpec{},
+		Histories:     map[string][]domain.RuntimeMessage{},
+		CronJobs:      map[string]domain.CronJobSpec{},
+		CronStates:    map[string]domain.CronJobState{},
 		Providers: map[string]ProviderSetting{
 			"openai": defaultProviderSetting(),
 		},
@@ -109,6 +114,71 @@ func (s *Store) load() error {
 	var state State
 	if err := json.Unmarshal(b, &state); err != nil {
 		return err
+	}
+	migrated, err := migrateStateToCurrent(&state)
+	if err != nil {
+		return err
+	}
+	normalizeState(&state)
+	s.state = state
+	if migrated {
+		return s.saveLocked()
+	}
+	return nil
+}
+
+func migrateStateToCurrent(state *State) (bool, error) {
+	if state == nil {
+		return false, errors.New("state is nil")
+	}
+	if state.SchemaVersion < 0 {
+		return false, fmt.Errorf("state schema version must be >= 0, got=%d", state.SchemaVersion)
+	}
+	if state.SchemaVersion > currentStateSchemaVersion {
+		return false, fmt.Errorf(
+			"state schema version %d is newer than current %d",
+			state.SchemaVersion,
+			currentStateSchemaVersion,
+		)
+	}
+
+	migrated := false
+	for state.SchemaVersion < currentStateSchemaVersion {
+		from := state.SchemaVersion
+		var migrate func(*State) error
+		switch from {
+		case 0:
+			migrate = migrateStateV0ToV1
+		default:
+			return false, fmt.Errorf("missing migration path for schema version %d", from)
+		}
+		if err := migrate(state); err != nil {
+			return false, fmt.Errorf("migrate schema version %d -> %d failed: %w", from, from+1, err)
+		}
+		state.SchemaVersion = from + 1
+		migrated = true
+	}
+
+	if state.SchemaVersion != currentStateSchemaVersion {
+		state.SchemaVersion = currentStateSchemaVersion
+		migrated = true
+	}
+	return migrated, nil
+}
+
+func migrateStateV0ToV1(state *State) error {
+	if state == nil {
+		return errors.New("state is nil")
+	}
+	return nil
+}
+
+func normalizeState(state *State) {
+	if state == nil {
+		return
+	}
+	if state.SchemaVersion <= 0 {
+		state.SchemaVersion = currentStateSchemaVersion
 	}
 	if state.Chats == nil {
 		state.Chats = map[string]domain.ChatSpec{}
@@ -190,10 +260,8 @@ func (s *Store) load() error {
 			"timeout_seconds": 8,
 		}
 	}
-	ensureDefaultChat(&state)
-	ensureDefaultCronJob(&state)
-	s.state = state
-	return nil
+	ensureDefaultChat(state)
+	ensureDefaultCronJob(state)
 }
 
 func (s *Store) Save() error {
@@ -203,6 +271,7 @@ func (s *Store) Save() error {
 }
 
 func (s *Store) saveLocked() error {
+	s.state.SchemaVersion = currentStateSchemaVersion
 	ensureDefaultChat(&s.state)
 	ensureDefaultCronJob(&s.state)
 	b, err := json.MarshalIndent(s.state, "", "  ")

@@ -42,3 +42,14 @@ type AgentErrorMapper interface {
 	MapToolError(err error) (status int, code string, message string)
 	MapRunnerError(err error) (status int, code string, message string)
 }
+
+type AgentProcessError struct {
+	Status  int
+	Code    string
+	Message string
+	Details interface{}
+}
+
+type AgentProcessor interface {
+	Process(ctx context.Context, req domain.AgentProcessRequest) (domain.AgentProcessResponse, *AgentProcessError)
+}

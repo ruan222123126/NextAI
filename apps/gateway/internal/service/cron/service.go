@@ -19,7 +19,6 @@ import (
 	cronv3 "github.com/robfig/cron/v3"
 
 	"nextai/apps/gateway/internal/domain"
-	"nextai/apps/gateway/internal/repo"
 	"nextai/apps/gateway/internal/service/ports"
 )
 
@@ -108,11 +107,17 @@ type Dependencies struct {
 }
 
 type Service struct {
-	deps Dependencies
+	deps         Dependencies
+	nodeHandlers map[string]CronNodeHandler
 }
 
 func NewService(deps Dependencies) *Service {
-	return &Service{deps: deps}
+	svc := &Service{
+		deps:         deps,
+		nodeHandlers: map[string]CronNodeHandler{},
+	}
+	svc.registerDefaultWorkflowNodeHandlers()
+	return svc
 }
 
 func (s *Service) ListJobs() ([]domain.CronJobSpec, error) {
@@ -121,8 +126,8 @@ func (s *Service) ListJobs() ([]domain.CronJobSpec, error) {
 	}
 
 	out := make([]domain.CronJobSpec, 0)
-	s.deps.Store.Read(func(state *repo.State) {
-		for _, job := range state.CronJobs {
+	s.deps.Store.ReadCron(func(state ports.CronAggregate) {
+		for _, job := range state.Jobs {
 			out = append(out, job)
 		}
 	})
@@ -134,15 +139,15 @@ func (s *Service) CreateJob(job domain.CronJobSpec) (domain.CronJobSpec, error) 
 	if err := s.validateStore(); err != nil {
 		return domain.CronJobSpec{}, err
 	}
-	if code, err := validateJobSpec(&job); err != nil {
+	if code, err := s.validateJobSpec(&job); err != nil {
 		return domain.CronJobSpec{}, &ValidationError{Code: code, Message: err.Error()}
 	}
 
 	now := time.Now().UTC()
-	if err := s.deps.Store.Write(func(state *repo.State) error {
-		state.CronJobs[job.ID] = job
-		existing := state.CronStates[job.ID]
-		state.CronStates[job.ID] = alignStateForMutation(job, normalizePausedState(existing), now)
+	if err := s.deps.Store.WriteCron(func(state *ports.CronAggregate) error {
+		state.Jobs[job.ID] = job
+		existing := state.States[job.ID]
+		state.States[job.ID] = alignStateForMutation(job, normalizePausedState(existing), now)
 		return nil
 	}); err != nil {
 		return domain.CronJobSpec{}, err
@@ -158,10 +163,10 @@ func (s *Service) GetJob(jobID string) (domain.CronJobView, error) {
 	found := false
 	var spec domain.CronJobSpec
 	var state domain.CronJobState
-	s.deps.Store.Read(func(st *repo.State) {
-		spec, found = st.CronJobs[jobID]
+	s.deps.Store.ReadCron(func(st ports.CronAggregate) {
+		spec, found = st.Jobs[jobID]
 		if found {
-			state = st.CronStates[jobID]
+			state = st.States[jobID]
 		}
 	})
 	if !found {
@@ -174,18 +179,18 @@ func (s *Service) UpdateJob(jobID string, job domain.CronJobSpec) (domain.CronJo
 	if err := s.validateStore(); err != nil {
 		return domain.CronJobSpec{}, err
 	}
-	if code, err := validateJobSpec(&job); err != nil {
+	if code, err := s.validateJobSpec(&job); err != nil {
 		return domain.CronJobSpec{}, &ValidationError{Code: code, Message: err.Error()}
 	}
 
 	now := time.Now().UTC()
-	if err := s.deps.Store.Write(func(st *repo.State) error {
-		if _, ok := st.CronJobs[jobID]; !ok {
+	if err := s.deps.Store.WriteCron(func(st *ports.CronAggregate) error {
+		if _, ok := st.Jobs[jobID]; !ok {
 			return ErrJobNotFound
 		}
-		st.CronJobs[jobID] = job
-		state := normalizePausedState(st.CronStates[jobID])
-		st.CronStates[jobID] = alignStateForMutation(job, state, now)
+		st.Jobs[jobID] = job
+		state := normalizePausedState(st.States[jobID])
+		st.States[jobID] = alignStateForMutation(job, state, now)
 		return nil
 	}); err != nil {
 		return domain.CronJobSpec{}, err
@@ -200,13 +205,13 @@ func (s *Service) DeleteJob(jobID string) (bool, error) {
 
 	jobID = strings.TrimSpace(jobID)
 	deleted := false
-	if err := s.deps.Store.Write(func(st *repo.State) error {
-		if _, ok := st.CronJobs[jobID]; ok {
+	if err := s.deps.Store.WriteCron(func(st *ports.CronAggregate) error {
+		if _, ok := st.Jobs[jobID]; ok {
 			if jobID == domain.DefaultCronJobID {
 				return ErrDefaultProtected
 			}
-			delete(st.CronJobs, jobID)
-			delete(st.CronStates, jobID)
+			delete(st.Jobs, jobID)
+			delete(st.States, jobID)
 			deleted = true
 		}
 		return nil
@@ -222,12 +227,12 @@ func (s *Service) UpdateStatus(jobID, status string) error {
 	}
 
 	now := time.Now().UTC()
-	return s.deps.Store.Write(func(st *repo.State) error {
-		job, ok := st.CronJobs[jobID]
+	return s.deps.Store.WriteCron(func(st *ports.CronAggregate) error {
+		job, ok := st.Jobs[jobID]
 		if !ok {
 			return ErrJobNotFound
 		}
-		state := normalizePausedState(st.CronStates[jobID])
+		state := normalizePausedState(st.States[jobID])
 		switch status {
 		case statusPaused:
 			state.Paused = true
@@ -237,7 +242,7 @@ func (s *Service) UpdateStatus(jobID, status string) error {
 			state = alignStateForMutation(job, state, now)
 		}
 		state.LastStatus = &status
-		st.CronStates[jobID] = state
+		st.States[jobID] = state
 		return nil
 	})
 }
@@ -249,10 +254,10 @@ func (s *Service) GetState(jobID string) (domain.CronJobState, error) {
 
 	found := false
 	var state domain.CronJobState
-	s.deps.Store.Read(func(st *repo.State) {
-		if _, ok := st.CronJobs[jobID]; ok {
+	s.deps.Store.ReadCron(func(st ports.CronAggregate) {
+		if _, ok := st.Jobs[jobID]; ok {
 			found = true
-			state = st.CronStates[jobID]
+			state = st.States[jobID]
 		}
 	})
 	if !found {
@@ -268,9 +273,9 @@ func (s *Service) SchedulerTick(now time.Time) ([]string, error) {
 
 	stateUpdates := map[string]domain.CronJobState{}
 	dueJobIDs := make([]string, 0)
-	s.deps.Store.Read(func(st *repo.State) {
-		for id, job := range st.CronJobs {
-			current := st.CronStates[id]
+	s.deps.Store.ReadCron(func(st ports.CronAggregate) {
+		for id, job := range st.Jobs {
+			current := st.States[id]
 			next := normalizePausedState(current)
 			if !jobSchedulable(job, next) {
 				next.NextRunAt = nil
@@ -313,12 +318,12 @@ func (s *Service) SchedulerTick(now time.Time) ([]string, error) {
 	if len(stateUpdates) == 0 {
 		return dueJobIDs, nil
 	}
-	if err := s.deps.Store.Write(func(st *repo.State) error {
+	if err := s.deps.Store.WriteCron(func(st *ports.CronAggregate) error {
 		for id, next := range stateUpdates {
-			if _, ok := st.CronJobs[id]; !ok {
+			if _, ok := st.Jobs[id]; !ok {
 				continue
 			}
-			st.CronStates[id] = next
+			st.States[id] = next
 		}
 		return nil
 	}); err != nil {
@@ -334,8 +339,8 @@ func (s *Service) ExecuteJob(jobID string) error {
 
 	var job domain.CronJobSpec
 	found := false
-	s.deps.Store.Read(func(st *repo.State) {
-		job, found = st.CronJobs[jobID]
+	s.deps.Store.ReadCron(func(st ports.CronAggregate) {
+		job, found = st.Jobs[jobID]
 	})
 	if !found {
 		return ErrJobNotFound
@@ -356,17 +361,17 @@ func (s *Service) ExecuteJob(jobID string) error {
 
 	startedAt := nowISO()
 	running := statusRunning
-	if err := s.deps.Store.Write(func(st *repo.State) error {
-		target, ok := st.CronJobs[jobID]
+	if err := s.deps.Store.WriteCron(func(st *ports.CronAggregate) error {
+		target, ok := st.Jobs[jobID]
 		if !ok {
 			return ErrJobNotFound
 		}
 		job = target
-		state := normalizePausedState(st.CronStates[jobID])
+		state := normalizePausedState(st.States[jobID])
 		state.LastRunAt = &startedAt
 		state.LastStatus = &running
 		state.LastError = nil
-		st.CronStates[jobID] = state
+		st.States[jobID] = state
 		return nil
 	}); err != nil {
 		return err
@@ -386,15 +391,15 @@ func (s *Service) ExecuteJob(jobID string) error {
 		msg := execErr.Error()
 		finalErr = &msg
 	}
-	if err := s.deps.Store.Write(func(st *repo.State) error {
-		if _, ok := st.CronJobs[jobID]; !ok {
+	if err := s.deps.Store.WriteCron(func(st *ports.CronAggregate) error {
+		if _, ok := st.Jobs[jobID]; !ok {
 			return nil
 		}
-		state := st.CronStates[jobID]
+		state := st.States[jobID]
 		state.LastStatus = &finalStatus
 		state.LastError = finalErr
 		state.LastExecution = lastExecution
-		st.CronStates[jobID] = state
+		st.States[jobID] = state
 		return nil
 	}); err != nil {
 		return err
@@ -460,7 +465,7 @@ func (s *Service) executeTextTask(ctx context.Context, job domain.CronJobSpec, t
 }
 
 func (s *Service) executeWorkflowTask(ctx context.Context, job domain.CronJobSpec) (*domain.CronWorkflowExecution, error) {
-	plan, err := buildWorkflowPlan(job.Workflow)
+	plan, err := s.buildWorkflowPlan(job.Workflow)
 	if err != nil {
 		return nil, fmt.Errorf("invalid cron workflow: %w", err)
 	}
@@ -529,27 +534,15 @@ type workflowNodeRunResult struct {
 }
 
 func (s *Service) executeWorkflowNode(ctx context.Context, job domain.CronJobSpec, node domain.CronWorkflowNode) (workflowNodeRunResult, error) {
-	switch node.Type {
-	case workflowNodeText:
-		text := strings.TrimSpace(node.Text)
-		if text == "" {
-			return workflowNodeRunResult{}, errors.New("workflow text_event requires non-empty text")
-		}
-		return workflowNodeRunResult{}, s.executeTextTask(ctx, job, text)
-	case workflowNodeDelay:
-		return workflowNodeRunResult{}, executeWorkflowDelay(ctx, node.DelaySeconds)
-	case workflowNodeIf:
-		matched, err := evaluateWorkflowIfCondition(node.IfCondition, job)
-		if err != nil {
-			return workflowNodeRunResult{}, err
-		}
-		if !matched {
-			return workflowNodeRunResult{Stop: true}, nil
-		}
-		return workflowNodeRunResult{}, nil
-	default:
+	handler, ok := s.resolveCronNodeHandler(node.Type)
+	if !ok {
 		return workflowNodeRunResult{}, fmt.Errorf("unsupported workflow node type=%q", node.Type)
 	}
+	result, err := handler.Execute(ctx, job, node)
+	if err != nil {
+		return workflowNodeRunResult{}, err
+	}
+	return workflowNodeRunResult{Stop: result.Stop}, nil
 }
 
 func executeWorkflowDelay(ctx context.Context, seconds int) error {
@@ -647,7 +640,7 @@ func BuildBizParams(job domain.CronJobSpec) map[string]interface{} {
 	return map[string]interface{}{"cron": cronPayload}
 }
 
-func validateJobSpec(job *domain.CronJobSpec) (string, error) {
+func (s *Service) validateJobSpec(job *domain.CronJobSpec) (string, error) {
 	if job == nil {
 		return "invalid_cron_task_type", errors.New("cron job is required")
 	}
@@ -668,7 +661,7 @@ func validateJobSpec(job *domain.CronJobSpec) (string, error) {
 		job.Workflow = nil
 		return "", nil
 	case taskTypeWorkflow:
-		plan, err := buildWorkflowPlan(job.Workflow)
+		plan, err := s.buildWorkflowPlan(job.Workflow)
 		if err != nil {
 			return "invalid_cron_workflow", err
 		}
@@ -703,7 +696,10 @@ type workflowPlan struct {
 	Order    []domain.CronWorkflowNode
 }
 
-func buildWorkflowPlan(workflow *domain.CronWorkflowSpec) (*workflowPlan, error) {
+func buildWorkflowPlanWithNodeSupport(
+	workflow *domain.CronWorkflowSpec,
+	supportsNodeType func(nodeType string) bool,
+) (*workflowPlan, error) {
 	if workflow == nil {
 		return nil, errors.New("workflow is required for task_type=workflow")
 	}
@@ -737,6 +733,9 @@ func buildWorkflowPlan(workflow *domain.CronWorkflowSpec) (*workflowPlan, error)
 		if _, exists := nodeByID[node.ID]; exists {
 			return nil, fmt.Errorf("workflow node id duplicated: %s", node.ID)
 		}
+		if node.Type != workflowNodeStart && supportsNodeType != nil && !supportsNodeType(node.Type) {
+			return nil, fmt.Errorf("workflow node %s has unsupported type=%q", node.ID, node.Type)
+		}
 
 		switch node.Type {
 		case workflowNodeStart:
@@ -767,7 +766,9 @@ func buildWorkflowPlan(workflow *domain.CronWorkflowSpec) (*workflowPlan, error)
 				return nil, fmt.Errorf("workflow node %s if_condition invalid: %w", node.ID, err)
 			}
 		default:
-			return nil, fmt.Errorf("workflow node %s has unsupported type=%q", node.ID, node.Type)
+			if supportsNodeType == nil {
+				return nil, fmt.Errorf("workflow node %s has unsupported type=%q", node.ID, node.Type)
+			}
 		}
 
 		nodeByID[node.ID] = node
@@ -1086,14 +1087,14 @@ func newRunID() string {
 
 func (s *Service) markExecutionSkipped(jobID, message string) error {
 	failed := statusFailed
-	return s.deps.Store.Write(func(st *repo.State) error {
-		if _, ok := st.CronJobs[jobID]; !ok {
+	return s.deps.Store.WriteCron(func(st *ports.CronAggregate) error {
+		if _, ok := st.Jobs[jobID]; !ok {
 			return ErrJobNotFound
 		}
-		state := normalizePausedState(st.CronStates[jobID])
+		state := normalizePausedState(st.States[jobID])
 		state.LastStatus = &failed
 		state.LastError = &message
-		st.CronStates[jobID] = state
+		st.States[jobID] = state
 		return nil
 	})
 }

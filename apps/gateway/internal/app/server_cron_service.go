@@ -2,11 +2,8 @@ package app
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"net/http"
-	"net/http/httptest"
 	"strings"
 
 	"nextai/apps/gateway/internal/domain"
@@ -23,6 +20,9 @@ func (s *Server) getCronService() *cronservice.Service {
 }
 
 func (s *Server) newCronService() *cronservice.Service {
+	agentProcessor := adapters.AgentProcessor{
+		ProcessFunc: s.processAgentViaPort,
+	}
 	return cronservice.NewService(cronservice.Dependencies{
 		Store:   s.stateStore,
 		DataDir: s.cfg.DataDir,
@@ -32,7 +32,7 @@ func (s *Server) newCronService() *cronservice.Service {
 			},
 		},
 		ExecuteConsoleAgentTask: func(ctx context.Context, job domain.CronJobSpec, text string) error {
-			return s.executeCronConsoleAgentTask(ctx, job, text)
+			return s.executeCronConsoleAgentTask(ctx, agentProcessor, job, text)
 		},
 		ExecuteTask: func(ctx context.Context, job domain.CronJobSpec) (bool, error) {
 			if s.cronTaskExecutor == nil {
@@ -43,7 +43,12 @@ func (s *Server) newCronService() *cronservice.Service {
 	})
 }
 
-func (s *Server) executeCronConsoleAgentTask(ctx context.Context, job domain.CronJobSpec, text string) error {
+func (s *Server) executeCronConsoleAgentTask(
+	ctx context.Context,
+	agentProcessor ports.AgentProcessor,
+	job domain.CronJobSpec,
+	text string,
+) error {
 	sessionID := strings.TrimSpace(job.Dispatch.Target.SessionID)
 	userID := strings.TrimSpace(job.Dispatch.Target.UserID)
 	if sessionID == "" || userID == "" {
@@ -72,18 +77,16 @@ func (s *Server) executeCronConsoleAgentTask(ctx context.Context, job domain.Cro
 		BizParams: cronservice.BuildBizParams(job),
 	}
 
-	body, err := json.Marshal(agentReq)
-	if err != nil {
-		return fmt.Errorf("cron console agent request marshal failed: %w", err)
+	if agentProcessor == nil {
+		return errors.New("cron console agent processor is unavailable")
 	}
-
-	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodPost, "/agent/process", nil).WithContext(ctx)
-	s.processAgentWithBody(recorder, request, body)
-
-	status := recorder.Result().StatusCode
-	if status >= http.StatusBadRequest {
-		return fmt.Errorf("cron console agent execution failed: status=%d body=%s", status, strings.TrimSpace(recorder.Body.String()))
+	if _, processErr := agentProcessor.Process(ctx, agentReq); processErr != nil {
+		return fmt.Errorf(
+			"cron console agent execution failed: status=%d code=%s message=%s",
+			processErr.Status,
+			strings.TrimSpace(processErr.Code),
+			strings.TrimSpace(processErr.Message),
+		)
 	}
 
 	return nil

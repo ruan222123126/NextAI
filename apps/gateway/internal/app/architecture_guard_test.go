@@ -17,10 +17,12 @@ func TestServiceBackedHandlersAvoidDirectStoreAndRegistryAccess(t *testing.T) {
 	}
 	baseDir := filepath.Dir(thisFile)
 	targetFiles := []string{
+		"server_admin_service.go",
 		"server_agent_service.go",
 		"server_cron.go",
 		"server_cron_service.go",
 		"server_model_service.go",
+		"server_selfops_service.go",
 		"server_workspace_service.go",
 	}
 	forbidden := []string{
@@ -28,6 +30,8 @@ func TestServiceBackedHandlersAvoidDirectStoreAndRegistryAccess(t *testing.T) {
 		"s.store.Write(",
 		"s.channels[",
 		"s.tools[",
+		"httptest.NewRecorder(",
+		"httptest.NewRequest(",
 	}
 
 	for _, name := range targetFiles {

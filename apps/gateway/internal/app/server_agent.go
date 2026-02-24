@@ -19,10 +19,9 @@ import (
 
 	"nextai/apps/gateway/internal/domain"
 	"nextai/apps/gateway/internal/plugin"
-	"nextai/apps/gateway/internal/provider"
 	"nextai/apps/gateway/internal/repo"
 	"nextai/apps/gateway/internal/runner"
-	agentservice "nextai/apps/gateway/internal/service/agent"
+	agentprotocolservice "nextai/apps/gateway/internal/service/agentprotocol"
 	selfopsservice "nextai/apps/gateway/internal/service/selfops"
 )
 
@@ -174,7 +173,6 @@ func (s *Server) processQQInbound(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) processAgentWithBody(w http.ResponseWriter, r *http.Request, bodyBytes []byte) {
-
 	var req domain.AgentProcessRequest
 	if err := json.Unmarshal(bodyBytes, &req); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid_json", "invalid request body", nil)
@@ -185,145 +183,10 @@ func (s *Server) processAgentWithBody(w http.ResponseWriter, r *http.Request, bo
 		writeErr(w, http.StatusBadRequest, "invalid_json", "invalid request body", nil)
 		return
 	}
-	if req.SessionID == "" || req.UserID == "" {
-		writeErr(w, http.StatusBadRequest, "invalid_request", "session_id and user_id are required", nil)
-		return
-	}
+
 	req.Channel = resolveProcessRequestChannel(r, req.Channel)
-	channelPlugin, channelCfg, channelName, err := s.resolveChannel(req.Channel)
-	if err != nil {
-		status, code, message := mapChannelError(err)
-		writeErr(w, status, code, message, nil)
-		return
-	}
-	req.Channel = channelName
-	if isContextResetCommand(req.Input) {
-		if err := s.clearChatContext(req.SessionID, req.UserID, req.Channel); err != nil {
-			writeErr(w, http.StatusInternalServerError, "store_error", err.Error(), nil)
-			return
-		}
-		dispatchCfg := mergeChannelDispatchConfig(channelName, channelCfg, req.BizParams)
-		if err := channelPlugin.SendText(r.Context(), req.UserID, req.SessionID, contextResetReply, dispatchCfg); err != nil {
-			status, code, message := mapChannelError(&channelError{
-				Code:    "channel_dispatch_failed",
-				Message: fmt.Sprintf("failed to dispatch message to channel %q", channelName),
-				Err:     err,
-			})
-			writeErr(w, status, code, message, nil)
-			return
-		}
-		writeImmediateAgentResponse(w, req.Stream, contextResetReply)
-		return
-	}
-
-	requestPromptMode, hasRequestPromptMode, err := parsePromptModeFromBizParams(req.BizParams)
-	if err != nil {
-		writeErr(w, http.StatusBadRequest, "invalid_request", err.Error(), nil)
-		return
-	}
-	effectivePromptMode := requestPromptMode
-	if !hasRequestPromptMode {
-		effectivePromptMode = promptModeDefault
-		s.store.Read(func(state *repo.State) {
-			for _, chat := range state.Chats {
-				if chat.SessionID != req.SessionID || chat.UserID != req.UserID || chat.Channel != req.Channel {
-					continue
-				}
-				effectivePromptMode = resolvePromptModeFromChatMeta(chat.Meta)
-				return
-			}
-		})
-	}
-	reviewTaskRequested := effectivePromptMode == promptModeCodex && isReviewTaskCommand(req.Input)
-	compactTaskRequested := effectivePromptMode == promptModeCodex && isCompactTaskCommand(req.Input)
-	memoryTaskRequested := effectivePromptMode == promptModeCodex && isMemoryTaskCommand(req.Input)
-	collaborationMode := collaborationModeDefaultName
-	if effectivePromptMode == promptModeCodex {
-		switch {
-		case isPlanTaskCommand(req.Input):
-			collaborationMode = collaborationModePlanName
-		case isExecuteTaskCommand(req.Input):
-			collaborationMode = collaborationModeExecuteName
-		case isPairTaskCommand(req.Input):
-			collaborationMode = collaborationModePairProgrammingName
-		}
-	}
-
-	systemLayers, err := s.buildSystemLayersForModeWithOptions(effectivePromptMode, codexLayerBuildOptions{
-		SessionID:         req.SessionID,
-		ReviewTask:        reviewTaskRequested,
-		CompactTask:       compactTaskRequested,
-		MemoryTask:        memoryTaskRequested,
-		CollaborationMode: collaborationMode,
-	})
-	if err != nil {
-		errorCode, errorMessage := promptUnavailableErrorForMode(effectivePromptMode)
-		writeErr(w, http.StatusInternalServerError, errorCode, errorMessage, nil)
-		return
-	}
-
-	cronChatMeta := cronChatMetaFromBizParams(req.BizParams)
-	chatID := ""
-	activeLLM := domain.ModelSlotConfig{}
-	providerSetting := repo.ProviderSetting{}
-	historyInput := []domain.AgentInputMessage{}
-	if err := s.store.Write(func(state *repo.State) error {
-		for id, c := range state.Chats {
-			if c.SessionID == req.SessionID && c.UserID == req.UserID && c.Channel == req.Channel {
-				chatID = id
-				break
-			}
-		}
-		if chatID == "" {
-			chatID = newID("chat")
-			now := nowISO()
-			state.Chats[chatID] = domain.ChatSpec{
-				ID: chatID, Name: "New Chat", SessionID: req.SessionID, UserID: req.UserID, Channel: req.Channel,
-				Meta: map[string]interface{}{}, CreatedAt: now, UpdatedAt: now,
-			}
-		}
-		if hasRequestPromptMode {
-			chat := state.Chats[chatID]
-			if chat.Meta == nil {
-				chat.Meta = map[string]interface{}{}
-			}
-			chat.Meta[chatMetaPromptModeKey] = requestPromptMode
-			state.Chats[chatID] = chat
-		}
-		if len(cronChatMeta) > 0 {
-			chat := state.Chats[chatID]
-			if chat.Meta == nil {
-				chat.Meta = map[string]interface{}{}
-			}
-			for key, value := range cronChatMeta {
-				chat.Meta[key] = value
-			}
-			state.Chats[chatID] = chat
-		}
-		for _, input := range req.Input {
-			state.Histories[chatID] = append(state.Histories[chatID], domain.RuntimeMessage{
-				ID:      newID("msg"),
-				Role:    input.Role,
-				Type:    input.Type,
-				Content: toRuntimeContents(input.Content),
-			})
-		}
-		historyInput = runtimeHistoryToAgentInputMessages(state.Histories[chatID])
-		chatSpec := state.Chats[chatID]
-		activeLLM = resolveChatActiveModelSlot(chatSpec.Meta, state)
-		providerSetting = getProviderSettingByID(state, activeLLM.ProviderID)
-		return nil
-	}); err != nil {
-		writeErr(w, http.StatusInternalServerError, "store_error", err.Error(), nil)
-		return
-	}
-	requestedToolCall, hasToolCall, err := parseToolCall(req.BizParams, rawRequest, effectivePromptMode)
-	if err != nil {
-		writeErr(w, http.StatusBadRequest, "invalid_tool_input", err.Error(), nil)
-		return
-	}
-
 	streaming := req.Stream
+
 	var flusher http.Flusher
 	streamStarted := false
 	if streaming {
@@ -361,56 +224,7 @@ func (s *Server) processAgentWithBody(w http.ResponseWriter, r *http.Request, bo
 		flusher.Flush()
 	}
 
-	reply := ""
-	events := make([]domain.AgentEvent, 0, 12)
-	memoryRolloutContents := ""
-	effectiveInput := []domain.AgentInputMessage{}
-	generateConfig := runner.GenerateConfig{
-		PromptCacheKey: req.SessionID,
-	}
-	if !hasToolCall {
-		if activeLLM.ProviderID == "" || strings.TrimSpace(activeLLM.Model) == "" {
-			generateConfig = runner.GenerateConfig{
-				ProviderID:         runner.ProviderDemo,
-				Model:              "demo-chat",
-				AdapterID:          provider.AdapterDemo,
-				PromptCacheKey:     req.SessionID,
-				PreviousResponseID: latestProviderResponseIDFromInput(historyInput),
-			}
-		} else {
-			if !providerEnabled(providerSetting) {
-				streamFail(http.StatusBadRequest, "provider_disabled", "active provider is disabled", nil)
-				return
-			}
-			resolvedModel, ok := provider.ResolveModelID(activeLLM.ProviderID, activeLLM.Model, providerSetting.ModelAliases)
-			if !ok {
-				streamFail(http.StatusBadRequest, "model_not_found", "active model is not available for provider", nil)
-				return
-			}
-			activeLLM.Model = resolvedModel
-			generateConfig = runner.GenerateConfig{
-				ProviderID:         activeLLM.ProviderID,
-				Model:              activeLLM.Model,
-				APIKey:             resolveProviderAPIKey(activeLLM.ProviderID, providerSetting),
-				BaseURL:            resolveProviderBaseURL(activeLLM.ProviderID, providerSetting),
-				AdapterID:          provider.ResolveAdapter(activeLLM.ProviderID),
-				Headers:            sanitizeStringMap(providerSetting.Headers),
-				TimeoutMS:          providerSetting.TimeoutMS,
-				ReasoningEffort:    providerSetting.ReasoningEffort,
-				Store:              providerStoreEnabled(providerSetting),
-				PromptCacheKey:     req.SessionID,
-				PreviousResponseID: latestProviderResponseIDFromInput(historyInput),
-			}
-		}
-		if len(historyInput) > 0 {
-			effectiveInput = prependSystemLayers(historyInput, systemLayers)
-		} else {
-			effectiveInput = prependSystemLayers(req.Input, systemLayers)
-		}
-	}
-	completedEventMeta := buildCompletedModelRequestMeta(effectivePromptMode, systemLayers, effectiveInput, generateConfig)
 	emitEvent := func(evt domain.AgentEvent) {
-		evt = withCompletedEventMeta(evt, completedEventMeta)
 		if !streaming {
 			return
 		}
@@ -420,91 +234,22 @@ func (s *Server) processAgentWithBody(w http.ResponseWriter, r *http.Request, bo
 		streamStarted = true
 	}
 
-	processResult, processErr := s.getAgentService().Process(
-		r.Context(),
-		agentservice.ProcessParams{
-			Request: req,
-			RequestedToolCall: agentservice.ToolCall{
-				Name:  requestedToolCall.Name,
-				Input: requestedToolCall.Input,
-			},
-			HasToolCall:    hasToolCall,
-			Streaming:      streaming,
-			ReplyChunkSize: replyChunkSizeDefault,
-			GenerateConfig: generateConfig,
-			EffectiveInput: effectiveInput,
-			PromptMode:     effectivePromptMode,
-		},
-		emitEvent,
-	)
+	response, processErr := s.processAgentCore(r.Context(), req, rawRequest, streaming, emitEvent)
 	if processErr != nil {
 		streamFail(processErr.Status, processErr.Code, processErr.Message, processErr.Details)
 		return
 	}
-	reply = processResult.Reply
-	events = withCompletedEventMetaForEvents(processResult.Events, completedEventMeta)
-
-	assistant := domain.RuntimeMessage{
-		ID:      newID("msg"),
-		Role:    "assistant",
-		Type:    "message",
-		Content: []domain.RuntimeContent{{Type: "text", Text: reply}},
-	}
-	metadata := buildAssistantMessageMetadata(events)
-	if responseID := strings.TrimSpace(processResult.ProviderResponseID); responseID != "" {
-		if metadata == nil {
-			metadata = map[string]interface{}{}
-		}
-		metadata[assistantMetadataProviderResponseIDKey] = responseID
-	}
-	if len(metadata) > 0 {
-		assistant.Metadata = metadata
-	}
-
-	_ = s.store.Write(func(state *repo.State) error {
-		state.Histories[chatID] = append(state.Histories[chatID], assistant)
-		if memoryTaskRequested && !hasToolCall {
-			memoryRolloutContents = serializeCodexMemoryRollout(state.Histories[chatID])
-		}
-		chat := state.Chats[chatID]
-		chat.UpdatedAt = nowISO()
-		if chat.Name == "New Chat" && len(req.Input) > 0 && len(req.Input[0].Content) > 0 {
-			first := strings.TrimSpace(req.Input[0].Content[0].Text)
-			if first != "" {
-				if len([]rune(first)) > 20 {
-					chat.Name = string([]rune(first)[:20])
-				} else {
-					chat.Name = first
-				}
-			}
-		}
-		state.Chats[chatID] = chat
-		return nil
-	})
-
-	dispatchCfg := mergeChannelDispatchConfig(channelName, channelCfg, req.BizParams)
-	if err := channelPlugin.SendText(r.Context(), req.UserID, req.SessionID, reply, dispatchCfg); err != nil {
-		status, code, message := mapChannelError(&channelError{
-			Code:    "channel_dispatch_failed",
-			Message: fmt.Sprintf("failed to dispatch message to channel %q", channelName),
-			Err:     err,
-		})
-		streamFail(status, code, message, nil)
-		return
-	}
-
-	if memoryTaskRequested && !hasToolCall {
-		s.startCodexMemoryPipeline(req.SessionID, generateConfig, memoryRolloutContents)
-	}
 
 	if !streaming {
-		writeJSON(w, http.StatusOK, domain.AgentProcessResponse{
-			Reply:  reply,
-			Events: events,
-		})
+		writeJSON(w, http.StatusOK, response)
 		return
 	}
 
+	if !streamStarted {
+		for _, evt := range response.Events {
+			emitEvent(evt)
+		}
+	}
 	_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
 	flusher.Flush()
 }
@@ -669,20 +414,17 @@ func writeImmediateAgentResponse(w http.ResponseWriter, streaming bool, reply st
 }
 
 func resolveProcessRequestChannel(r *http.Request, requestedChannel string) string {
-	if isQQInboundRequest(r) {
-		return qqChannelName
-	}
-	if requested := strings.ToLower(strings.TrimSpace(requestedChannel)); requested != "" {
-		return requested
-	}
-	return defaultProcessChannel
+	return agentprotocolservice.ResolveProcessRequestChannel(
+		r,
+		requestedChannel,
+		qqInboundPath,
+		qqChannelName,
+		defaultProcessChannel,
+	)
 }
 
 func isQQInboundRequest(r *http.Request) bool {
-	if r == nil || r.URL == nil {
-		return false
-	}
-	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(r.URL.Path)), qqInboundPath)
+	return agentprotocolservice.IsQQInboundRequest(r, qqInboundPath)
 }
 
 type qqInboundEvent struct {
@@ -695,243 +437,44 @@ type qqInboundEvent struct {
 }
 
 func parseQQInboundEvent(body []byte) (qqInboundEvent, error) {
-	raw := map[string]interface{}{}
-	if err := json.Unmarshal(body, &raw); err != nil {
-		return qqInboundEvent{}, errors.New("invalid request body")
+	parsed, err := agentprotocolservice.ParseQQInboundEvent(body)
+	if err != nil {
+		return qqInboundEvent{}, err
 	}
-
-	payload := raw
-	if nested, ok := qqMap(raw["d"]); ok {
-		payload = nested
-	} else if nested, ok := qqMap(raw["data"]); ok {
-		payload = nested
-	}
-
-	eventName := strings.ToUpper(qqFirst(
-		qqString(raw["event"]),
-		qqString(raw["event_type"]),
-		qqString(raw["type"]),
-		qqString(raw["t"]),
-	))
-	targetType, _ := normalizeQQTargetTypeAlias(strings.ToLower(eventName))
-	if targetType == "" {
-		targetType, _ = normalizeQQTargetTypeAlias(qqFirst(
-			qqString(payload["message_type"]),
-			qqString(payload["target_type"]),
-		))
-	}
-
-	switch eventName {
-	case "C2C_MESSAGE_CREATE":
-		targetType = "c2c"
-	case "GROUP_AT_MESSAGE_CREATE":
-		targetType = "group"
-	case "AT_MESSAGE_CREATE", "DIRECT_MESSAGE_CREATE":
-		targetType = "guild"
-	}
-	if targetType == "" {
-		return qqInboundEvent{}, errors.New("unsupported qq event type")
-	}
-
-	author, _ := qqMap(payload["author"])
-	sender, _ := qqMap(payload["sender"])
-	text := strings.TrimSpace(qqFirst(qqString(payload["content"]), qqString(payload["text"])))
-	if text == "" {
-		return qqInboundEvent{}, nil
-	}
-
-	event := qqInboundEvent{
-		Text:      text,
-		MessageID: strings.TrimSpace(qqString(payload["id"])),
-	}
-
-	switch targetType {
-	case "c2c":
-		senderID := strings.TrimSpace(qqFirst(
-			qqString(author["user_openid"]),
-			qqString(author["id"]),
-			qqString(sender["user_openid"]),
-			qqString(sender["id"]),
-			qqString(payload["user_id"]),
-		))
-		targetID := strings.TrimSpace(qqFirst(
-			qqString(payload["target_id"]),
-			senderID,
-		))
-		if targetID == "" {
-			return qqInboundEvent{}, errors.New("qq c2c event missing sender id")
-		}
-		userID := strings.TrimSpace(qqFirst(senderID, targetID))
-		sessionID := strings.TrimSpace(qqFirst(
-			qqString(payload["session_id"]),
-			fmt.Sprintf("qq:c2c:%s", targetID),
-		))
-		event.UserID = userID
-		event.SessionID = sessionID
-		event.TargetType = "c2c"
-		event.TargetID = targetID
-	case "group":
-		groupID := strings.TrimSpace(qqFirst(
-			qqString(payload["group_openid"]),
-			qqString(payload["target_id"]),
-			qqString(payload["group_id"]),
-		))
-		if groupID == "" {
-			return qqInboundEvent{}, errors.New("qq group event missing group_openid")
-		}
-		senderID := strings.TrimSpace(qqFirst(
-			qqString(author["member_openid"]),
-			qqString(author["user_openid"]),
-			qqString(author["id"]),
-			qqString(sender["id"]),
-			qqString(payload["user_id"]),
-		))
-		if senderID == "" {
-			senderID = groupID
-		}
-		sessionID := strings.TrimSpace(qqFirst(
-			qqString(payload["session_id"]),
-			fmt.Sprintf("qq:group:%s:%s", groupID, senderID),
-		))
-		event.UserID = senderID
-		event.SessionID = sessionID
-		event.TargetType = "group"
-		event.TargetID = groupID
-	case "guild":
-		channelID := strings.TrimSpace(qqFirst(
-			qqString(payload["channel_id"]),
-			qqString(payload["target_id"]),
-		))
-		if channelID == "" {
-			return qqInboundEvent{}, errors.New("qq guild event missing channel_id")
-		}
-		senderID := strings.TrimSpace(qqFirst(
-			qqString(author["id"]),
-			qqString(author["username"]),
-			qqString(sender["id"]),
-			qqString(payload["user_id"]),
-		))
-		if senderID == "" {
-			senderID = channelID
-		}
-		sessionID := strings.TrimSpace(qqFirst(
-			qqString(payload["session_id"]),
-			fmt.Sprintf("qq:guild:%s:%s", channelID, senderID),
-		))
-		event.UserID = senderID
-		event.SessionID = sessionID
-		event.TargetType = "guild"
-		event.TargetID = channelID
-	}
-
-	if event.UserID == "" || event.SessionID == "" || event.TargetID == "" {
-		return qqInboundEvent{}, errors.New("qq inbound event missing required fields")
-	}
-	return event, nil
+	return qqInboundEvent{
+		Text:       parsed.Text,
+		UserID:     parsed.UserID,
+		SessionID:  parsed.SessionID,
+		TargetType: parsed.TargetType,
+		TargetID:   parsed.TargetID,
+		MessageID:  parsed.MessageID,
+	}, nil
 }
 
 func mergeChannelDispatchConfig(channelName string, cfg map[string]interface{}, bizParams map[string]interface{}) map[string]interface{} {
-	if channelName != "qq" || len(bizParams) == 0 {
-		return cfg
-	}
-	raw, ok := bizParams["channel"]
-	if !ok || raw == nil {
-		return cfg
-	}
-	body, ok := raw.(map[string]interface{})
-	if !ok {
-		return cfg
-	}
-	merged := cloneChannelConfig(cfg)
-	updated := false
-
-	if canonical, ok := normalizeQQTargetTypeAlias(qqString(body["target_type"])); ok {
-		merged["target_type"] = canonical
-		updated = true
-	}
-	if targetID := strings.TrimSpace(qqString(body["target_id"])); targetID != "" {
-		merged["target_id"] = targetID
-		updated = true
-	}
-	if msgID := strings.TrimSpace(qqString(body["msg_id"])); msgID != "" {
-		merged["msg_id"] = msgID
-		updated = true
-	}
-	if botPrefix := qqString(body["bot_prefix"]); strings.TrimSpace(botPrefix) != "" {
-		merged["bot_prefix"] = botPrefix
-		updated = true
-	}
-	if !updated {
-		return cfg
-	}
-	return merged
+	return agentprotocolservice.MergeChannelDispatchConfig(channelName, cfg, bizParams)
 }
 
 func cronChatMetaFromBizParams(bizParams map[string]interface{}) map[string]interface{} {
-	if len(bizParams) == 0 {
-		return nil
-	}
-	raw, ok := bizParams["cron"]
-	if !ok || raw == nil {
-		return nil
-	}
-	cronPayload, ok := raw.(map[string]interface{})
-	if !ok {
-		return nil
-	}
-	jobID := strings.TrimSpace(qqString(cronPayload["job_id"]))
-	jobName := strings.TrimSpace(qqString(cronPayload["job_name"]))
-	if jobID == "" && jobName == "" {
-		return nil
-	}
-	meta := map[string]interface{}{
-		"source": "cron",
-	}
-	if jobID != "" {
-		meta["cron_job_id"] = jobID
-	}
-	if jobName != "" {
-		meta["cron_job_name"] = jobName
-	}
-	return meta
+	return agentprotocolservice.CronChatMetaFromBizParams(bizParams)
 }
 
 func parsePromptModeFromBizParams(bizParams map[string]interface{}) (string, bool, error) {
-	if len(bizParams) == 0 {
-		return promptModeDefault, false, nil
-	}
-	rawPromptMode, hasPromptMode := bizParams[chatMetaPromptModeKey]
-	if !hasPromptMode {
-		return promptModeDefault, false, nil
-	}
-	value, ok := rawPromptMode.(string)
-	if !ok {
-		return "", true, errors.New("invalid prompt_mode")
-	}
-	mode, ok := normalizePromptMode(value)
-	if !ok {
-		return "", true, errors.New("invalid prompt_mode")
-	}
-	return mode, true, nil
+	return agentprotocolservice.ParsePromptModeFromBizParams(
+		bizParams,
+		chatMetaPromptModeKey,
+		promptModeDefault,
+		normalizePromptMode,
+	)
 }
 
 func resolvePromptModeFromChatMeta(meta map[string]interface{}) string {
-	if len(meta) == 0 {
-		return promptModeDefault
-	}
-	rawMode, ok := meta[chatMetaPromptModeKey]
-	if !ok || rawMode == nil {
-		return promptModeDefault
-	}
-	value, ok := rawMode.(string)
-	if !ok {
-		return promptModeDefault
-	}
-	mode, ok := normalizePromptMode(value)
-	if !ok {
-		return promptModeDefault
-	}
-	return mode
+	return agentprotocolservice.ResolvePromptModeFromChatMeta(
+		meta,
+		chatMetaPromptModeKey,
+		promptModeDefault,
+		normalizePromptMode,
+	)
 }
 
 func resolveChatActiveModelSlot(meta map[string]interface{}, state *repo.State) domain.ModelSlotConfig {
@@ -1138,44 +681,16 @@ func (s *Server) listToolDefinitions() []runner.ToolDefinition {
 }
 
 func (s *Server) listToolDefinitionsForPromptMode(promptMode string) []runner.ToolDefinition {
-	if len(s.tools) == 0 && s.toolDisabled("self_ops") {
-		return nil
-	}
-	nameSet := map[string]struct{}{}
+	registeredToolNames := make([]string, 0, len(s.tools))
 	for name := range s.tools {
-		if s.toolDisabled(name) {
-			continue
-		}
-		nameSet[name] = struct{}{}
+		registeredToolNames = append(registeredToolNames, name)
 	}
-
-	_, hasView := nameSet["view"]
-	_, hasBrowser := nameSet["browser"]
-	if (hasView || hasBrowser) && !s.toolDisabled("open") {
-		nameSet["open"] = struct{}{}
-	}
-	if hasBrowser {
-		if !s.toolDisabled("click") {
-			nameSet["click"] = struct{}{}
-		}
-		if !s.toolDisabled("screenshot") {
-			nameSet["screenshot"] = struct{}{}
-		}
-	}
-	if !s.toolDisabled("self_ops") {
-		nameSet["self_ops"] = struct{}{}
-	}
-	if isClaudePromptMode(promptMode) {
-		for _, name := range claudeCompatibleToolDefinitionNames() {
-			nameSet[name] = struct{}{}
-		}
-	}
-
-	names := make([]string, 0, len(nameSet))
-	for name := range nameSet {
-		names = append(names, name)
-	}
-	sort.Strings(names)
+	names := agentprotocolservice.ListToolDefinitionNames(
+		promptMode,
+		registeredToolNames,
+		s.toolHasDeclaredCapability,
+		s.toolDisabled,
+	)
 
 	out := make([]runner.ToolDefinition, 0, len(names))
 	for _, name := range names {
@@ -1185,23 +700,7 @@ func (s *Server) listToolDefinitionsForPromptMode(promptMode string) []runner.To
 }
 
 func claudeCompatibleToolDefinitionNames() []string {
-	return []string{
-		"Bash",
-		"Edit",
-		"ExitPlanMode",
-		"Glob",
-		"Grep",
-		"LS",
-		"MultiEdit",
-		"NotebookEdit",
-		"NotebookRead",
-		"Read",
-		"Task",
-		"TodoWrite",
-		"WebFetch",
-		"WebSearch",
-		"Write",
-	}
+	return agentprotocolservice.ClaudeCompatibleToolDefinitionNames()
 }
 
 func buildToolDefinition(name string) runner.ToolDefinition {
@@ -2206,145 +1705,46 @@ func (e *toolError) Unwrap() error {
 }
 
 func parseToolCall(bizParams map[string]interface{}, rawRequest map[string]interface{}, promptMode string) (toolCall, bool, error) {
-	if call, ok, err := parseBizParamsToolCall(bizParams, promptMode); ok || err != nil {
-		return call, ok, err
+	call, ok, err := agentprotocolservice.ParseToolCall(bizParams, rawRequest, promptMode)
+	if err != nil || !ok {
+		return toolCall{}, ok, err
 	}
-	return parseShortcutToolCall(rawRequest, promptMode)
+	return toolCall{
+		Name:  call.Name,
+		Input: call.Input,
+	}, true, nil
 }
 
 func parseBizParamsToolCall(bizParams map[string]interface{}, promptMode string) (toolCall, bool, error) {
-	if len(bizParams) == 0 {
-		return toolCall{}, false, nil
+	call, ok, err := agentprotocolservice.ParseBizParamsToolCall(bizParams, promptMode)
+	if err != nil || !ok {
+		return toolCall{}, ok, err
 	}
-	raw, ok := bizParams["tool"]
-	if !ok || raw == nil {
-		return toolCall{}, false, nil
-	}
-	toolBody, ok := raw.(map[string]interface{})
-	if !ok {
-		return toolCall{}, false, errors.New("biz_params.tool must be an object")
-	}
-	rawName, ok := toolBody["name"]
-	if !ok {
-		return toolCall{}, false, errors.New("biz_params.tool.name is required")
-	}
-	name, ok := rawName.(string)
-	if !ok {
-		return toolCall{}, false, errors.New("biz_params.tool.name must be a string")
-	}
-	name = normalizeToolNameForPromptMode(strings.ToLower(strings.TrimSpace(name)), promptMode)
-	if name == "" {
-		return toolCall{}, false, errors.New("biz_params.tool.name cannot be empty")
-	}
-	rawInput, hasInput := toolBody["input"]
-	if !hasInput {
-		body := map[string]interface{}{}
-		for key, value := range toolBody {
-			if key == "name" {
-				continue
-			}
-			body[key] = value
-		}
-		rawInput = body
-	}
-	input, err := parseToolPayload(rawInput, "biz_params.tool")
-	if err != nil {
-		return toolCall{}, false, err
-	}
-	return toolCall{Name: name, Input: input}, true, nil
+	return toolCall{Name: call.Name, Input: call.Input}, true, nil
 }
 
 func parseShortcutToolCall(rawRequest map[string]interface{}, promptMode string) (toolCall, bool, error) {
-	if len(rawRequest) == 0 {
-		return toolCall{}, false, nil
+	call, ok, err := agentprotocolservice.ParseShortcutToolCall(rawRequest, promptMode)
+	if err != nil || !ok {
+		return toolCall{}, ok, err
 	}
-	shortcuts := []string{
-		"view", "edit", "shell", "browser", "search", "open", "find", "click", "screenshot",
-		"read", "write", "bash", "glob", "grep", "ls", "task", "todowrite", "exitplanmode",
-		"websearch", "webfetch", "multiedit", "notebookread", "notebookedit",
-		"Read", "Write", "Bash", "Glob", "Grep", "LS", "Task", "TodoWrite", "ExitPlanMode",
-		"WebSearch", "WebFetch", "MultiEdit", "NotebookRead", "NotebookEdit", "Edit",
-	}
-	matched := make([]string, 0, 1)
-	for _, key := range shortcuts {
-		if raw, ok := rawRequest[key]; ok && raw != nil {
-			matched = append(matched, key)
-		}
-	}
-	if len(matched) == 0 {
-		return toolCall{}, false, nil
-	}
-	if len(matched) > 1 {
-		return toolCall{}, false, errors.New("only one shortcut tool key is allowed")
-	}
-	name := matched[0]
-	input, err := parseToolPayload(rawRequest[name], name)
-	if err != nil {
-		return toolCall{}, false, err
-	}
-	return toolCall{Name: normalizeToolNameForPromptMode(name, promptMode), Input: input}, true, nil
+	return toolCall{Name: call.Name, Input: call.Input}, true, nil
 }
 
 func parseToolPayload(raw interface{}, path string) (map[string]interface{}, error) {
-	if raw == nil {
-		return map[string]interface{}{}, nil
-	}
-	switch value := raw.(type) {
-	case []interface{}:
-		return map[string]interface{}{"items": value}, nil
-	case map[string]interface{}:
-		if nested, ok := value["input"]; ok {
-			return parseToolPayload(nested, path+".input")
-		}
-		return safeMap(value), nil
-	default:
-		return nil, fmt.Errorf("%s must be an object or array", path)
-	}
+	return agentprotocolservice.ParseToolPayload(raw, path)
 }
 
 func normalizeToolName(name string) string {
-	switch name {
-	case "view_file_lines", "view_file_lins", "view_file":
-		return "view"
-	case "edit_file_lines", "edit_file_lins", "edit_file":
-		return "edit"
-	case "exec_command", "functions.exec_command":
-		return "shell"
-	case "web_browser", "browser_use", "browser_tool":
-		return "browser"
-	case "web_search", "search_api", "search_tool":
-		return "search"
-	case "open":
-		return "open"
-	case "find":
-		return "find"
-	case "click":
-		return "click"
-	case "screenshot":
-		return "screenshot"
-	case "selfops", "self_ops":
-		return "self_ops"
-	default:
-		return name
-	}
+	return agentprotocolservice.NormalizeToolName(name)
 }
 
 func normalizeToolNameForPromptMode(name string, promptMode string) string {
-	normalized := normalizeToolName(strings.ToLower(strings.TrimSpace(name)))
-	if !isClaudePromptMode(promptMode) {
-		return normalized
-	}
-	switch normalized {
-	case "bash", "read", "write", "glob", "grep", "ls", "task", "todowrite", "exitplanmode",
-		"websearch", "webfetch", "multiedit", "notebookread", "notebookedit":
-		return normalized
-	default:
-		return normalized
-	}
+	return agentprotocolservice.NormalizeToolNameForPromptMode(name, promptMode)
 }
 
 func isClaudePromptMode(promptMode string) bool {
-	return strings.EqualFold(strings.TrimSpace(promptMode), promptModeClaude)
+	return agentprotocolservice.IsClaudePromptMode(promptMode)
 }
 
 func (s *Server) executeToolCall(call toolCall) (string, error) {
@@ -3684,6 +3084,22 @@ func (s *Server) executeOpenToolCall(input map[string]interface{}) (string, erro
 			Err:     routeErr,
 		}
 	}
+	switch targetName {
+	case "view":
+		if !s.toolHasDeclaredCapability("view", agentprotocolservice.ToolCapabilityOpenLocal) {
+			return "", &toolError{
+				Code:    "tool_not_supported",
+				Message: `tool "open" local-path routing is not supported by current tool registry`,
+			}
+		}
+	case "browser":
+		if !s.toolHasDeclaredCapability("browser", agentprotocolservice.ToolCapabilityOpenURL) {
+			return "", &toolError{
+				Code:    "tool_not_supported",
+				Message: `tool "open" url routing is not supported by current tool registry`,
+			}
+		}
+	}
 	result, err := s.invokeRegisteredTool(targetName, targetInput)
 	if err != nil {
 		return "", err
@@ -3692,6 +3108,19 @@ func (s *Server) executeOpenToolCall(input map[string]interface{}) (string, erro
 }
 
 func (s *Server) executeApproxBrowserToolCall(action string, input map[string]interface{}) (string, error) {
+	requiredCapability := ""
+	switch strings.ToLower(strings.TrimSpace(action)) {
+	case "click":
+		requiredCapability = agentprotocolservice.ToolCapabilityApproxClick
+	case "screenshot":
+		requiredCapability = agentprotocolservice.ToolCapabilityApproxScreenshot
+	}
+	if requiredCapability != "" && !s.toolHasDeclaredCapability("browser", requiredCapability) {
+		return "", &toolError{
+			Code:    "tool_not_supported",
+			Message: fmt.Sprintf(`tool %q is not supported by current tool registry`, action),
+		}
+	}
 	browserInput, routeErr := buildApproxBrowserToolInput(action, input)
 	if routeErr != nil {
 		return "", &toolError{
@@ -3866,7 +3295,7 @@ func (s *Server) invokeRegisteredTool(name string, input map[string]interface{})
 			Message: fmt.Sprintf("tool %q is not supported", normalized),
 		}
 	}
-	result, err := plug.Invoke(input)
+	command, err := plugin.CommandFromMap(input)
 	if err != nil {
 		return nil, &toolError{
 			Code:    "tool_invoke_failed",
@@ -3874,7 +3303,23 @@ func (s *Server) invokeRegisteredTool(name string, input map[string]interface{})
 			Err:     err,
 		}
 	}
-	return result, nil
+	result, err := plug.Invoke(command)
+	if err != nil {
+		return nil, &toolError{
+			Code:    "tool_invoke_failed",
+			Message: fmt.Sprintf("tool %q invocation failed", normalized),
+			Err:     err,
+		}
+	}
+	resultMap, err := result.ToMap()
+	if err != nil {
+		return nil, &toolError{
+			Code:    "tool_invalid_result",
+			Message: fmt.Sprintf("tool %q returned invalid result", normalized),
+			Err:     err,
+		}
+	}
+	return resultMap, nil
 }
 
 func renderToolResult(name string, result map[string]interface{}) (string, error) {

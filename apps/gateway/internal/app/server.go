@@ -26,7 +26,9 @@ import (
 	"nextai/apps/gateway/internal/repo"
 	"nextai/apps/gateway/internal/runner"
 	"nextai/apps/gateway/internal/service/adapters"
+	adminservice "nextai/apps/gateway/internal/service/admin"
 	agentservice "nextai/apps/gateway/internal/service/agent"
+	agentprotocolservice "nextai/apps/gateway/internal/service/agentprotocol"
 	codexpromptservice "nextai/apps/gateway/internal/service/codexprompt"
 	cronservice "nextai/apps/gateway/internal/service/cron"
 	modelservice "nextai/apps/gateway/internal/service/model"
@@ -164,6 +166,8 @@ type Server struct {
 	runner              *runner.Runner
 	channels            map[string]plugin.ChannelPlugin
 	tools               map[string]plugin.ToolPlugin
+	toolCapabilities    map[string]toolCapabilitySet
+	adminService        *adminservice.Service
 	agentService        *agentservice.Service
 	cronService         *cronservice.Service
 	modelService        *modelservice.Service
@@ -191,12 +195,13 @@ func NewServer(cfg config.Config) (*Server, error) {
 		return nil, err
 	}
 	srv := &Server{
-		cfg:        cfg,
-		store:      store,
-		stateStore: adapters.NewRepoStateStore(store),
-		runner:     runner.New(),
-		channels:   map[string]plugin.ChannelPlugin{},
-		tools:      map[string]plugin.ToolPlugin{},
+		cfg:              cfg,
+		store:            store,
+		stateStore:       adapters.NewRepoStateStore(store),
+		runner:           runner.New(),
+		channels:         map[string]plugin.ChannelPlugin{},
+		tools:            map[string]plugin.ToolPlugin{},
+		toolCapabilities: map[string]toolCapabilitySet{},
 		disabledTools: parseDisabledTools(
 			os.Getenv(disabledToolsEnv),
 		),
@@ -219,24 +224,35 @@ func NewServer(cfg config.Config) (*Server, error) {
 	srv.registerChannelPlugin(channel.NewConsoleChannel())
 	srv.registerChannelPlugin(channel.NewWebhookChannel())
 	srv.registerChannelPlugin(channel.NewQQChannel())
-	srv.registerToolPlugin(plugin.NewShellTool())
-	srv.registerToolPlugin(plugin.NewViewFileLinesTool(""))
-	srv.registerToolPlugin(plugin.NewEditFileLinesTool(""))
-	srv.registerToolPlugin(plugin.NewFindTool())
+	srv.registerToolPlugin(plugin.NewShellTool(), agentprotocolservice.ToolCapabilityExecute)
+	srv.registerToolPlugin(
+		plugin.NewViewFileLinesTool(""),
+		agentprotocolservice.ToolCapabilityRead,
+		agentprotocolservice.ToolCapabilityOpenLocal,
+	)
+	srv.registerToolPlugin(plugin.NewEditFileLinesTool(""), agentprotocolservice.ToolCapabilityWrite)
+	srv.registerToolPlugin(plugin.NewFindTool(), agentprotocolservice.ToolCapabilityRead)
 	if parseBool(os.Getenv(enableBrowserToolEnv)) {
 		browserTool, toolErr := plugin.NewBrowserTool(strings.TrimSpace(os.Getenv(browserToolAgentDirEnv)))
 		if toolErr != nil {
 			return nil, fmt.Errorf("init browser tool failed: %w", toolErr)
 		}
-		srv.registerToolPlugin(browserTool)
+		srv.registerToolPlugin(
+			browserTool,
+			agentprotocolservice.ToolCapabilityNetwork,
+			agentprotocolservice.ToolCapabilityOpenURL,
+			agentprotocolservice.ToolCapabilityApproxClick,
+			agentprotocolservice.ToolCapabilityApproxScreenshot,
+		)
 	}
 	if parseBool(os.Getenv(enableSearchToolEnv)) {
 		searchTool, toolErr := plugin.NewSearchToolFromEnv()
 		if toolErr != nil {
 			return nil, fmt.Errorf("init search tool failed: %w", toolErr)
 		}
-		srv.registerToolPlugin(searchTool)
+		srv.registerToolPlugin(searchTool, agentprotocolservice.ToolCapabilityNetwork)
 	}
+	srv.adminService = srv.newAdminService()
 	srv.agentService = srv.newAgentService()
 	srv.cronService = srv.newCronService()
 	srv.modelService = srv.newModelService()
@@ -269,7 +285,7 @@ func (s *Server) registerChannelPlugin(ch plugin.ChannelPlugin) {
 	s.channels[name] = ch
 }
 
-func (s *Server) registerToolPlugin(tp plugin.ToolPlugin) {
+func (s *Server) registerToolPlugin(tp plugin.ToolPlugin, capabilities ...string) {
 	if tp == nil {
 		return
 	}
@@ -278,6 +294,7 @@ func (s *Server) registerToolPlugin(tp plugin.ToolPlugin) {
 		return
 	}
 	s.tools[name] = tp
+	s.toolCapabilities[name] = newToolCapabilitySet(capabilities...)
 }
 
 func parseDisabledTools(raw string) map[string]struct{} {

@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -13,6 +14,321 @@ import (
 	"nextai/apps/gateway/internal/plugin"
 	"nextai/apps/gateway/internal/runner"
 )
+
+func TestContractRegressionProviderExtensionTemplate(t *testing.T) {
+	// 新增 provider 能力时仅追加 case，不修改已有 case。
+	cases := []struct {
+		name          string
+		providerID    string
+		modelID       string
+		expectedReply string
+	}{
+		{
+			name:          "openai_compatible_custom_provider",
+			providerID:    "openai-compatible-regression-template",
+			modelID:       "template-model",
+			expectedReply: "provider template ok",
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			providerCalls := 0
+			mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				providerCalls++
+				if r.Method != http.MethodPost || r.URL.Path != "/chat/completions" {
+					w.WriteHeader(http.StatusNotFound)
+					return
+				}
+				_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"` + tc.expectedReply + `"}}]}`))
+			}))
+			defer mock.Close()
+
+			srv := newTestServer(t)
+
+			configBody, err := json.Marshal(map[string]interface{}{
+				"enabled":  true,
+				"api_key":  "sk-test",
+				"base_url": mock.URL,
+			})
+			if err != nil {
+				t.Fatalf("marshal provider config failed: %v", err)
+			}
+			wConfig := callJSONEndpoint(srv, http.MethodPut, "/models/"+tc.providerID+"/config", string(configBody))
+			if wConfig.Code != http.StatusOK {
+				t.Fatalf("configure provider status=%d body=%s", wConfig.Code, wConfig.Body.String())
+			}
+
+			wCatalog := callJSONEndpoint(srv, http.MethodGet, "/models/catalog", "")
+			if wCatalog.Code != http.StatusOK {
+				t.Fatalf("catalog status=%d body=%s", wCatalog.Code, wCatalog.Body.String())
+			}
+			catalog := decodeJSONObject(t, wCatalog)
+			providers := decodeObjectArrayField(t, catalog, "providers")
+			foundProvider := false
+			for _, item := range providers {
+				if id, _ := item["id"].(string); id == tc.providerID {
+					foundProvider = true
+					break
+				}
+			}
+			if !foundProvider {
+				t.Fatalf("expected provider %q in catalog, body=%s", tc.providerID, wCatalog.Body.String())
+			}
+
+			setActiveBody, err := json.Marshal(map[string]string{
+				"provider_id": tc.providerID,
+				"model":       tc.modelID,
+			})
+			if err != nil {
+				t.Fatalf("marshal set active failed: %v", err)
+			}
+			wActive := callJSONEndpoint(srv, http.MethodPut, "/models/active", string(setActiveBody))
+			if wActive.Code != http.StatusOK {
+				t.Fatalf("set active status=%d body=%s", wActive.Code, wActive.Body.String())
+			}
+
+			processBody, err := json.Marshal(domain.AgentProcessRequest{
+				Input: []domain.AgentInputMessage{
+					{
+						Role:    "user",
+						Type:    "message",
+						Content: []domain.RuntimeContent{{Type: "text", Text: "provider template request"}},
+					},
+				},
+				SessionID: "s-provider-template",
+				UserID:    "u-provider-template",
+				Channel:   "console",
+				Stream:    false,
+			})
+			if err != nil {
+				t.Fatalf("marshal process request failed: %v", err)
+			}
+			wProcess := callJSONEndpoint(srv, http.MethodPost, "/agent/process", string(processBody))
+			if wProcess.Code != http.StatusOK {
+				t.Fatalf("process status=%d body=%s", wProcess.Code, wProcess.Body.String())
+			}
+
+			var out domain.AgentProcessResponse
+			if err := json.Unmarshal(wProcess.Body.Bytes(), &out); err != nil {
+				t.Fatalf("decode process response failed: %v body=%s", err, wProcess.Body.String())
+			}
+			if out.Reply != tc.expectedReply {
+				t.Fatalf("reply=%q, want=%q", out.Reply, tc.expectedReply)
+			}
+			if providerCalls == 0 {
+				t.Fatalf("expected provider to be called at least once")
+			}
+		})
+	}
+}
+
+func TestContractRegressionChannelExtensionTemplate(t *testing.T) {
+	// 新增 channel 能力时仅追加 case，不修改已有 case。
+	cases := []struct {
+		name        string
+		channelName string
+		message     string
+	}{
+		{
+			name:        "custom_channel_plugin_dispatch",
+			channelName: "regression-template-channel",
+			message:     "channel template request",
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			srv := newTestServer(t)
+			ch := &contractRegressionProbeChannel{name: tc.channelName}
+			srv.registerChannelPlugin(ch)
+			srv.adminService = srv.newAdminService()
+
+			wTypes := callJSONEndpoint(srv, http.MethodGet, "/config/channels/types", "")
+			if wTypes.Code != http.StatusOK {
+				t.Fatalf("list channel types status=%d body=%s", wTypes.Code, wTypes.Body.String())
+			}
+			var types []string
+			if err := json.Unmarshal(wTypes.Body.Bytes(), &types); err != nil {
+				t.Fatalf("decode channel types failed: %v body=%s", err, wTypes.Body.String())
+			}
+			if !containsString(types, tc.channelName) {
+				t.Fatalf("expected channel type %q in list, got=%v", tc.channelName, types)
+			}
+
+			configBody, err := json.Marshal(map[string]interface{}{
+				"enabled": true,
+				"token":   "template-token",
+			})
+			if err != nil {
+				t.Fatalf("marshal channel config failed: %v", err)
+			}
+			wConfig := callJSONEndpoint(srv, http.MethodPut, "/config/channels/"+tc.channelName, string(configBody))
+			if wConfig.Code != http.StatusOK {
+				t.Fatalf("configure channel status=%d body=%s", wConfig.Code, wConfig.Body.String())
+			}
+
+			processBody, err := json.Marshal(domain.AgentProcessRequest{
+				Input: []domain.AgentInputMessage{
+					{
+						Role:    "user",
+						Type:    "message",
+						Content: []domain.RuntimeContent{{Type: "text", Text: tc.message}},
+					},
+				},
+				SessionID: "s-channel-template",
+				UserID:    "u-channel-template",
+				Channel:   tc.channelName,
+				Stream:    false,
+			})
+			if err != nil {
+				t.Fatalf("marshal process request failed: %v", err)
+			}
+			wProcess := callJSONEndpoint(srv, http.MethodPost, "/agent/process", string(processBody))
+			if wProcess.Code != http.StatusOK {
+				t.Fatalf("process status=%d body=%s", wProcess.Code, wProcess.Body.String())
+			}
+
+			var out domain.AgentProcessResponse
+			if err := json.Unmarshal(wProcess.Body.Bytes(), &out); err != nil {
+				t.Fatalf("decode process response failed: %v body=%s", err, wProcess.Body.String())
+			}
+			expectedReply := "Echo: " + tc.message
+			if out.Reply != expectedReply {
+				t.Fatalf("reply=%q, want=%q", out.Reply, expectedReply)
+			}
+			if ch.callCount != 1 {
+				t.Fatalf("expected channel call count=1, got=%d", ch.callCount)
+			}
+			if ch.lastUserID != "u-channel-template" {
+				t.Fatalf("channel user_id=%q, want=%q", ch.lastUserID, "u-channel-template")
+			}
+			if ch.lastSessionID != "s-channel-template" {
+				t.Fatalf("channel session_id=%q, want=%q", ch.lastSessionID, "s-channel-template")
+			}
+			if ch.lastText != expectedReply {
+				t.Fatalf("channel text=%q, want=%q", ch.lastText, expectedReply)
+			}
+			if token, _ := ch.lastConfig["token"].(string); token != "template-token" {
+				t.Fatalf("channel config token=%q, want=%q", token, "template-token")
+			}
+		})
+	}
+}
+
+func TestContractRegressionToolExtensionTemplate(t *testing.T) {
+	// 新增 tool 能力时仅追加 case，不修改已有 case。
+	cases := []struct {
+		name          string
+		toolName      string
+		expectedReply string
+	}{
+		{
+			name:          "custom_tool_plugin_invoke",
+			toolName:      "regression-template-tool",
+			expectedReply: "tool template ok",
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			srv := newTestServer(t)
+			invokeCount := 0
+			var capturedInput map[string]interface{}
+			srv.registerToolPlugin(&stubToolPlugin{
+				name: tc.toolName,
+				invoke: func(input map[string]interface{}) (map[string]interface{}, error) {
+					invokeCount++
+					capturedInput = cloneChannelConfig(input)
+					return map[string]interface{}{
+						"text": tc.expectedReply,
+						"ok":   true,
+					}, nil
+				},
+			})
+
+			toolDefs := srv.listToolDefinitionsForPromptMode(promptModeDefault)
+			foundDefinition := false
+			for _, def := range toolDefs {
+				if def.Name == tc.toolName {
+					foundDefinition = true
+					break
+				}
+			}
+			if !foundDefinition {
+				t.Fatalf("expected tool definition for %q, got=%+v", tc.toolName, toolDefs)
+			}
+
+			processBody, err := json.Marshal(map[string]interface{}{
+				"input": []map[string]interface{}{
+					{
+						"role": "user",
+						"type": "message",
+						"content": []map[string]interface{}{
+							{"type": "text", "text": "tool template request"},
+						},
+					},
+				},
+				"session_id": "s-tool-template",
+				"user_id":    "u-tool-template",
+				"channel":    "console",
+				"stream":     false,
+				"biz_params": map[string]interface{}{
+					"tool": map[string]interface{}{
+						"name": tc.toolName,
+						"items": []map[string]interface{}{
+							{"path": "/tmp/template.txt", "start": 1, "end": 1},
+						},
+					},
+				},
+			})
+			if err != nil {
+				t.Fatalf("marshal process request failed: %v", err)
+			}
+			wProcess := callJSONEndpoint(srv, http.MethodPost, "/agent/process", string(processBody))
+			if wProcess.Code != http.StatusOK {
+				t.Fatalf("process status=%d body=%s", wProcess.Code, wProcess.Body.String())
+			}
+
+			var out domain.AgentProcessResponse
+			if err := json.Unmarshal(wProcess.Body.Bytes(), &out); err != nil {
+				t.Fatalf("decode process response failed: %v body=%s", err, wProcess.Body.String())
+			}
+			if out.Reply != tc.expectedReply {
+				t.Fatalf("reply=%q, want=%q", out.Reply, tc.expectedReply)
+			}
+
+			if invokeCount != 1 {
+				t.Fatalf("expected tool invoke count=1, got=%d", invokeCount)
+			}
+			items, ok := capturedInput["items"].([]interface{})
+			if !ok || len(items) != 1 {
+				t.Fatalf("expected one tool input item, got=%#v", capturedInput["items"])
+			}
+			firstItem, ok := items[0].(map[string]interface{})
+			if !ok {
+				t.Fatalf("tool input first item is not object: %#v", items[0])
+			}
+			if path, _ := firstItem["path"].(string); path != "/tmp/template.txt" {
+				t.Fatalf("tool input path=%q, want=%q", path, "/tmp/template.txt")
+			}
+
+			hasToolResult := false
+			for _, evt := range out.Events {
+				if evt.Type == "tool_result" && evt.ToolResult != nil && evt.ToolResult.Name == tc.toolName && evt.ToolResult.OK {
+					hasToolResult = true
+					break
+				}
+			}
+			if !hasToolResult {
+				t.Fatalf("expected successful tool_result event for %q, got=%+v", tc.toolName, out.Events)
+			}
+		})
+	}
+}
 
 func TestContractRegressionMapRunnerError(t *testing.T) {
 	t.Parallel()
@@ -99,6 +415,38 @@ func TestContractRegressionMapRunnerError(t *testing.T) {
 			}
 		})
 	}
+}
+
+type contractRegressionProbeChannel struct {
+	name string
+
+	callCount     int
+	lastUserID    string
+	lastSessionID string
+	lastText      string
+	lastConfig    map[string]interface{}
+}
+
+func (c *contractRegressionProbeChannel) Name() string {
+	return c.name
+}
+
+func (c *contractRegressionProbeChannel) SendText(_ context.Context, userID, sessionID, text string, cfg map[string]interface{}) error {
+	c.callCount++
+	c.lastUserID = userID
+	c.lastSessionID = sessionID
+	c.lastText = text
+	c.lastConfig = cloneChannelConfig(cfg)
+	return nil
+}
+
+func containsString(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
 }
 
 func TestContractRegressionMapChannelError(t *testing.T) {

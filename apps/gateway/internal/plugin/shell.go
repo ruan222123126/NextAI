@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os/exec"
 	"runtime"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -25,6 +24,21 @@ var (
 
 type ShellTool struct{}
 
+type shellSingleResult struct {
+	OK       bool   `json:"ok"`
+	Command  string `json:"command"`
+	ExitCode int    `json:"exit_code"`
+	Output   string `json:"output"`
+	Text     string `json:"text"`
+}
+
+type shellBatchResult struct {
+	OK      bool                `json:"ok"`
+	Count   int                 `json:"count"`
+	Results []shellSingleResult `json:"results"`
+	Text    string              `json:"text"`
+}
+
 func NewShellTool() *ShellTool {
 	return &ShellTool{}
 }
@@ -33,57 +47,57 @@ func (t *ShellTool) Name() string {
 	return "shell"
 }
 
-func (t *ShellTool) Invoke(input map[string]interface{}) (map[string]interface{}, error) {
-	items, err := parseShellItems(input)
+func (t *ShellTool) Invoke(command ToolCommand) (ToolResult, error) {
+	items, err := parseShellItems(command)
 	if err != nil {
-		return nil, err
+		return ToolResult{}, err
 	}
-	results := make([]map[string]interface{}, 0, len(items))
+	results := make([]shellSingleResult, 0, len(items))
 	allOK := true
 	for _, item := range items {
 		one, oneErr := t.invokeOne(item)
 		if oneErr != nil {
-			return nil, oneErr
+			return ToolResult{}, oneErr
 		}
-		if ok, _ := one["ok"].(bool); !ok {
+		if !one.OK {
 			allOK = false
 		}
 		results = append(results, one)
 	}
 	if len(results) == 1 {
-		return results[0], nil
+		return NewToolResult(results[0]), nil
 	}
 	texts := make([]string, 0, len(results))
 	for _, item := range results {
-		if text, ok := item["text"].(string); ok {
+		if text := strings.TrimSpace(item.Text); text != "" {
 			texts = append(texts, text)
 		}
 	}
-	return map[string]interface{}{
-		"ok":      allOK,
-		"count":   len(results),
-		"results": results,
-		"text":    strings.Join(texts, "\n"),
-	}, nil
+	return NewToolResult(shellBatchResult{
+		OK:      allOK,
+		Count:   len(results),
+		Results: results,
+		Text:    strings.Join(texts, "\n"),
+	}), nil
 }
 
-func (t *ShellTool) invokeOne(input map[string]interface{}) (map[string]interface{}, error) {
-	command := strings.TrimSpace(stringValue(input["command"]))
+func (t *ShellTool) invokeOne(input ToolCommandItem) (shellSingleResult, error) {
+	command := strings.TrimSpace(input.Command)
 	if command == "" {
-		return nil, ErrShellToolCommandMissing
+		return shellSingleResult{}, ErrShellToolCommandMissing
 	}
 
-	timeout := parseShellTimeout(input["timeout_seconds"])
+	timeout := parseShellTimeout(input.TimeoutSeconds)
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
 	program, baseArgs, resolveErr := resolveShellExecutor(runtime.GOOS, exec.LookPath)
 	if resolveErr != nil {
-		return nil, resolveErr
+		return shellSingleResult{}, resolveErr
 	}
 	args := append(append([]string{}, baseArgs...), command)
 	cmd := exec.CommandContext(ctx, program, args...)
-	if cwd := strings.TrimSpace(stringValue(input["cwd"])); cwd != "" {
+	if cwd := strings.TrimSpace(input.Cwd); cwd != "" {
 		cmd.Dir = cwd
 	}
 
@@ -105,62 +119,39 @@ func (t *ShellTool) invokeOne(input map[string]interface{}) (map[string]interfac
 	}
 
 	text := formatShellText(command, ok, exitCode, output)
-	return map[string]interface{}{
-		"ok":        ok,
-		"command":   command,
-		"exit_code": exitCode,
-		"output":    output,
-		"text":      text,
+	return shellSingleResult{
+		OK:       ok,
+		Command:  command,
+		ExitCode: exitCode,
+		Output:   output,
+		Text:     text,
 	}, nil
 }
 
-func parseShellItems(input map[string]interface{}) ([]map[string]interface{}, error) {
-	rawItems, ok := input["items"]
-	if !ok || rawItems == nil {
-		if _, hasLegacyCommand := input["command"]; hasLegacyCommand {
-			return []map[string]interface{}{cloneShellInputMap(input)}, nil
+func parseShellItems(command ToolCommand) ([]ToolCommandItem, error) {
+	if len(command.Items) == 0 {
+		if command.legacyCommand || strings.TrimSpace(command.Command) != "" {
+			return []ToolCommandItem{
+				{
+					Command:        command.Command,
+					Cwd:            command.Cwd,
+					TimeoutSeconds: command.TimeoutSeconds,
+				},
+			}, nil
 		}
 		return nil, ErrShellToolItemsInvalid
 	}
-	entries, ok := rawItems.([]interface{})
-	if !ok || len(entries) == 0 {
-		return nil, ErrShellToolItemsInvalid
-	}
-	out := make([]map[string]interface{}, 0, len(entries))
-	for _, item := range entries {
-		entry, ok := item.(map[string]interface{})
-		if !ok {
-			return nil, ErrShellToolItemsInvalid
-		}
-		out = append(out, cloneShellInputMap(entry))
+	out := make([]ToolCommandItem, 0, len(command.Items))
+	for _, item := range command.Items {
+		out = append(out, item)
 	}
 	return out, nil
 }
 
-func cloneShellInputMap(in map[string]interface{}) map[string]interface{} {
-	if in == nil {
-		return map[string]interface{}{}
-	}
-	out := make(map[string]interface{}, len(in))
-	for key, value := range in {
-		out[key] = value
-	}
-	return out
-}
-
-func parseShellTimeout(raw interface{}) time.Duration {
+func parseShellTimeout(rawSeconds int) time.Duration {
 	seconds := int64(shellToolDefaultTimeout / time.Second)
-	switch value := raw.(type) {
-	case float64:
-		seconds = int64(value)
-	case int:
-		seconds = int64(value)
-	case int64:
-		seconds = value
-	case string:
-		if parsed, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64); err == nil {
-			seconds = parsed
-		}
+	if rawSeconds > 0 {
+		seconds = int64(rawSeconds)
 	}
 	if seconds <= 0 {
 		seconds = int64(shellToolDefaultTimeout / time.Second)
@@ -191,17 +182,6 @@ func formatShellText(command string, ok bool, exitCode int, output string) strin
 		return fmt.Sprintf("$ %s\n(command failed with exit code %d)", command, exitCode)
 	}
 	return fmt.Sprintf("$ %s\n(command failed with exit code %d)\n%s", command, exitCode, trimmed)
-}
-
-func stringValue(v interface{}) string {
-	switch value := v.(type) {
-	case string:
-		return value
-	case fmt.Stringer:
-		return value.String()
-	default:
-		return ""
-	}
 }
 
 func resolveShellExecutor(goos string, lookPath func(file string) (string, error)) (string, []string, error) {

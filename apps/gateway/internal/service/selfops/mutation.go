@@ -14,6 +14,7 @@ import (
 
 	"nextai/apps/gateway/internal/domain"
 	"nextai/apps/gateway/internal/repo"
+	"nextai/apps/gateway/internal/service/ports"
 )
 
 const (
@@ -313,7 +314,7 @@ func (s *Service) applyProviderConfigMutation(record mutationRecord) ([]string, 
 		beforeHash = record.BaseHashes[TargetProviderConfig]
 	}
 	currentHash := ""
-	s.deps.Store.Read(func(st *repo.State) {
+	s.deps.Store.ReadSettings(func(st ports.SettingsAggregate) {
 		currentHash = hashString(stableJSON(cloneProviderSettings(st.Providers)))
 	})
 	if beforeHash != currentHash {
@@ -323,7 +324,7 @@ func (s *Service) applyProviderConfigMutation(record mutationRecord) ([]string, 
 		}
 	}
 
-	if err := s.deps.Store.Write(func(st *repo.State) error {
+	if err := s.deps.Store.WriteSettings(func(st *ports.SettingsAggregate) error {
 		st.Providers = cloneProviderSettings(record.ProviderConfig)
 		activeProviderID := normalizeProviderID(st.ActiveLLM.ProviderID)
 		if activeProviderID != "" {
@@ -347,7 +348,7 @@ func (s *Service) applyActiveLLMMutation(record mutationRecord) ([]string, error
 		beforeHash = record.BaseHashes[TargetActiveLLM]
 	}
 	currentHash := ""
-	s.deps.Store.Read(func(st *repo.State) {
+	s.deps.Store.ReadSettings(func(st ports.SettingsAggregate) {
 		currentHash = hashString(stableJSON(st.ActiveLLM))
 	})
 	if beforeHash != currentHash {
@@ -357,7 +358,7 @@ func (s *Service) applyActiveLLMMutation(record mutationRecord) ([]string, error
 		}
 	}
 
-	if err := s.deps.Store.Write(func(st *repo.State) error {
+	if err := s.deps.Store.WriteSettings(func(st *ports.SettingsAggregate) error {
 		st.ActiveLLM = record.ActiveLLM
 		return nil
 	}); err != nil {
@@ -593,7 +594,7 @@ func (s *Service) prepareWorkspaceMutation(operations []MutationOperation) (prep
 
 func (s *Service) prepareProviderConfigMutation(operations []MutationOperation) (preparedMutation, error) {
 	var baseProviders map[string]repo.ProviderSetting
-	s.deps.Store.Read(func(st *repo.State) {
+	s.deps.Store.ReadSettings(func(st ports.SettingsAggregate) {
 		baseProviders = cloneProviderSettings(st.Providers)
 	})
 	current := cloneJSONValue(baseProviders)
@@ -700,7 +701,7 @@ func (s *Service) prepareProviderConfigMutation(operations []MutationOperation) 
 func (s *Service) prepareActiveLLMMutation(operations []MutationOperation) (preparedMutation, error) {
 	baseSlot := domain.ModelSlotConfig{}
 	providers := map[string]repo.ProviderSetting{}
-	s.deps.Store.Read(func(st *repo.State) {
+	s.deps.Store.ReadSettings(func(st ports.SettingsAggregate) {
 		baseSlot = st.ActiveLLM
 		providers = cloneProviderSettings(st.Providers)
 	})
@@ -760,8 +761,7 @@ func (s *Service) prepareActiveLLMMutation(operations []MutationOperation) (prep
 		}
 	}
 	if slot.ProviderID != "" {
-		state := &repo.State{Providers: providers}
-		resolved, validationErr := resolveAndValidateModel(state, slot.ProviderID, slot.Model)
+		resolved, validationErr := resolveAndValidateModel(providers, slot.ProviderID, slot.Model)
 		if validationErr != nil {
 			return preparedMutation{}, validationErr
 		}

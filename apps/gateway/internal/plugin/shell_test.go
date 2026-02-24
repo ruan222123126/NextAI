@@ -75,9 +75,9 @@ func TestResolveShellExecutorReturnsUnavailableWhenNoneFound(t *testing.T) {
 }
 
 func TestParseShellItemsAcceptsLegacySingleCommandObject(t *testing.T) {
-	items, err := parseShellItems(map[string]interface{}{
-		"command": "pwd",
-		"cwd":     "/tmp",
+	items, err := parseShellItems(ToolCommand{
+		Command: "pwd",
+		Cwd:     "/tmp",
 	})
 	if err != nil {
 		t.Fatalf("parse shell items failed: %v", err)
@@ -85,17 +85,17 @@ func TestParseShellItemsAcceptsLegacySingleCommandObject(t *testing.T) {
 	if len(items) != 1 {
 		t.Fatalf("expected 1 item, got=%d", len(items))
 	}
-	if got := items[0]["command"]; got != "pwd" {
+	if got := items[0].Command; got != "pwd" {
 		t.Fatalf("unexpected command: %#v", got)
 	}
-	if got := items[0]["cwd"]; got != "/tmp" {
+	if got := items[0].Cwd; got != "/tmp" {
 		t.Fatalf("unexpected cwd: %#v", got)
 	}
 }
 
 func TestParseShellItemsRejectsMissingItemsAndLegacyCommand(t *testing.T) {
-	_, err := parseShellItems(map[string]interface{}{
-		"cwd": "/tmp",
+	_, err := parseShellItems(ToolCommand{
+		Cwd: "/tmp",
 	})
 	if !errors.Is(err, ErrShellToolItemsInvalid) {
 		t.Fatalf("expected ErrShellToolItemsInvalid, got=%v", err)

@@ -122,7 +122,7 @@ func (s *Service) ListFiles() (FileListResponse, error) {
 	}
 
 	out := FileListResponse{Files: []FileEntry{}}
-	s.deps.Store.Read(func(st *repo.State) {
+	s.deps.Store.ReadSettings(func(st ports.SettingsAggregate) {
 		out.Files = collectWorkspaceFiles(st)
 	})
 	out.Files = mergeWorkspaceFileEntries(out.Files, s.deps.CollectTextFiles()...)
@@ -154,7 +154,7 @@ func (s *Service) GetFile(filePath string) (interface{}, error) {
 
 	var data interface{}
 	found := false
-	s.deps.Store.Read(func(st *repo.State) {
+	s.deps.Store.ReadSettings(func(st ports.SettingsAggregate) {
 		data, found = readWorkspaceFileData(st, filePath)
 	})
 	if !found {
@@ -209,7 +209,7 @@ func (s *Service) PutFile(filePath string, body []byte) error {
 				Message: err.Error(),
 			}
 		}
-		return s.deps.Store.Write(func(st *repo.State) error {
+		return s.deps.Store.WriteSettings(func(st *ports.SettingsAggregate) error {
 			st.Envs = envs
 			return nil
 		})
@@ -228,7 +228,7 @@ func (s *Service) PutFile(filePath string, body []byte) error {
 				Message: err.Error(),
 			}
 		}
-		return s.deps.Store.Write(func(st *repo.State) error {
+		return s.deps.Store.WriteSettings(func(st *ports.SettingsAggregate) error {
 			st.Channels = channels
 			return nil
 		})
@@ -247,10 +247,10 @@ func (s *Service) PutFile(filePath string, body []byte) error {
 				Message: err.Error(),
 			}
 		}
-		return s.deps.Store.Write(func(st *repo.State) error {
+		return s.deps.Store.WriteSettings(func(st *ports.SettingsAggregate) error {
 			st.Providers = providers
 			if st.ActiveLLM.ProviderID != "" {
-				if _, ok := findProviderSettingByID(st, st.ActiveLLM.ProviderID); !ok {
+				if _, ok := findProviderSettingByID(st.Providers, st.ActiveLLM.ProviderID); !ok {
 					st.ActiveLLM = domain.ModelSlotConfig{}
 				}
 			}
@@ -272,12 +272,12 @@ func (s *Service) PutFile(filePath string, body []byte) error {
 				Message: "provider_id and model must be set together",
 			}
 		}
-		if err := s.deps.Store.Write(func(st *repo.State) error {
+		if err := s.deps.Store.WriteSettings(func(st *ports.SettingsAggregate) error {
 			if req.ProviderID == "" {
 				st.ActiveLLM = domain.ModelSlotConfig{}
 				return nil
 			}
-			if _, ok := findProviderSettingByID(st, req.ProviderID); !ok {
+			if _, ok := findProviderSettingByID(st.Providers, req.ProviderID); !ok {
 				return &ValidationError{
 					Code:    "provider_not_found",
 					Message: "provider not found",
@@ -331,7 +331,7 @@ func (s *Service) PutFile(filePath string, body []byte) error {
 		Scripts:    safeMap(req.Scripts),
 		Enabled:    req.Enabled,
 	}
-	return s.deps.Store.Write(func(st *repo.State) error {
+	return s.deps.Store.WriteSettings(func(st *ports.SettingsAggregate) error {
 		st.Skills[name] = spec
 		return nil
 	})
@@ -354,7 +354,7 @@ func (s *Service) DeleteFile(filePath string) (bool, error) {
 	}
 
 	deleted := false
-	if err := s.deps.Store.Write(func(st *repo.State) error {
+	if err := s.deps.Store.WriteSettings(func(st *ports.SettingsAggregate) error {
 		if _, ok := st.Skills[name]; ok {
 			delete(st.Skills, name)
 			deleted = true
@@ -383,7 +383,7 @@ func (s *Service) Export() (ExportPayload, error) {
 			},
 		},
 	}
-	s.deps.Store.Read(func(st *repo.State) {
+	s.deps.Store.ReadSettings(func(st ports.SettingsAggregate) {
 		out.Skills = cloneWorkspaceSkills(st.Skills)
 		out.Config.Envs = cloneWorkspaceEnvs(st.Envs)
 		out.Config.Channels = cloneWorkspaceChannels(st.Channels)
@@ -448,7 +448,7 @@ func (s *Service) Import(body []byte) error {
 		}
 	}
 
-	return s.deps.Store.Write(func(st *repo.State) error {
+	return s.deps.Store.WriteSettings(func(st *ports.SettingsAggregate) error {
 		st.Skills = skills
 		st.Envs = envs
 		st.Channels = channels
@@ -495,7 +495,7 @@ func (s *Service) normalizeWorkspaceChannels(in domain.ChannelConfigMap) (domain
 	return out, nil
 }
 
-func collectWorkspaceFiles(st *repo.State) []FileEntry {
+func collectWorkspaceFiles(st ports.SettingsAggregate) []FileEntry {
 	files := []FileEntry{
 		{Path: FileEnvs, Kind: "config", Size: jsonSize(cloneWorkspaceEnvs(st.Envs))},
 		{Path: FileChannels, Kind: "config", Size: jsonSize(cloneWorkspaceChannels(st.Channels))},
@@ -535,7 +535,7 @@ func mergeWorkspaceFileEntries(base []FileEntry, extra ...FileEntry) []FileEntry
 	return out
 }
 
-func readWorkspaceFileData(st *repo.State, filePath string) (interface{}, bool) {
+func readWorkspaceFileData(st ports.SettingsAggregate, filePath string) (interface{}, bool) {
 	switch filePath {
 	case FileEnvs:
 		return cloneWorkspaceEnvs(st.Envs), true
@@ -773,14 +773,14 @@ func sanitizeStringMap(in map[string]string) map[string]string {
 	return out
 }
 
-func findProviderSettingByID(st *repo.State, providerID string) (repo.ProviderSetting, bool) {
-	if st == nil {
+func findProviderSettingByID(providers map[string]repo.ProviderSetting, providerID string) (repo.ProviderSetting, bool) {
+	if providers == nil {
 		return repo.ProviderSetting{}, false
 	}
-	if setting, ok := st.Providers[providerID]; ok {
+	if setting, ok := providers[providerID]; ok {
 		return setting, true
 	}
-	for key, setting := range st.Providers {
+	for key, setting := range providers {
 		if normalizeProviderID(key) == providerID {
 			return setting, true
 		}

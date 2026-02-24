@@ -17,29 +17,29 @@ func TestFindToolInvokeBasicMatch(t *testing.T) {
 	tool := NewFindTool()
 	relPath := seedFindTestFile(t, "alpha\nBeta\nbeta\n")
 
-	result, err := tool.Invoke(map[string]interface{}{
-		"items": []interface{}{
-			map[string]interface{}{
-				"path":    relPath,
-				"pattern": "beta",
+	result, err := tool.Invoke(ToolCommand{
+		Items: []ToolCommandItem{
+			{
+				Path:    relPath,
+				Pattern: "beta",
 			},
 		},
 	})
 	if err != nil {
 		t.Fatalf("invoke failed: %v", err)
 	}
-	if got, _ := result["count"].(int); got != 1 {
-		t.Fatalf("count=%d want=1", got)
-	}
-	matches, ok := result["matches"].([]map[string]interface{})
+	typed, ok := result.Data.(findSingleResult)
 	if !ok {
-		t.Fatalf("matches type invalid: %T", result["matches"])
+		t.Fatalf("unexpected result type: %T", result.Data)
 	}
-	if len(matches) != 1 {
-		t.Fatalf("matches len=%d want=1", len(matches))
+	if typed.Count != 1 {
+		t.Fatalf("count=%d want=1", typed.Count)
 	}
-	if gotLine, _ := matches[0]["line"].(int); gotLine != 3 {
-		t.Fatalf("line=%d want=3", gotLine)
+	if len(typed.Matches) != 1 {
+		t.Fatalf("matches len=%d want=1", len(typed.Matches))
+	}
+	if typed.Matches[0].Line != 3 {
+		t.Fatalf("line=%d want=3", typed.Matches[0].Line)
 	}
 }
 
@@ -49,20 +49,24 @@ func TestFindToolInvokeIgnoreCase(t *testing.T) {
 	tool := NewFindTool()
 	relPath := seedFindTestFile(t, "Alpha\nbeta\nBETA\n")
 
-	result, err := tool.Invoke(map[string]interface{}{
-		"items": []interface{}{
-			map[string]interface{}{
-				"path":        relPath,
-				"pattern":     "beta",
-				"ignore_case": true,
+	result, err := tool.Invoke(ToolCommand{
+		Items: []ToolCommandItem{
+			{
+				Path:       relPath,
+				Pattern:    "beta",
+				IgnoreCase: true,
 			},
 		},
 	})
 	if err != nil {
 		t.Fatalf("invoke failed: %v", err)
 	}
-	if got, _ := result["count"].(int); got != 2 {
-		t.Fatalf("count=%d want=2", got)
+	typed, ok := result.Data.(findSingleResult)
+	if !ok {
+		t.Fatalf("unexpected result type: %T", result.Data)
+	}
+	if typed.Count != 2 {
+		t.Fatalf("count=%d want=2", typed.Count)
 	}
 }
 
@@ -71,11 +75,11 @@ func TestFindToolInvokeRejectsEmptyPattern(t *testing.T) {
 
 	tool := NewFindTool()
 	relPath := seedFindTestFile(t, "line\n")
-	_, err := tool.Invoke(map[string]interface{}{
-		"items": []interface{}{
-			map[string]interface{}{
-				"path":    relPath,
-				"pattern": "   ",
+	_, err := tool.Invoke(ToolCommand{
+		Items: []ToolCommandItem{
+			{
+				Path:    relPath,
+				Pattern: "   ",
 			},
 		},
 	})
@@ -92,11 +96,11 @@ func TestFindToolInvokeRejectsPathOutsideWorkspace(t *testing.T) {
 	if err := os.WriteFile(outside, []byte("line\n"), 0o644); err != nil {
 		t.Fatalf("seed outside file failed: %v", err)
 	}
-	_, err := tool.Invoke(map[string]interface{}{
-		"items": []interface{}{
-			map[string]interface{}{
-				"path":    outside,
-				"pattern": "line",
+	_, err := tool.Invoke(ToolCommand{
+		Items: []ToolCommandItem{
+			{
+				Path:    outside,
+				Pattern: "line",
 			},
 		},
 	})
@@ -115,26 +119,26 @@ func TestFindToolInvokeCapsReturnedMatches(t *testing.T) {
 	}
 	relPath := seedFindTestFile(t, builder.String())
 
-	result, err := tool.Invoke(map[string]interface{}{
-		"items": []interface{}{
-			map[string]interface{}{
-				"path":    relPath,
-				"pattern": "needle",
+	result, err := tool.Invoke(ToolCommand{
+		Items: []ToolCommandItem{
+			{
+				Path:    relPath,
+				Pattern: "needle",
 			},
 		},
 	})
 	if err != nil {
 		t.Fatalf("invoke failed: %v", err)
 	}
-	if got, _ := result["count"].(int); got != findToolMaxMatches+50 {
-		t.Fatalf("count=%d want=%d", got, findToolMaxMatches+50)
-	}
-	matches, ok := result["matches"].([]map[string]interface{})
+	typed, ok := result.Data.(findSingleResult)
 	if !ok {
-		t.Fatalf("matches type invalid: %T", result["matches"])
+		t.Fatalf("unexpected result type: %T", result.Data)
 	}
-	if len(matches) != findToolMaxMatches {
-		t.Fatalf("matches len=%d want=%d", len(matches), findToolMaxMatches)
+	if typed.Count != findToolMaxMatches+50 {
+		t.Fatalf("count=%d want=%d", typed.Count, findToolMaxMatches+50)
+	}
+	if len(typed.Matches) != findToolMaxMatches {
+		t.Fatalf("matches len=%d want=%d", len(typed.Matches), findToolMaxMatches)
 	}
 }
 

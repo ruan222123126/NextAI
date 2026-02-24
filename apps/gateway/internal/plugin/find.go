@@ -29,6 +29,29 @@ type findItem struct {
 	IgnoreCase bool
 }
 
+type findMatch struct {
+	Line int    `json:"line"`
+	Text string `json:"text"`
+}
+
+type findSingleResult struct {
+	OK         bool        `json:"ok"`
+	Path       string      `json:"path"`
+	Pattern    string      `json:"pattern"`
+	IgnoreCase bool        `json:"ignore_case"`
+	Count      int         `json:"count"`
+	Matches    []findMatch `json:"matches"`
+	Text       string      `json:"text"`
+}
+
+type findBatchResult struct {
+	OK           bool               `json:"ok"`
+	Count        int                `json:"count"`
+	TotalMatches int                `json:"total_matches"`
+	Results      []findSingleResult `json:"results"`
+	Text         string             `json:"text"`
+}
+
 func NewFindTool() *FindTool {
 	return &FindTool{}
 }
@@ -37,96 +60,85 @@ func (t *FindTool) Name() string {
 	return "find"
 }
 
-func (t *FindTool) Invoke(input map[string]interface{}) (map[string]interface{}, error) {
-	items, err := parseFindItems(input)
+func (t *FindTool) Invoke(command ToolCommand) (ToolResult, error) {
+	items, err := parseFindItems(command)
 	if err != nil {
-		return nil, err
+		return ToolResult{}, err
 	}
 	workspaceRoot, err := systempromptservice.FindWorkspaceRoot()
 	if err != nil {
-		return nil, fmt.Errorf("find workspace root unavailable: %w", err)
+		return ToolResult{}, fmt.Errorf("find workspace root unavailable: %w", err)
 	}
 
-	results := make([]map[string]interface{}, 0, len(items))
+	results := make([]findSingleResult, 0, len(items))
 	totalMatches := 0
 	for _, item := range items {
 		one, oneErr := findOne(workspaceRoot, item)
 		if oneErr != nil {
-			return nil, oneErr
+			return ToolResult{}, oneErr
 		}
-		if count, ok := one["count"].(int); ok {
-			totalMatches += count
-		}
+		totalMatches += one.Count
 		results = append(results, one)
 	}
 
 	if len(results) == 1 {
-		return results[0], nil
+		return NewToolResult(results[0]), nil
 	}
 
 	texts := make([]string, 0, len(results))
 	for _, item := range results {
-		if text, ok := item["text"].(string); ok {
+		if text := strings.TrimSpace(item.Text); text != "" {
 			texts = append(texts, text)
 		}
 	}
-	return map[string]interface{}{
-		"ok":            true,
-		"count":         len(results),
-		"total_matches": totalMatches,
-		"results":       results,
-		"text":          strings.Join(texts, "\n\n"),
-	}, nil
+	return NewToolResult(findBatchResult{
+		OK:           true,
+		Count:        len(results),
+		TotalMatches: totalMatches,
+		Results:      results,
+		Text:         strings.Join(texts, "\n\n"),
+	}), nil
 }
 
-func parseFindItems(input map[string]interface{}) ([]findItem, error) {
-	rawItems, ok := input["items"]
-	if !ok || rawItems == nil {
-		return nil, ErrFindToolItemsInvalid
-	}
-	entries, ok := rawItems.([]interface{})
-	if !ok || len(entries) == 0 {
+func parseFindItems(command ToolCommand) ([]findItem, error) {
+	if len(command.Items) == 0 {
 		return nil, ErrFindToolItemsInvalid
 	}
 
-	out := make([]findItem, 0, len(entries))
-	for _, item := range entries {
-		entry, ok := item.(map[string]interface{})
-		if !ok {
-			return nil, ErrFindToolItemsInvalid
-		}
-		path := strings.TrimSpace(stringValue(entry["path"]))
+	out := make([]findItem, 0, len(command.Items))
+	for _, entry := range command.Items {
+		path := strings.TrimSpace(entry.Path)
 		if path == "" {
 			return nil, ErrFindToolPathMissing
 		}
-		pattern := stringValue(entry["pattern"])
+		pattern := entry.Pattern
 		if strings.TrimSpace(pattern) == "" {
 			return nil, ErrFindToolPatternMissing
 		}
 		out = append(out, findItem{
 			Path:       path,
 			Pattern:    pattern,
-			IgnoreCase: parseFindIgnoreCase(entry["ignore_case"]),
+			IgnoreCase: entry.IgnoreCase,
 		})
 	}
 	return out, nil
 }
 
-func findOne(workspaceRoot string, item findItem) (map[string]interface{}, error) {
+func findOne(workspaceRoot string, item findItem) (findSingleResult, error) {
 	absPath, displayPath, err := resolveFindPath(workspaceRoot, item.Path)
 	if err != nil {
-		return nil, err
+		return findSingleResult{}, err
 	}
 	raw, err := os.ReadFile(absPath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, fmt.Errorf("%w: %s", ErrFindToolFileNotFound, displayPath)
+			return findSingleResult{}, fmt.Errorf("%w: %s", ErrFindToolFileNotFound, displayPath)
 		}
-		return nil, fmt.Errorf("%w: %v", ErrFindToolFileRead, err)
+		return findSingleResult{}, fmt.Errorf("%w: %v", ErrFindToolFileRead, err)
 	}
 
 	lines, _ := splitFileLines(string(raw))
-	matches := make([]map[string]interface{}, 0, findToolMaxMatches)
+	matches := make([]findMatch, 0, findToolMaxMatches)
 	totalMatches := 0
 	for idx, line := range lines {
 		if !findLineMatches(line, item.Pattern, item.IgnoreCase) {
@@ -134,21 +146,21 @@ func findOne(workspaceRoot string, item findItem) (map[string]interface{}, error
 		}
 		totalMatches++
 		if len(matches) < findToolMaxMatches {
-			matches = append(matches, map[string]interface{}{
-				"line": idx + 1,
-				"text": line,
+			matches = append(matches, findMatch{
+				Line: idx + 1,
+				Text: line,
 			})
 		}
 	}
 
-	return map[string]interface{}{
-		"ok":          true,
-		"path":        displayPath,
-		"pattern":     item.Pattern,
-		"ignore_case": item.IgnoreCase,
-		"count":       totalMatches,
-		"matches":     matches,
-		"text":        formatFindSummaryText(displayPath, item.Pattern, item.IgnoreCase, totalMatches, matches),
+	return findSingleResult{
+		OK:         true,
+		Path:       displayPath,
+		Pattern:    item.Pattern,
+		IgnoreCase: item.IgnoreCase,
+		Count:      totalMatches,
+		Matches:    matches,
+		Text:       formatFindSummaryText(displayPath, item.Pattern, item.IgnoreCase, totalMatches, matches),
 	}, nil
 }
 
@@ -207,24 +219,7 @@ func findLineMatches(line, pattern string, ignoreCase bool) bool {
 	return strings.Contains(strings.ToLower(line), strings.ToLower(pattern))
 }
 
-func parseFindIgnoreCase(raw interface{}) bool {
-	switch value := raw.(type) {
-	case bool:
-		return value
-	case string:
-		return strings.EqualFold(strings.TrimSpace(value), "true")
-	case float64:
-		return value != 0
-	case int:
-		return value != 0
-	case int64:
-		return value != 0
-	default:
-		return false
-	}
-}
-
-func formatFindSummaryText(path, pattern string, ignoreCase bool, totalMatches int, matches []map[string]interface{}) string {
+func formatFindSummaryText(path, pattern string, ignoreCase bool, totalMatches int, matches []findMatch) string {
 	header := fmt.Sprintf("find %s pattern=%q matched %d line(s)", path, pattern, totalMatches)
 	if ignoreCase {
 		header += " (ignore_case=true)"
@@ -238,9 +233,7 @@ func formatFindSummaryText(path, pattern string, ignoreCase bool, totalMatches i
 	lines := make([]string, 0, len(matches)+1)
 	lines = append(lines, header)
 	for _, match := range matches {
-		lineNo, _ := match["line"].(int)
-		text, _ := match["text"].(string)
-		lines = append(lines, fmt.Sprintf("%d: %s", lineNo, text))
+		lines = append(lines, fmt.Sprintf("%d: %s", match.Line, match.Text))
 	}
 	return strings.Join(lines, "\n")
 }
