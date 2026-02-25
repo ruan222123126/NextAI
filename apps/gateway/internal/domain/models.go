@@ -43,6 +43,46 @@ type ChatActiveLLMOverride struct {
 	UpdatedAt  string `json:"updated_at"`
 }
 
+type PlanTaskStatus string
+
+const (
+	PlanTaskStatusPending    PlanTaskStatus = "pending"
+	PlanTaskStatusInProgress PlanTaskStatus = "in_progress"
+	PlanTaskStatusCompleted  PlanTaskStatus = "completed"
+	PlanTaskStatusBlocked    PlanTaskStatus = "blocked"
+)
+
+type PlanTask struct {
+	ID           string         `json:"id"`
+	Title        string         `json:"title"`
+	Description  string         `json:"description"`
+	DependsOn    []string       `json:"depends_on"`
+	Status       PlanTaskStatus `json:"status"`
+	Deliverables []string       `json:"deliverables"`
+	Verification []string       `json:"verification"`
+}
+
+type PlanRisk struct {
+	ID          string `json:"id"`
+	Title       string `json:"title"`
+	Description string `json:"description"`
+	Mitigation  string `json:"mitigation"`
+}
+
+type PlanSpec struct {
+	Goal                string     `json:"goal"`
+	ScopeIn             []string   `json:"scope_in"`
+	ScopeOut            []string   `json:"scope_out"`
+	Constraints         []string   `json:"constraints"`
+	Assumptions         []string   `json:"assumptions"`
+	Tasks               []PlanTask `json:"tasks"`
+	AcceptanceCriteria  []string   `json:"acceptance_criteria"`
+	Risks               []PlanRisk `json:"risks"`
+	SummaryForExecution string     `json:"summary_for_execution"`
+	Revision            int        `json:"revision"`
+	UpdatedAt           string     `json:"updated_at"`
+}
+
 type RuntimeContent struct {
 	Type string `json:"type"`
 	Text string `json:"text,omitempty"`
@@ -85,6 +125,7 @@ type AgentToolResultPayload struct {
 	Name    string `json:"name"`
 	OK      bool   `json:"ok"`
 	Summary string `json:"summary,omitempty"`
+	Output  string `json:"output,omitempty"`
 }
 
 type AgentEvent struct {

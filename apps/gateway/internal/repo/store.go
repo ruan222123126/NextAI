@@ -40,10 +40,35 @@ type State struct {
 	Channels      domain.ChannelConfigMap            `json:"channels"`
 }
 
+type settingsState struct {
+	SchemaVersion int                            `json:"schema_version"`
+	CronJobs      map[string]domain.CronJobSpec  `json:"cron_jobs"`
+	CronStates    map[string]domain.CronJobState `json:"cron_states"`
+	Providers     map[string]ProviderSetting     `json:"providers"`
+	ActiveLLM     domain.ModelSlotConfig         `json:"active_llm"`
+	Envs          map[string]string              `json:"envs"`
+	Skills        map[string]domain.SkillSpec    `json:"skills"`
+	Channels      domain.ChannelConfigMap        `json:"channels"`
+}
+
+type conversationsState struct {
+	SchemaVersion int                                `json:"schema_version"`
+	Chats         map[string]domain.ChatSpec         `json:"chats"`
+	Histories     map[string][]domain.RuntimeMessage `json:"histories"`
+}
+
+const (
+	legacyStateFileName        = "state.json"
+	settingsStateFileName      = "settings.json"
+	conversationsStateFileName = "conversations.json"
+)
+
 type Store struct {
-	mu        sync.RWMutex
-	state     State
-	stateFile string
+	mu                sync.RWMutex
+	state             State
+	legacyStateFile   string
+	settingsStateFile string
+	conversationsFile string
 }
 
 func NewStore(dataDir string) (*Store, error) {
@@ -51,8 +76,10 @@ func NewStore(dataDir string) (*Store, error) {
 		return nil, err
 	}
 	s := &Store{
-		stateFile: filepath.Join(dataDir, "state.json"),
-		state:     defaultState(dataDir),
+		legacyStateFile:   filepath.Join(dataDir, legacyStateFileName),
+		settingsStateFile: filepath.Join(dataDir, settingsStateFileName),
+		conversationsFile: filepath.Join(dataDir, conversationsStateFileName),
+		state:             defaultState(dataDir),
 	}
 	if err := s.load(); err != nil {
 		return nil, err
@@ -104,27 +131,141 @@ func defaultState(dataDir string) State {
 }
 
 func (s *Store) load() error {
-	b, err := os.ReadFile(s.stateFile)
-	if errors.Is(err, os.ErrNotExist) {
-		return s.saveLocked()
-	}
+	settingsSnapshot, hasSettingsSnapshot, err := s.loadSettingsSnapshot()
 	if err != nil {
 		return err
 	}
-	var state State
-	if err := json.Unmarshal(b, &state); err != nil {
-		return err
-	}
-	migrated, err := migrateStateToCurrent(&state)
+	conversationsSnapshot, hasConversationsSnapshot, err := s.loadConversationsSnapshot()
 	if err != nil {
 		return err
 	}
-	normalizeState(&state)
-	s.state = state
-	if migrated {
-		return s.saveLocked()
+
+	legacyLoaded := false
+	if !hasSettingsSnapshot && !hasConversationsSnapshot {
+		legacyState, loaded, loadErr := s.loadLegacyState()
+		if loadErr != nil {
+			return loadErr
+		}
+		if loaded {
+			s.state = legacyState
+			legacyLoaded = true
+		}
+	} else {
+		if hasSettingsSnapshot {
+			applySettingsSnapshot(&s.state, settingsSnapshot)
+		}
+		if hasConversationsSnapshot {
+			applyConversationsSnapshot(&s.state, conversationsSnapshot)
+		}
+		s.state.SchemaVersion = schemaVersionFromSnapshots(
+			hasSettingsSnapshot,
+			settingsSnapshot.SchemaVersion,
+			hasConversationsSnapshot,
+			conversationsSnapshot.SchemaVersion,
+		)
+	}
+
+	migrated, err := migrateStateToCurrent(&s.state)
+	if err != nil {
+		return err
+	}
+	normalizeState(&s.state)
+
+	if migrated || legacyLoaded || !hasSettingsSnapshot || !hasConversationsSnapshot {
+		return s.saveAllLocked()
 	}
 	return nil
+}
+
+func (s *Store) loadLegacyState() (State, bool, error) {
+	if s == nil {
+		return State{}, false, errors.New("store is nil")
+	}
+	b, err := os.ReadFile(s.legacyStateFile)
+	if errors.Is(err, os.ErrNotExist) {
+		return State{}, false, nil
+	}
+	if err != nil {
+		return State{}, false, err
+	}
+	state := State{}
+	if err := json.Unmarshal(b, &state); err != nil {
+		return State{}, false, err
+	}
+	return state, true, nil
+}
+
+func (s *Store) loadSettingsSnapshot() (settingsState, bool, error) {
+	if s == nil {
+		return settingsState{}, false, errors.New("store is nil")
+	}
+	b, err := os.ReadFile(s.settingsStateFile)
+	if errors.Is(err, os.ErrNotExist) {
+		return settingsState{}, false, nil
+	}
+	if err != nil {
+		return settingsState{}, false, err
+	}
+	out := settingsState{}
+	if err := json.Unmarshal(b, &out); err != nil {
+		return settingsState{}, false, err
+	}
+	return out, true, nil
+}
+
+func (s *Store) loadConversationsSnapshot() (conversationsState, bool, error) {
+	if s == nil {
+		return conversationsState{}, false, errors.New("store is nil")
+	}
+	b, err := os.ReadFile(s.conversationsFile)
+	if errors.Is(err, os.ErrNotExist) {
+		return conversationsState{}, false, nil
+	}
+	if err != nil {
+		return conversationsState{}, false, err
+	}
+	out := conversationsState{}
+	if err := json.Unmarshal(b, &out); err != nil {
+		return conversationsState{}, false, err
+	}
+	return out, true, nil
+}
+
+func applySettingsSnapshot(state *State, in settingsState) {
+	if state == nil {
+		return
+	}
+	state.CronJobs = in.CronJobs
+	state.CronStates = in.CronStates
+	state.Providers = in.Providers
+	state.ActiveLLM = in.ActiveLLM
+	state.Envs = in.Envs
+	state.Skills = in.Skills
+	state.Channels = in.Channels
+}
+
+func applyConversationsSnapshot(state *State, in conversationsState) {
+	if state == nil {
+		return
+	}
+	state.Chats = in.Chats
+	state.Histories = in.Histories
+}
+
+func schemaVersionFromSnapshots(
+	hasSettings bool,
+	settingsVersion int,
+	hasConversations bool,
+	conversationsVersion int,
+) int {
+	version := 0
+	if hasSettings {
+		version = settingsVersion
+	}
+	if hasConversations && conversationsVersion > version {
+		version = conversationsVersion
+	}
+	return version
 }
 
 func migrateStateToCurrent(state *State) (bool, error) {
@@ -267,18 +408,52 @@ func normalizeState(state *State) {
 func (s *Store) Save() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.saveLocked()
+	return s.saveAllLocked()
 }
 
 func (s *Store) saveLocked() error {
+	return s.saveAllLocked()
+}
+
+func (s *Store) saveAllLocked() error {
 	s.state.SchemaVersion = currentStateSchemaVersion
 	ensureDefaultChat(&s.state)
 	ensureDefaultCronJob(&s.state)
-	b, err := json.MarshalIndent(s.state, "", "  ")
+	if err := s.saveSettingsLocked(); err != nil {
+		return err
+	}
+	return s.saveConversationsLocked()
+}
+
+func (s *Store) saveSettingsLocked() error {
+	settings := settingsState{
+		SchemaVersion: s.state.SchemaVersion,
+		CronJobs:      s.state.CronJobs,
+		CronStates:    s.state.CronStates,
+		Providers:     s.state.Providers,
+		ActiveLLM:     s.state.ActiveLLM,
+		Envs:          s.state.Envs,
+		Skills:        s.state.Skills,
+		Channels:      s.state.Channels,
+	}
+	b, err := json.MarshalIndent(settings, "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(s.stateFile, b, 0o644)
+	return os.WriteFile(s.settingsStateFile, b, 0o644)
+}
+
+func (s *Store) saveConversationsLocked() error {
+	conversations := conversationsState{
+		SchemaVersion: s.state.SchemaVersion,
+		Chats:         s.state.Chats,
+		Histories:     s.state.Histories,
+	}
+	b, err := json.MarshalIndent(conversations, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(s.conversationsFile, b, 0o644)
 }
 
 func ensureDefaultChat(state *State) {
@@ -446,6 +621,9 @@ func ensureDefaultCronJob(state *State) {
 }
 
 func (s *Store) Read(fn func(state *State)) {
+	if fn == nil {
+		return
+	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	fn(&s.state)
@@ -454,10 +632,84 @@ func (s *Store) Read(fn func(state *State)) {
 func (s *Store) Write(fn func(state *State) error) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if err := fn(&s.state); err != nil {
+	if fn != nil {
+		if err := fn(&s.state); err != nil {
+			return err
+		}
+	}
+	return s.saveAllLocked()
+}
+
+func (s *Store) ReadSettings(fn func(state *State)) {
+	s.Read(fn)
+}
+
+func (s *Store) WriteSettings(fn func(state *State) error) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if fn != nil {
+		if err := fn(&s.state); err != nil {
+			return err
+		}
+	}
+	s.state.SchemaVersion = currentStateSchemaVersion
+	ensureDefaultCronJob(&s.state)
+	return s.saveSettingsLocked()
+}
+
+func (s *Store) ReadConversations(fn func(state *State)) {
+	s.Read(fn)
+}
+
+func (s *Store) WriteConversations(fn func(state *State) error) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if fn != nil {
+		if err := fn(&s.state); err != nil {
+			return err
+		}
+	}
+	s.state.SchemaVersion = currentStateSchemaVersion
+	ensureDefaultChat(&s.state)
+	return s.saveConversationsLocked()
+}
+
+func (s *Store) ReadSession(fn func(state *State)) {
+	s.Read(fn)
+}
+
+func (s *Store) WriteSession(fn func(state *State) error) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if fn != nil {
+		if err := fn(&s.state); err != nil {
+			return err
+		}
+	}
+	s.state.SchemaVersion = currentStateSchemaVersion
+	ensureDefaultCronJob(&s.state)
+	ensureDefaultChat(&s.state)
+	if err := s.saveSettingsLocked(); err != nil {
 		return err
 	}
-	return s.saveLocked()
+	return s.saveConversationsLocked()
+}
+
+func (s *Store) ReadCron(fn func(state *State)) {
+	s.Read(fn)
+}
+
+func (s *Store) WriteCron(fn func(state *State) error) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if fn != nil {
+		if err := fn(&s.state); err != nil {
+			return err
+		}
+	}
+	s.state.SchemaVersion = currentStateSchemaVersion
+	ensureDefaultCronJob(&s.state)
+	return s.saveSettingsLocked()
 }
 
 func defaultProviderSetting() ProviderSetting {

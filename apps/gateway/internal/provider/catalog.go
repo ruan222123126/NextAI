@@ -1,8 +1,13 @@
 package provider
 
 import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
 	"sort"
 	"strings"
+	"sync"
 
 	"nextai/apps/gateway/internal/domain"
 )
@@ -14,29 +19,29 @@ const (
 )
 
 type ModelSpec struct {
-	ID           string
-	Name         string
-	Status       string
-	Capabilities domain.ModelCapabilities
-	Limit        domain.ModelLimit
+	ID           string                   `json:"id"`
+	Name         string                   `json:"name"`
+	Status       string                   `json:"status,omitempty"`
+	Capabilities domain.ModelCapabilities `json:"capabilities,omitempty"`
+	Limit        domain.ModelLimit        `json:"limit,omitempty"`
 }
 
 type ProviderSpec struct {
-	ID                 string
-	Name               string
-	APIKeyPrefix       string
-	AllowCustomBaseURL bool
-	DefaultBaseURL     string
-	Adapter            string
-	Models             []ModelSpec
+	ID                 string      `json:"id"`
+	Name               string      `json:"name"`
+	APIKeyPrefix       string      `json:"api_key_prefix,omitempty"`
+	AllowCustomBaseURL bool        `json:"allow_custom_base_url"`
+	DefaultBaseURL     string      `json:"default_base_url,omitempty"`
+	Adapter            string      `json:"adapter,omitempty"`
+	Models             []ModelSpec `json:"models,omitempty"`
 }
 
 type ProviderTypeSpec struct {
-	ID          string
-	DisplayName string
+	ID          string `json:"id"`
+	DisplayName string `json:"display_name"`
 }
 
-var builtinProviders = map[string]ProviderSpec{
+var defaultBuiltinProviders = map[string]ProviderSpec{
 	"openai": {
 		ID:                 "openai",
 		Name:               "OPENAI",
@@ -77,7 +82,7 @@ var builtinProviders = map[string]ProviderSpec{
 	},
 }
 
-var providerTypes = []ProviderTypeSpec{
+var defaultProviderTypes = []ProviderTypeSpec{
 	{
 		ID:          "openai",
 		DisplayName: "openai",
@@ -92,9 +97,117 @@ var providerTypes = []ProviderTypeSpec{
 	},
 }
 
+var (
+	registryMu         sync.RWMutex
+	providerRegistry   map[string]ProviderSpec
+	builtinProviderIDs map[string]struct{}
+	providerTypes      []ProviderTypeSpec
+)
+
+type RegistryConfig struct {
+	Providers     []ProviderSpec     `json:"providers"`
+	ProviderTypes []ProviderTypeSpec `json:"provider_types"`
+}
+
+func init() {
+	ResetRegistry()
+}
+
+func ResetRegistry() {
+	registryMu.Lock()
+	defer registryMu.Unlock()
+
+	providerRegistry = map[string]ProviderSpec{}
+	builtinProviderIDs = map[string]struct{}{}
+	for rawID, rawSpec := range defaultBuiltinProviders {
+		spec, err := normalizeProviderSpec(rawSpec)
+		if err != nil {
+			continue
+		}
+		id := normalizeProviderID(rawID)
+		if id != "" {
+			spec.ID = id
+		}
+		providerRegistry[spec.ID] = spec
+		builtinProviderIDs[spec.ID] = struct{}{}
+	}
+
+	providerTypes = make([]ProviderTypeSpec, 0, len(defaultProviderTypes))
+	for _, item := range defaultProviderTypes {
+		normalized := normalizeProviderTypeSpec(item)
+		if normalized.ID == "" {
+			continue
+		}
+		providerTypes = append(providerTypes, normalized)
+	}
+}
+
+func RegisterProvider(spec ProviderSpec) error {
+	normalized, err := normalizeProviderSpec(spec)
+	if err != nil {
+		return err
+	}
+	registryMu.Lock()
+	defer registryMu.Unlock()
+	providerRegistry[normalized.ID] = normalized
+	return nil
+}
+
+func RegisterProviderType(spec ProviderTypeSpec) error {
+	normalized := normalizeProviderTypeSpec(spec)
+	if normalized.ID == "" {
+		return errors.New("provider type id is required")
+	}
+
+	registryMu.Lock()
+	defer registryMu.Unlock()
+	for i := range providerTypes {
+		if providerTypes[i].ID == normalized.ID {
+			providerTypes[i] = normalized
+			return nil
+		}
+	}
+	providerTypes = append(providerTypes, normalized)
+	sort.Slice(providerTypes, func(i, j int) bool {
+		return providerTypes[i].ID < providerTypes[j].ID
+	})
+	return nil
+}
+
+func LoadRegistryFromFile(path string) error {
+	target := strings.TrimSpace(path)
+	if target == "" {
+		return nil
+	}
+
+	b, err := os.ReadFile(target)
+	if err != nil {
+		return err
+	}
+
+	cfg := RegistryConfig{}
+	if err := json.Unmarshal(b, &cfg); err != nil {
+		return fmt.Errorf("decode provider registry: %w", err)
+	}
+
+	for _, item := range cfg.ProviderTypes {
+		if err := RegisterProviderType(item); err != nil {
+			return err
+		}
+	}
+	for _, item := range cfg.Providers {
+		if err := RegisterProvider(item); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func ListBuiltinProviderIDs() []string {
-	out := make([]string, 0, len(builtinProviders))
-	for id := range builtinProviders {
+	registryMu.RLock()
+	defer registryMu.RUnlock()
+	out := make([]string, 0, len(builtinProviderIDs))
+	for id := range builtinProviderIDs {
 		out = append(out, id)
 	}
 	sort.Strings(out)
@@ -102,6 +215,8 @@ func ListBuiltinProviderIDs() []string {
 }
 
 func ListProviderTypes() []ProviderTypeSpec {
+	registryMu.RLock()
+	defer registryMu.RUnlock()
 	out := make([]ProviderTypeSpec, 0, len(providerTypes))
 	for _, item := range providerTypes {
 		out = append(out, item)
@@ -111,7 +226,10 @@ func ListProviderTypes() []ProviderTypeSpec {
 
 func ResolveProvider(providerID string) ProviderSpec {
 	id := normalizeProviderID(providerID)
-	if spec, ok := builtinProviders[id]; ok {
+	registryMu.RLock()
+	spec, ok := providerRegistry[id]
+	registryMu.RUnlock()
+	if ok {
 		return cloneProviderSpec(spec)
 	}
 	return ProviderSpec{
@@ -130,7 +248,9 @@ func IsBuiltinProviderID(providerID string) bool {
 	if id == "" {
 		return false
 	}
-	_, ok := builtinProviders[id]
+	registryMu.RLock()
+	_, ok := builtinProviderIDs[id]
+	registryMu.RUnlock()
 	return ok
 }
 
@@ -259,6 +379,66 @@ func EnvPrefix(providerID string) string {
 	}
 	replacer := strings.NewReplacer("-", "_", ".", "_", " ", "_")
 	return replacer.Replace(prefix)
+}
+
+func normalizeProviderSpec(spec ProviderSpec) (ProviderSpec, error) {
+	out := cloneProviderSpec(spec)
+	out.ID = normalizeProviderID(out.ID)
+	if out.ID == "" {
+		return ProviderSpec{}, errors.New("provider id is required")
+	}
+
+	out.Name = strings.TrimSpace(out.Name)
+	if out.Name == "" {
+		out.Name = strings.ToUpper(out.ID)
+	}
+	out.APIKeyPrefix = strings.TrimSpace(out.APIKeyPrefix)
+	if out.APIKeyPrefix == "" {
+		out.APIKeyPrefix = EnvPrefix(out.ID) + "_API_KEY"
+	}
+	out.DefaultBaseURL = strings.TrimSpace(out.DefaultBaseURL)
+	out.Adapter = strings.TrimSpace(out.Adapter)
+	if out.Adapter == "" {
+		out.Adapter = resolveCustomAdapter(out.ID)
+	}
+
+	normalizedModels := make([]ModelSpec, 0, len(out.Models))
+	seen := map[string]struct{}{}
+	for _, model := range out.Models {
+		modelID := strings.TrimSpace(model.ID)
+		if modelID == "" {
+			continue
+		}
+		if _, exists := seen[modelID]; exists {
+			continue
+		}
+		seen[modelID] = struct{}{}
+		name := strings.TrimSpace(model.Name)
+		if name == "" {
+			name = modelID
+		}
+		normalizedModels = append(normalizedModels, ModelSpec{
+			ID:           modelID,
+			Name:         name,
+			Status:       strings.TrimSpace(model.Status),
+			Capabilities: model.Capabilities,
+			Limit:        model.Limit,
+		})
+	}
+	out.Models = normalizedModels
+	return out, nil
+}
+
+func normalizeProviderTypeSpec(spec ProviderTypeSpec) ProviderTypeSpec {
+	id := strings.TrimSpace(spec.ID)
+	displayName := strings.TrimSpace(spec.DisplayName)
+	if displayName == "" {
+		displayName = id
+	}
+	return ProviderTypeSpec{
+		ID:          id,
+		DisplayName: displayName,
+	}
 }
 
 func sortedAliasKeys(aliases map[string]string) []string {

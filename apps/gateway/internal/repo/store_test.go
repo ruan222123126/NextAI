@@ -258,13 +258,13 @@ func TestLoadMigratesLegacyStateWithoutSchemaVersion(t *testing.T) {
 		}
 	})
 
-	persistedRaw, err := os.ReadFile(statePath)
+	settingsRaw, err := os.ReadFile(filepath.Join(dir, settingsStateFileName))
 	if err != nil {
-		t.Fatalf("read migrated state failed: %v", err)
+		t.Fatalf("read migrated settings failed: %v", err)
 	}
 	var persisted map[string]interface{}
-	if err := json.Unmarshal(persistedRaw, &persisted); err != nil {
-		t.Fatalf("decode migrated state failed: %v", err)
+	if err := json.Unmarshal(settingsRaw, &persisted); err != nil {
+		t.Fatalf("decode migrated settings failed: %v", err)
 	}
 	gotVersion, ok := persisted["schema_version"].(float64)
 	if !ok {
@@ -272,6 +272,22 @@ func TestLoadMigratesLegacyStateWithoutSchemaVersion(t *testing.T) {
 	}
 	if int(gotVersion) != currentStateSchemaVersion {
 		t.Fatalf("expected persisted schema_version=%d, got=%v", currentStateSchemaVersion, gotVersion)
+	}
+
+	conversationsRaw, err := os.ReadFile(filepath.Join(dir, conversationsStateFileName))
+	if err != nil {
+		t.Fatalf("read migrated conversations failed: %v", err)
+	}
+	persisted = map[string]interface{}{}
+	if err := json.Unmarshal(conversationsRaw, &persisted); err != nil {
+		t.Fatalf("decode migrated conversations failed: %v", err)
+	}
+	gotVersion, ok = persisted["schema_version"].(float64)
+	if !ok {
+		t.Fatalf("expected conversations schema_version to be persisted")
+	}
+	if int(gotVersion) != currentStateSchemaVersion {
+		t.Fatalf("expected conversations schema_version=%d, got=%v", currentStateSchemaVersion, gotVersion)
 	}
 }
 
@@ -282,21 +298,36 @@ func TestNewStoreWritesSchemaVersionOnNewFile(t *testing.T) {
 		t.Fatalf("new store failed: %v", err)
 	}
 
-	statePath := filepath.Join(dir, "state.json")
-	raw, err := os.ReadFile(statePath)
+	settingsRaw, err := os.ReadFile(filepath.Join(dir, settingsStateFileName))
 	if err != nil {
-		t.Fatalf("read state failed: %v", err)
+		t.Fatalf("read settings failed: %v", err)
 	}
 	var persisted map[string]interface{}
-	if err := json.Unmarshal(raw, &persisted); err != nil {
-		t.Fatalf("decode state failed: %v", err)
+	if err := json.Unmarshal(settingsRaw, &persisted); err != nil {
+		t.Fatalf("decode settings failed: %v", err)
 	}
 	gotVersion, ok := persisted["schema_version"].(float64)
 	if !ok {
-		t.Fatalf("expected schema_version to be persisted")
+		t.Fatalf("expected settings schema_version to be persisted")
 	}
 	if int(gotVersion) != currentStateSchemaVersion {
-		t.Fatalf("expected schema_version=%d, got=%v", currentStateSchemaVersion, gotVersion)
+		t.Fatalf("expected settings schema_version=%d, got=%v", currentStateSchemaVersion, gotVersion)
+	}
+
+	conversationsRaw, err := os.ReadFile(filepath.Join(dir, conversationsStateFileName))
+	if err != nil {
+		t.Fatalf("read conversations failed: %v", err)
+	}
+	persisted = map[string]interface{}{}
+	if err := json.Unmarshal(conversationsRaw, &persisted); err != nil {
+		t.Fatalf("decode conversations failed: %v", err)
+	}
+	gotVersion, ok = persisted["schema_version"].(float64)
+	if !ok {
+		t.Fatalf("expected conversations schema_version to be persisted")
+	}
+	if int(gotVersion) != currentStateSchemaVersion {
+		t.Fatalf("expected conversations schema_version=%d, got=%v", currentStateSchemaVersion, gotVersion)
 	}
 }
 

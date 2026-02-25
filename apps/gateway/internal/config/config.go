@@ -16,6 +16,7 @@ type Config struct {
 	EnableCodexModeV2              bool
 	CodexPromptSource              string
 	EnableCodexPromptShadowCompare bool
+	ProviderRegistryFile           string
 }
 
 func Load() Config {
@@ -38,6 +39,7 @@ func Load() Config {
 	enableCodexModeV2 := parseEnvBool("NEXTAI_ENABLE_CODEX_MODE_V2")
 	codexPromptSource := parseCodexPromptSource("NEXTAI_CODEX_PROMPT_SOURCE")
 	enableCodexPromptShadowCompare := parseEnvBool("NEXTAI_CODEX_PROMPT_SHADOW_COMPARE")
+	providerRegistryFile := strings.TrimSpace(os.Getenv("NEXTAI_PROVIDER_REGISTRY_FILE"))
 	return Config{
 		Host:                           host,
 		Port:                           port,
@@ -49,6 +51,7 @@ func Load() Config {
 		EnableCodexModeV2:              enableCodexModeV2,
 		CodexPromptSource:              codexPromptSource,
 		EnableCodexPromptShadowCompare: enableCodexPromptShadowCompare,
+		ProviderRegistryFile:           providerRegistryFile,
 	}
 }
 

@@ -1,6 +1,10 @@
 package provider
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
 
 func TestResolveModelsIncludesCustomAliasTargetsForCustomProvider(t *testing.T) {
 	models := ResolveModels("custom-openai", map[string]string{
@@ -63,5 +67,79 @@ func TestResolveAdapterUsesCodexForCodexCompatibleProviderIDs(t *testing.T) {
 	}
 	if got := ResolveAdapter("custom-openai"); got != AdapterOpenAICompatible {
 		t.Fatalf("expected openai-compatible adapter for custom-openai, got=%q", got)
+	}
+}
+
+func TestRegisterProviderAndType(t *testing.T) {
+	ResetRegistry()
+	t.Cleanup(ResetRegistry)
+
+	if err := RegisterProviderType(ProviderTypeSpec{ID: "acme", DisplayName: "Acme"}); err != nil {
+		t.Fatalf("register provider type failed: %v", err)
+	}
+	if err := RegisterProvider(ProviderSpec{
+		ID:                 "acme",
+		Name:               "Acme",
+		Adapter:            AdapterOpenAICompatible,
+		AllowCustomBaseURL: true,
+		Models: []ModelSpec{
+			{ID: "acme-chat", Name: "Acme Chat"},
+		},
+	}); err != nil {
+		t.Fatalf("register provider failed: %v", err)
+	}
+
+	spec := ResolveProvider("acme")
+	if spec.ID != "acme" {
+		t.Fatalf("unexpected provider id: %q", spec.ID)
+	}
+	if len(spec.Models) != 1 || spec.Models[0].ID != "acme-chat" {
+		t.Fatalf("unexpected provider models: %+v", spec.Models)
+	}
+
+	types := ListProviderTypes()
+	found := false
+	for _, item := range types {
+		if item.ID == "acme" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected provider type acme in list, types=%+v", types)
+	}
+}
+
+func TestLoadRegistryFromFile(t *testing.T) {
+	ResetRegistry()
+	t.Cleanup(ResetRegistry)
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "provider-registry.json")
+	raw := `{
+  "provider_types": [{"id":"custom","display_name":"Custom"}],
+  "providers": [{
+    "id":"custom-openai",
+    "name":"Custom OpenAI",
+    "adapter":"openai-compatible",
+    "allow_custom_base_url": true,
+    "default_base_url": "https://example.com/v1",
+    "models":[{"id":"custom-1","name":"Custom 1"}]
+  }]
+}`
+	if err := os.WriteFile(path, []byte(raw), 0o644); err != nil {
+		t.Fatalf("write provider registry file failed: %v", err)
+	}
+
+	if err := LoadRegistryFromFile(path); err != nil {
+		t.Fatalf("load provider registry failed: %v", err)
+	}
+
+	spec := ResolveProvider("custom-openai")
+	if spec.DefaultBaseURL != "https://example.com/v1" {
+		t.Fatalf("unexpected default base url: %q", spec.DefaultBaseURL)
+	}
+	if len(spec.Models) != 1 || spec.Models[0].ID != "custom-1" {
+		t.Fatalf("unexpected loaded provider models: %+v", spec.Models)
 	}
 }

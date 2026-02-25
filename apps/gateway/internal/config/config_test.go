@@ -36,3 +36,12 @@ func TestLoadCodexPromptSourceInvalidFallsBackToFile(t *testing.T) {
 		t.Fatalf("expected invalid source to fallback file, got=%q", cfg.CodexPromptSource)
 	}
 }
+
+func TestLoadProviderRegistryFile(t *testing.T) {
+	t.Setenv("NEXTAI_PROVIDER_REGISTRY_FILE", "  /tmp/provider-registry.json  ")
+
+	cfg := Load()
+	if cfg.ProviderRegistryFile != "/tmp/provider-registry.json" {
+		t.Fatalf("unexpected provider registry file: %q", cfg.ProviderRegistryFile)
+	}
+}
