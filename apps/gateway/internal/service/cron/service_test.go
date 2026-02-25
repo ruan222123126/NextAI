@@ -11,6 +11,7 @@ import (
 	"nextai/apps/gateway/internal/domain"
 	"nextai/apps/gateway/internal/repo"
 	"nextai/apps/gateway/internal/service/adapters"
+	"nextai/apps/gateway/internal/service/ports"
 )
 
 func TestExecuteJobSuccessUpdatesState(t *testing.T) {
@@ -174,6 +175,222 @@ func TestBuildWorkflowPlanRejectsUnknownNodeType(t *testing.T) {
 	}
 }
 
+func TestExecuteWorkflowTaskBuiltInNodesSuccess(t *testing.T) {
+	executedTexts := make([]string, 0, 2)
+	svc := NewService(Dependencies{
+		ChannelResolver: stubChannelResolver{resolvedChannelName: "console"},
+		ExecuteConsoleAgentTask: func(_ context.Context, _ domain.CronJobSpec, text string) error {
+			executedTexts = append(executedTexts, text)
+			return nil
+		},
+	})
+
+	job := newWorkflowTestJob(
+		[]domain.CronWorkflowNode{
+			{ID: "start", Type: "start"},
+			{ID: "n1", Type: "text_event", Text: "first"},
+			{ID: "n2", Type: "if_event", IfCondition: "task_type == workflow"},
+			{ID: "n3", Type: "delay", DelaySeconds: 0},
+			{ID: "n4", Type: "text_event", Text: "second"},
+		},
+		[]domain.CronWorkflowEdge{
+			{ID: "e1", Source: "start", Target: "n1"},
+			{ID: "e2", Source: "n1", Target: "n2"},
+			{ID: "e3", Source: "n2", Target: "n3"},
+			{ID: "e4", Source: "n3", Target: "n4"},
+		},
+	)
+
+	execution, err := svc.executeWorkflowTask(context.Background(), job)
+	if err != nil {
+		t.Fatalf("executeWorkflowTask failed: %v", err)
+	}
+	if execution == nil {
+		t.Fatal("expected non-nil workflow execution")
+	}
+	if execution.HadFailures {
+		t.Fatalf("expected had_failures=false, execution=%+v", execution)
+	}
+	if len(execution.Nodes) != 4 {
+		t.Fatalf("execution nodes=%d, want=4", len(execution.Nodes))
+	}
+	for idx, step := range execution.Nodes {
+		if step.Status != statusSucceeded {
+			t.Fatalf("node[%d] status=%q, want=%q", idx, step.Status, statusSucceeded)
+		}
+	}
+	if len(executedTexts) != 2 {
+		t.Fatalf("executed text count=%d, want=2", len(executedTexts))
+	}
+	if executedTexts[0] != "first" || executedTexts[1] != "second" {
+		t.Fatalf("executed texts=%v, want=[first second]", executedTexts)
+	}
+}
+
+func TestExecuteWorkflowTaskIfStopMarksRemainingNodesSkipped(t *testing.T) {
+	executedTexts := 0
+	svc := NewService(Dependencies{
+		ChannelResolver: stubChannelResolver{resolvedChannelName: "console"},
+		ExecuteConsoleAgentTask: func(_ context.Context, _ domain.CronJobSpec, _ string) error {
+			executedTexts++
+			return nil
+		},
+	})
+
+	job := newWorkflowTestJob(
+		[]domain.CronWorkflowNode{
+			{ID: "start", Type: "start"},
+			{ID: "n1", Type: "if_event", IfCondition: "channel == qq"},
+			{ID: "n2", Type: "text_event", Text: "should-not-run"},
+		},
+		[]domain.CronWorkflowEdge{
+			{ID: "e1", Source: "start", Target: "n1"},
+			{ID: "e2", Source: "n1", Target: "n2"},
+		},
+	)
+
+	execution, err := svc.executeWorkflowTask(context.Background(), job)
+	if err != nil {
+		t.Fatalf("executeWorkflowTask failed: %v", err)
+	}
+	if execution == nil {
+		t.Fatal("expected non-nil workflow execution")
+	}
+	if execution.HadFailures {
+		t.Fatalf("expected had_failures=false, execution=%+v", execution)
+	}
+	if len(execution.Nodes) != 2 {
+		t.Fatalf("execution nodes=%d, want=2", len(execution.Nodes))
+	}
+	if execution.Nodes[0].Status != statusSucceeded {
+		t.Fatalf("first node status=%q, want=%q", execution.Nodes[0].Status, statusSucceeded)
+	}
+	if execution.Nodes[1].Status != workflowNodeExecutionSkipped {
+		t.Fatalf("second node status=%q, want=%q", execution.Nodes[1].Status, workflowNodeExecutionSkipped)
+	}
+	if executedTexts != 0 {
+		t.Fatalf("executed texts=%d, want=0", executedTexts)
+	}
+}
+
+func TestExecuteWorkflowTaskContinueOnErrorKeepsRunning(t *testing.T) {
+	executedTexts := make([]string, 0, 2)
+	svc := NewService(Dependencies{
+		ChannelResolver: stubChannelResolver{resolvedChannelName: "console"},
+		ExecuteConsoleAgentTask: func(_ context.Context, _ domain.CronJobSpec, text string) error {
+			executedTexts = append(executedTexts, text)
+			if text == "fail-node" {
+				return errors.New("boom")
+			}
+			return nil
+		},
+	})
+
+	job := newWorkflowTestJob(
+		[]domain.CronWorkflowNode{
+			{ID: "start", Type: "start"},
+			{ID: "n1", Type: "text_event", Text: "fail-node", ContinueOnError: true},
+			{ID: "n2", Type: "text_event", Text: "after-fail"},
+		},
+		[]domain.CronWorkflowEdge{
+			{ID: "e1", Source: "start", Target: "n1"},
+			{ID: "e2", Source: "n1", Target: "n2"},
+		},
+	)
+
+	execution, err := svc.executeWorkflowTask(context.Background(), job)
+	if err == nil || !strings.Contains(err.Error(), "workflow node n1 failed") {
+		t.Fatalf("expected n1 failure error, got=%v", err)
+	}
+	if execution == nil {
+		t.Fatal("expected non-nil workflow execution")
+	}
+	if !execution.HadFailures {
+		t.Fatalf("expected had_failures=true, execution=%+v", execution)
+	}
+	if len(execution.Nodes) != 2 {
+		t.Fatalf("execution nodes=%d, want=2", len(execution.Nodes))
+	}
+	if execution.Nodes[0].Status != statusFailed {
+		t.Fatalf("first node status=%q, want=%q", execution.Nodes[0].Status, statusFailed)
+	}
+	if execution.Nodes[1].Status != statusSucceeded {
+		t.Fatalf("second node status=%q, want=%q", execution.Nodes[1].Status, statusSucceeded)
+	}
+	if len(executedTexts) != 2 || executedTexts[0] != "fail-node" || executedTexts[1] != "after-fail" {
+		t.Fatalf("executed texts=%v, want=[fail-node after-fail]", executedTexts)
+	}
+}
+
+func TestExecuteWorkflowTaskNodeErrorWithoutContinueStopsFlow(t *testing.T) {
+	executedTexts := make([]string, 0, 2)
+	svc := NewService(Dependencies{
+		ChannelResolver: stubChannelResolver{resolvedChannelName: "console"},
+		ExecuteConsoleAgentTask: func(_ context.Context, _ domain.CronJobSpec, text string) error {
+			executedTexts = append(executedTexts, text)
+			if text == "fail-node" {
+				return errors.New("boom")
+			}
+			return nil
+		},
+	})
+
+	job := newWorkflowTestJob(
+		[]domain.CronWorkflowNode{
+			{ID: "start", Type: "start"},
+			{ID: "n1", Type: "text_event", Text: "fail-node"},
+			{ID: "n2", Type: "text_event", Text: "should-not-run"},
+		},
+		[]domain.CronWorkflowEdge{
+			{ID: "e1", Source: "start", Target: "n1"},
+			{ID: "e2", Source: "n1", Target: "n2"},
+		},
+	)
+
+	execution, err := svc.executeWorkflowTask(context.Background(), job)
+	if err == nil || !strings.Contains(err.Error(), "workflow node n1 failed") {
+		t.Fatalf("expected n1 failure error, got=%v", err)
+	}
+	if execution == nil {
+		t.Fatal("expected non-nil workflow execution")
+	}
+	if !execution.HadFailures {
+		t.Fatalf("expected had_failures=true, execution=%+v", execution)
+	}
+	if len(execution.Nodes) != 2 {
+		t.Fatalf("execution nodes=%d, want=2", len(execution.Nodes))
+	}
+	if execution.Nodes[0].Status != statusFailed {
+		t.Fatalf("first node status=%q, want=%q", execution.Nodes[0].Status, statusFailed)
+	}
+	if execution.Nodes[1].Status != workflowNodeExecutionSkipped {
+		t.Fatalf("second node status=%q, want=%q", execution.Nodes[1].Status, workflowNodeExecutionSkipped)
+	}
+	if len(executedTexts) != 1 || executedTexts[0] != "fail-node" {
+		t.Fatalf("executed texts=%v, want=[fail-node]", executedTexts)
+	}
+}
+
+func newWorkflowTestJob(nodes []domain.CronWorkflowNode, edges []domain.CronWorkflowEdge) domain.CronJobSpec {
+	return domain.CronJobSpec{
+		ID:       "job-workflow-test",
+		Name:     "job-workflow-test",
+		TaskType: taskTypeWorkflow,
+		Dispatch: domain.CronDispatchSpec{
+			Channel: "console",
+			Target: domain.CronDispatchTarget{
+				UserID:    "u-workflow",
+				SessionID: "s-workflow",
+			},
+		},
+		Workflow: &domain.CronWorkflowSpec{
+			Version: workflowVersionV1,
+			Nodes:   nodes,
+			Edges:   edges,
+		},
+	}
+}
+
 func newTestStore(t *testing.T) (*repo.Store, string) {
 	t.Helper()
 	dir, err := os.MkdirTemp("", "nextai-cron-service-")
@@ -241,4 +458,20 @@ func (h stubCronNodeHandler) Execute(
 		return CronNodeResult{}, nil
 	}
 	return h.execute(ctx, job, node)
+}
+
+type stubChannelResolver struct {
+	resolvedChannelName string
+	err                 error
+}
+
+func (r stubChannelResolver) ResolveChannel(name string) (ports.Channel, map[string]interface{}, string, error) {
+	if r.err != nil {
+		return nil, nil, "", r.err
+	}
+	resolved := strings.TrimSpace(r.resolvedChannelName)
+	if resolved == "" {
+		resolved = strings.TrimSpace(name)
+	}
+	return nil, map[string]interface{}{}, resolved, nil
 }
