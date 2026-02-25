@@ -8,11 +8,8 @@ import { applyAgentEvent, appendUserMessage, beginAssistantMessage, historyToVie
 import { consumeSSEBuffer, parseAgentStreamData } from "./stream.js";
 import {
   buildProcessBizParams,
-  nextCollaborationMode,
   nextPromptMode,
-  normalizeCollaborationMode,
   resolveModesFromMeta,
-  type TUICollaborationMode,
   type TUIPromptMode,
 } from "./mode.js";
 import type { ChatHistoryResponse, ChatSpec, TUIBootstrapOptions, TUIMessage, TUISettings } from "./types.js";
@@ -209,26 +206,9 @@ function calcWindow(total: number, selected: number, limit: number): { start: nu
   };
 }
 
-function promptModeLabelKey(mode: TUIPromptMode): "tui.mode.prompt.default" | "tui.mode.prompt.codex" {
-  if (mode === "codex") {
-    return "tui.mode.prompt.codex";
-  }
+function promptModeLabelKey(mode: TUIPromptMode): "tui.mode.prompt.default" {
+  void mode;
   return "tui.mode.prompt.default";
-}
-
-function collaborationModeLabelKey(
-  mode: TUICollaborationMode,
-): "tui.mode.collaboration.default" | "tui.mode.collaboration.plan" | "tui.mode.collaboration.execute" | "tui.mode.collaboration.pair_programming" {
-  if (mode === "plan") {
-    return "tui.mode.collaboration.plan";
-  }
-  if (mode === "execute") {
-    return "tui.mode.collaboration.execute";
-  }
-  if (mode === "pair_programming") {
-    return "tui.mode.collaboration.pair_programming";
-  }
-  return "tui.mode.collaboration.default";
 }
 
 interface ChatRenderLine {
@@ -326,7 +306,6 @@ export function TUIApp({ client, bootstrap }: TUIAppProps): React.ReactElement {
   const [terminalRows, setTerminalRows] = useState<number>(Math.max(stdout?.rows ?? 24, 12));
   const [terminalColumns, setTerminalColumns] = useState<number>(Math.max(stdout?.columns ?? 80, 40));
   const [promptMode, setPromptMode] = useState<TUIPromptMode>("default");
-  const [collaborationMode, setCollaborationMode] = useState<TUICollaborationMode>("default");
 
   const fetchSessions = useCallback(
     async (userID: string, channel: string): Promise<ChatSpec[]> => {
@@ -356,7 +335,6 @@ export function TUIApp({ client, bootstrap }: TUIAppProps): React.ReactElement {
   const applyChatModes = useCallback((chat: ChatSpec | null | undefined): void => {
     const resolved = resolveModesFromMeta(chat?.meta);
     setPromptMode(resolved.promptMode);
-    setCollaborationMode(resolved.collaborationMode);
   }, []);
 
   const createSession = useCallback(
@@ -369,7 +347,6 @@ export function TUIApp({ client, bootstrap }: TUIAppProps): React.ReactElement {
         channel: settings.channel,
         meta: {
           prompt_mode: promptMode,
-          collaboration_mode: collaborationMode,
         },
       });
       setSessions((prev) => [created, ...prev.filter((item) => item.id !== created.id)]);
@@ -380,7 +357,7 @@ export function TUIApp({ client, bootstrap }: TUIAppProps): React.ReactElement {
       setMessages([]);
       return created;
     },
-    [client, settings.userID, settings.channel, promptMode, collaborationMode, applyChatModes],
+    [client, settings.userID, settings.channel, promptMode, applyChatModes],
   );
 
   const refreshSessions = useCallback(async (): Promise<void> => {
@@ -531,7 +508,7 @@ export function TUIApp({ client, bootstrap }: TUIAppProps): React.ReactElement {
         user_id: settings.userID,
         channel: settings.channel,
         stream: true,
-        biz_params: buildProcessBizParams(promptMode, collaborationMode),
+        biz_params: buildProcessBizParams(promptMode),
       };
       const res = await client.openStream("/agent/process", {
         method: "POST",
@@ -591,12 +568,11 @@ export function TUIApp({ client, bootstrap }: TUIAppProps): React.ReactElement {
     settings.channel,
     client,
     promptMode,
-    collaborationMode,
     loadHistory,
     refreshSessions,
   ]);
 
-  const updateActiveChatModeMeta = useCallback((nextPromptMode: TUIPromptMode, nextCollaborationMode: TUICollaborationMode): void => {
+  const updateActiveChatModeMeta = useCallback((nextPromptMode: TUIPromptMode): void => {
     if (!activeChatID) {
       return;
     }
@@ -613,7 +589,6 @@ export function TUIApp({ client, bootstrap }: TUIAppProps): React.ReactElement {
           meta: {
             ...baseMeta,
             prompt_mode: nextPromptMode,
-            collaboration_mode: nextCollaborationMode,
           },
         };
       }),
@@ -623,20 +598,9 @@ export function TUIApp({ client, bootstrap }: TUIAppProps): React.ReactElement {
   const cyclePromptMode = useCallback((): void => {
     const next = nextPromptMode(promptMode);
     setPromptMode(next);
-    updateActiveChatModeMeta(next, collaborationMode);
+    updateActiveChatModeMeta(next);
     setStatus(t("tui.status.prompt_mode_changed", { mode: t(promptModeLabelKey(next)) }));
-  }, [promptMode, collaborationMode, updateActiveChatModeMeta]);
-
-  const cycleCollaborationMode = useCallback((): void => {
-    if (promptMode !== "codex") {
-      setStatus(t("tui.status.collaboration_requires_codex"));
-      return;
-    }
-    const next = normalizeCollaborationMode(nextCollaborationMode(collaborationMode));
-    setCollaborationMode(next);
-    updateActiveChatModeMeta(promptMode, next);
-    setStatus(t("tui.status.collaboration_mode_changed", { mode: t(collaborationModeLabelKey(next)) }));
-  }, [promptMode, collaborationMode, updateActiveChatModeMeta]);
+  }, [promptMode, updateActiveChatModeMeta]);
 
   const applySettings = useCallback(async (): Promise<void> => {
     const nextLocale = resolveLocale(settingsDraft.locale);
@@ -779,10 +743,6 @@ export function TUIApp({ client, bootstrap }: TUIAppProps): React.ReactElement {
       cyclePromptMode();
       return;
     }
-    if (key.ctrl && input === "m") {
-      cycleCollaborationMode();
-      return;
-    }
     if (key.return) {
       void sendMessage();
       return;
@@ -810,8 +770,7 @@ export function TUIApp({ client, bootstrap }: TUIAppProps): React.ReactElement {
   const historyWindow = calcWindow(sessions.length, historySelectionIndex, historyVisibleCount);
   const visibleSessions = sessions.slice(historyWindow.start, historyWindow.end);
   const promptModeLabel = t(promptModeLabelKey(promptMode));
-  const collaborationModeLabel = promptMode === "codex" ? t(collaborationModeLabelKey(collaborationMode)) : t("tui.mode.collaboration.na");
-  const baseInfo = `${t("tui.settings.user_id")}: ${settings.userID} | ${t("tui.settings.channel")}: ${settings.channel} | ${t("tui.settings.api_base")}: ${settings.apiBase} | ${t("tui.settings.locale")}: ${settings.locale} | ${t("tui.mode.prompt.label")}: ${promptModeLabel} | ${t("tui.mode.collaboration.label")}: ${collaborationModeLabel}`;
+  const baseInfo = `${t("tui.settings.user_id")}: ${settings.userID} | ${t("tui.settings.channel")}: ${settings.channel} | ${t("tui.settings.api_base")}: ${settings.apiBase} | ${t("tui.settings.locale")}: ${settings.locale} | ${t("tui.mode.prompt.label")}: ${promptModeLabel}`;
   const infoLine = fitText(baseInfo, Math.max(24, terminalColumns - 2));
 
   return (
