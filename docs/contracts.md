@@ -89,7 +89,7 @@
 | Channel | 把最终文本分发到外部渠道 | `apps/gateway/internal/app/server.go` | `ctx + user_id + session_id + text + channel_cfg` | `error` | `channel_not_supported/channel_disabled/channel_dispatch_failed` |
 | Tool | 执行本地工具调用 | `apps/gateway/internal/app/server.go` | `plugin.ToolCommand` | `plugin.ToolResult` | `tool_not_supported/tool_invoke_failed/tool_invalid_result` |
 | Prompt Source | 解析系统层提示词来源（文件/目录/catalog） | `apps/gateway/internal/service/systemprompt` | `prompt_mode + session_id + runtime env` | `[]systemprompt.Layer` | `*_prompt_unavailable` |
-| Cron Node | 执行 workflow 节点（`text_event/delay/if_event/...`） | `apps/gateway/internal/service/cron/service.go` | `ctx + CronJobSpec + CronWorkflowNode` | `CronNodeResult` | `unsupported workflow node type`/节点执行错误 |
+| Cron Node | 执行 workflow 节点（`text_event/delay/if_event/...`） | `apps/gateway/internal/service/cron/workflow/node_registry.go` + `apps/gateway/internal/service/cron/workflow/nodes/*.go` | `ctx + CronJobSpec + CronWorkflowNode` | `NodeResult` | `unsupported workflow node type`/节点执行错误 |
 
 ### 1) Model Provider
 
@@ -331,10 +331,21 @@ func (s *FileSource) Build(_ context.Context, _ BuildRequest) ([]Layer, error) {
 
 ### 5) Cron Node
 
-标准接口（建议抽象；与 `executeWorkflowNode` 现状对齐）：
+目录说明（当前落地）：
+- `apps/gateway/internal/service/cron/service.go`：`Service` 定义与门面转发。
+- `apps/gateway/internal/service/cron/job_crud.go`：任务 CRUD 与基础校验。
+- `apps/gateway/internal/service/cron/scheduler.go`：调度与 next_run 计算。
+- `apps/gateway/internal/service/cron/executor.go`：执行编排与状态收口。
+- `apps/gateway/internal/service/cron/lease.go`：并发租约。
+- `apps/gateway/internal/service/cron/workflow/plan.go`：workflow 拓扑规划。
+- `apps/gateway/internal/service/cron/workflow/engine.go`：workflow 执行循环。
+- `apps/gateway/internal/service/cron/workflow/node_registry.go`：节点注册表。
+- `apps/gateway/internal/service/cron/workflow/nodes/*.go`：内置节点实现。
+
+标准接口（注册表）：
 
 ```go
-package cron
+package workflow
 
 import (
 	"context"
@@ -342,21 +353,20 @@ import (
 	"nextai/apps/gateway/internal/domain"
 )
 
-type CronNodeResult struct {
+type NodeResult struct {
 	Stop bool
 }
 
-type CronNodeHandler interface {
+type NodeHandler interface {
 	Type() string
-	Validate(node domain.CronWorkflowNode) error
-	Execute(ctx context.Context, job domain.CronJobSpec, node domain.CronWorkflowNode) (CronNodeResult, error)
+	Execute(ctx context.Context, job domain.CronJobSpec, node domain.CronWorkflowNode) (NodeResult, error)
 }
 ```
 
 最小实现模板（`text_event`）：
 
 ```go
-package cron
+package nodes
 
 import (
 	"context"
@@ -364,39 +374,34 @@ import (
 	"strings"
 
 	"nextai/apps/gateway/internal/domain"
+	cronworkflow "nextai/apps/gateway/internal/service/cron/workflow"
 )
 
-type TextNodeHandler struct {
+type TextEventHandler struct {
 	ExecuteTextTask func(ctx context.Context, job domain.CronJobSpec, text string) error
 }
 
-func (h *TextNodeHandler) Type() string { return "text_event" }
+func (h *TextEventHandler) Type() string { return cronworkflow.NodeTypeTextEvent }
 
-func (h *TextNodeHandler) Validate(node domain.CronWorkflowNode) error {
-	if strings.TrimSpace(node.Text) == "" {
-		return errors.New("workflow text_event requires non-empty text")
-	}
-	return nil
-}
-
-func (h *TextNodeHandler) Execute(
+func (h *TextEventHandler) Execute(
 	ctx context.Context,
 	job domain.CronJobSpec,
 	node domain.CronWorkflowNode,
-) (CronNodeResult, error) {
-	if err := h.Validate(node); err != nil {
-		return CronNodeResult{}, err
+) (cronworkflow.NodeResult, error) {
+	if h == nil || h.ExecuteTextTask == nil {
+		return cronworkflow.NodeResult{}, errors.New("cron text node executor is unavailable")
 	}
-	if err := h.ExecuteTextTask(ctx, job, node.Text); err != nil {
-		return CronNodeResult{}, err
+	text := strings.TrimSpace(node.Text)
+	if text == "" {
+		return cronworkflow.NodeResult{}, errors.New("workflow text_event requires non-empty text")
 	}
-	return CronNodeResult{}, nil
+	return cronworkflow.NodeResult{}, h.ExecuteTextTask(ctx, job, text)
 }
 ```
 
 接入建议：
-- 保持 `start` 节点仅用于拓扑起点，不执行 side effect。
-- 新节点默认要求 `Validate` 可离线运行，避免运行期才炸。
+- `start` 节点只在 `plan.go` 做拓扑校验，不注册 handler。
+- 新节点通过注册表扩展，不改主执行流程。
 
 ### 扩展点统一约束
 - 错误模型统一：外部接口始终映射为 `{ error: { code, message, details } }`。

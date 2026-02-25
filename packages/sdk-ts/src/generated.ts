@@ -4,9 +4,15 @@
 
 export const OPENAPI_VERSION = "3.0.3" as const;
 
-export type APIPath = "/agent/process" | "/agent/self/config-mutations/apply" | "/agent/self/config-mutations/preview" | "/agent/self/sessions/{session_id}/model" | "/agent/self/sessions/bootstrap" | "/agent/system-layers" | "/agent/tool-input-answer" | "/channels/qq/inbound" | "/channels/qq/state" | "/chats" | "/chats/{chat_id}" | "/chats/batch-delete" | "/config/channels" | "/config/channels/{channel_name}" | "/config/channels/types" | "/cron/jobs" | "/cron/jobs/{job_id}" | "/cron/jobs/{job_id}/pause" | "/cron/jobs/{job_id}/resume" | "/cron/jobs/{job_id}/run" | "/cron/jobs/{job_id}/state" | "/envs" | "/envs/{key}" | "/healthz" | "/models" | "/models/{provider_id}" | "/models/{provider_id}/config" | "/models/active" | "/models/catalog" | "/runtime-config" | "/skills" | "/skills/{skill_name}" | "/skills/{skill_name}/disable" | "/skills/{skill_name}/enable" | "/skills/{skill_name}/files/{source}/{file_path}" | "/skills/available" | "/skills/batch-disable" | "/skills/batch-enable" | "/version" | "/workspace/export" | "/workspace/files" | "/workspace/files/{file_path}" | "/workspace/import" | "/workspace/uploads";
+export type APIPath = "/agent/plan/{chat_id}" | "/agent/plan/clarify/answer" | "/agent/plan/compile" | "/agent/plan/execute" | "/agent/plan/revise" | "/agent/plan/toggle" | "/agent/process" | "/agent/self/config-mutations/apply" | "/agent/self/config-mutations/preview" | "/agent/self/sessions/{session_id}/model" | "/agent/self/sessions/bootstrap" | "/agent/system-layers" | "/agent/tool-input-answer" | "/channels/qq/inbound" | "/channels/qq/state" | "/chats" | "/chats/{chat_id}" | "/chats/batch-delete" | "/config/channels" | "/config/channels/{channel_name}" | "/config/channels/types" | "/cron/jobs" | "/cron/jobs/{job_id}" | "/cron/jobs/{job_id}/pause" | "/cron/jobs/{job_id}/resume" | "/cron/jobs/{job_id}/run" | "/cron/jobs/{job_id}/state" | "/envs" | "/envs/{key}" | "/healthz" | "/models" | "/models/{provider_id}" | "/models/{provider_id}/config" | "/models/active" | "/models/catalog" | "/runtime-config" | "/skills" | "/skills/{skill_name}" | "/skills/{skill_name}/disable" | "/skills/{skill_name}/enable" | "/skills/{skill_name}/files/{source}/{file_path}" | "/skills/available" | "/skills/batch-disable" | "/skills/batch-enable" | "/version" | "/workspace/export" | "/workspace/files" | "/workspace/files/{file_path}" | "/workspace/import" | "/workspace/uploads";
 
 export type APIMethodByPath = {
+  "/agent/plan/{chat_id}": "get";
+  "/agent/plan/clarify/answer": "post";
+  "/agent/plan/compile": "post";
+  "/agent/plan/execute": "post";
+  "/agent/plan/revise": "post";
+  "/agent/plan/toggle": "post";
   "/agent/process": "post";
   "/agent/self/config-mutations/apply": "post";
   "/agent/self/config-mutations/preview": "post";

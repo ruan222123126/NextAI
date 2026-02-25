@@ -178,6 +178,120 @@ paths:
           description: invalid request
         '404':
           description: feature disabled
+  /agent/plan/toggle:
+    post:
+      summary: Enable/disable independent plan business mode for a chat
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PlanToggleRequest' }
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PlanStateResponse' }
+        '400':
+          description: invalid request
+        '404':
+          description: chat not found
+        '409':
+          description: requires confirmation when disabling in active planning state
+  /agent/plan/compile:
+    post:
+      summary: Compile plan from user goal input
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PlanCompileRequest' }
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PlanStateResponse' }
+        '400':
+          description: invalid request
+        '404':
+          description: chat not found
+        '503':
+          description: plan prompt is not configured
+  /agent/plan/clarify/answer:
+    post:
+      summary: Submit clarify answers for current planning session
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PlanClarifyAnswerRequest' }
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PlanStateResponse' }
+        '400':
+          description: invalid request
+        '404':
+          description: chat not found
+        '503':
+          description: plan prompt is not configured
+  /agent/plan/revise:
+    post:
+      summary: Revise existing plan by natural language feedback
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PlanReviseRequest' }
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PlanStateResponse' }
+        '400':
+          description: invalid request
+        '404':
+          description: chat not found
+        '503':
+          description: plan prompt is not configured
+  /agent/plan/execute:
+    post:
+      summary: Create execution session with plan seed (soft reset)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PlanExecuteRequest' }
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PlanExecuteResponse' }
+        '400':
+          description: invalid request
+        '404':
+          description: chat not found
+  /agent/plan/{chat_id}:
+    get:
+      summary: Get plan mode snapshot for chat
+      parameters:
+        - in: path
+          name: chat_id
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PlanStateResponse' }
+        '404':
+          description: chat not found
   /agent/self/sessions/bootstrap:
     post:
       requestBody:
@@ -785,6 +899,140 @@ components:
         accepted: { type: boolean }
         request_id: { type: string }
       required: [accepted, request_id]
+    PlanTask:
+      type: object
+      properties:
+        id: { type: string, minLength: 1 }
+        title: { type: string, minLength: 1 }
+        description: { type: string, minLength: 1 }
+        depends_on:
+          type: array
+          items: { type: string }
+        status:
+          type: string
+          enum: [pending, in_progress, completed, blocked]
+        deliverables:
+          type: array
+          items: { type: string }
+        verification:
+          type: array
+          items: { type: string }
+      required: [id, title, description, depends_on, status, deliverables, verification]
+    PlanRisk:
+      type: object
+      properties:
+        id: { type: string, minLength: 1 }
+        title: { type: string, minLength: 1 }
+        description: { type: string, minLength: 1 }
+        mitigation: { type: string, minLength: 1 }
+      required: [id, title, description, mitigation]
+    PlanSpec:
+      type: object
+      properties:
+        goal: { type: string, minLength: 1 }
+        scope_in:
+          type: array
+          items: { type: string }
+        scope_out:
+          type: array
+          items: { type: string }
+        constraints:
+          type: array
+          items: { type: string }
+        assumptions:
+          type: array
+          items: { type: string }
+        tasks:
+          type: array
+          minItems: 1
+          items: { $ref: '#/components/schemas/PlanTask' }
+        acceptance_criteria:
+          type: array
+          minItems: 1
+          items: { type: string }
+        risks:
+          type: array
+          items: { $ref: '#/components/schemas/PlanRisk' }
+        summary_for_execution: { type: string, minLength: 1 }
+        revision: { type: integer, minimum: 0 }
+        updated_at: { type: string, format: date-time }
+      required:
+        [goal, scope_in, scope_out, constraints, assumptions, tasks, acceptance_criteria, risks, summary_for_execution, revision, updated_at]
+    PlanQuestionOption:
+      type: object
+      properties:
+        label: { type: string, minLength: 1 }
+        description: { type: string, minLength: 1 }
+      required: [label, description]
+    PlanQuestion:
+      type: object
+      properties:
+        id: { type: string, minLength: 1 }
+        header: { type: string, minLength: 1 }
+        question: { type: string, minLength: 1 }
+        options:
+          type: array
+          items: { $ref: '#/components/schemas/PlanQuestionOption' }
+      required: [id, header, question]
+    PlanStateResponse:
+      type: object
+      properties:
+        chat_id: { type: string, minLength: 1 }
+        plan_mode_enabled: { type: boolean }
+        plan_mode_state:
+          type: string
+          enum: [off, planning_intake, planning_clarify, planning_ready, planning_revising, executing, done, aborted]
+        plan_spec: { $ref: '#/components/schemas/PlanSpec' }
+        clarify_asked_count: { type: integer, minimum: 0 }
+        clarify_max_count: { type: integer, minimum: 1 }
+        clarify_unresolved:
+          type: array
+          items: { type: string }
+        plan_execution_session_id: { type: string }
+        plan_source_prompt_version: { type: string }
+        questions:
+          type: array
+          items: { $ref: '#/components/schemas/PlanQuestion' }
+      required:
+        [chat_id, plan_mode_enabled, plan_mode_state, clarify_asked_count, clarify_max_count, clarify_unresolved]
+    PlanToggleRequest:
+      type: object
+      properties:
+        chat_id: { type: string, minLength: 1 }
+        enabled: { type: boolean }
+        confirm: { type: boolean, default: false }
+      required: [chat_id, enabled]
+    PlanCompileRequest:
+      type: object
+      properties:
+        chat_id: { type: string, minLength: 1 }
+        user_input: { type: string, minLength: 1 }
+      required: [chat_id, user_input]
+    PlanClarifyAnswerRequest:
+      type: object
+      properties:
+        chat_id: { type: string, minLength: 1 }
+        answers:
+          type: object
+          additionalProperties:
+            $ref: '#/components/schemas/AgentToolInputAnswer'
+      required: [chat_id, answers]
+    PlanReviseRequest:
+      type: object
+      properties:
+        chat_id: { type: string, minLength: 1 }
+        natural_language_feedback: { type: string, minLength: 1 }
+      required: [chat_id, natural_language_feedback]
+    PlanExecuteRequest:
+      type: object
+      properties:
+        chat_id: { type: string, minLength: 1 }
+      required: [chat_id]
+    PlanExecuteResponse:
+      type: object
+      properties:
+        execution_session_id: { type: string, minLength: 1 }
+      required: [execution_session_id]
     ChatActiveLLMOverride:
       type: object
       properties:
