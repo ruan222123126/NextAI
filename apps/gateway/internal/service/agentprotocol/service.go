@@ -463,20 +463,6 @@ func NormalizeToolName(name string) string {
 		return "screenshot"
 	case "selfops", "self_ops":
 		return "self_ops"
-	case "spawnagent", "spawn_agent", "functions.spawn_agent":
-		return "spawn_agent"
-	case "sendinput", "send_input", "functions.send_input":
-		return "send_input"
-	case "resumeagent", "resume_agent", "functions.resume_agent":
-		return "resume_agent"
-	case "wait", "functions.wait":
-		return "wait"
-	case "closeagent", "close_agent", "functions.close_agent":
-		return "close_agent"
-	case "requestuserinput", "request_user_input", "functions.request_user_input":
-		return "request_user_input"
-	case "updateplan", "update_plan", "functions.update_plan":
-		return "update_plan"
 	case "applypatch", "apply_patch", "functions.apply_patch":
 		return "apply_patch"
 	default:
@@ -520,34 +506,6 @@ var baseToolDefinitionBuildSpecs = []toolDefinitionBuildSpec{
 	},
 	{
 		Name: "self_ops",
-	},
-	{
-		Name:       "spawn_agent",
-		PromptMode: promptModeCodex,
-	},
-	{
-		Name:       "send_input",
-		PromptMode: promptModeCodex,
-	},
-	{
-		Name:       "resume_agent",
-		PromptMode: promptModeCodex,
-	},
-	{
-		Name:       "wait",
-		PromptMode: promptModeCodex,
-	},
-	{
-		Name:       "close_agent",
-		PromptMode: promptModeCodex,
-	},
-	{
-		Name:       "request_user_input",
-		PromptMode: promptModeCodex,
-	},
-	{
-		Name:       "update_plan",
-		PromptMode: promptModeCodex,
 	},
 	{
 		Name:                    "apply_patch",

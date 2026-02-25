@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -131,7 +132,7 @@ func (s *Service) ListSkills(onlyEnabled bool) ([]domain.SkillSpec, error) {
 			if onlyEnabled && !spec.Enabled {
 				continue
 			}
-			out = append(out, spec)
+			out = append(out, cloneSkillSpec(spec))
 		}
 	})
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
@@ -248,9 +249,9 @@ func (s *Service) ListChannels() (domain.ChannelConfigMap, error) {
 		return nil, err
 	}
 
-	var out domain.ChannelConfigMap
+	out := domain.ChannelConfigMap{}
 	s.deps.Store.ReadSettings(func(st ports.SettingsAggregate) {
-		out = st.Channels
+		out = cloneChannelConfigMap(st.Channels)
 	})
 	return out, nil
 }
@@ -278,7 +279,7 @@ func (s *Service) ReplaceChannels(in domain.ChannelConfigMap) (domain.ChannelCon
 				Message: fmt.Sprintf("channel %q is not supported", name),
 			}
 		}
-		normalized[key] = cfg
+		normalized[key] = cloneChannelConfig(cfg)
 	}
 
 	if err := s.deps.Store.WriteSettings(func(st *ports.SettingsAggregate) error {
@@ -287,7 +288,7 @@ func (s *Service) ReplaceChannels(in domain.ChannelConfigMap) (domain.ChannelCon
 	}); err != nil {
 		return nil, err
 	}
-	return in, nil
+	return cloneChannelConfigMap(in), nil
 }
 
 func (s *Service) GetChannel(name string) (map[string]interface{}, bool, error) {
@@ -300,6 +301,9 @@ func (s *Service) GetChannel(name string) (map[string]interface{}, bool, error) 
 	var out map[string]interface{}
 	s.deps.Store.ReadSettings(func(st ports.SettingsAggregate) {
 		out, found = st.Channels[normalized]
+		if found {
+			out = cloneChannelConfig(out)
+		}
 	})
 	return out, found, nil
 }
@@ -321,7 +325,7 @@ func (s *Service) PutChannel(name string, body map[string]interface{}) error {
 		if st.Channels == nil {
 			st.Channels = domain.ChannelConfigMap{}
 		}
-		st.Channels[normalized] = body
+		st.Channels[normalized] = cloneChannelConfig(body)
 		return nil
 	})
 }
@@ -375,4 +379,51 @@ func safeMap(in map[string]interface{}) map[string]interface{} {
 		return map[string]interface{}{}
 	}
 	return in
+}
+
+func cloneSkillSpec(spec domain.SkillSpec) domain.SkillSpec {
+	return domain.SkillSpec{
+		Name:       spec.Name,
+		Content:    spec.Content,
+		Source:     spec.Source,
+		Path:       spec.Path,
+		References: cloneJSONMap(spec.References),
+		Scripts:    cloneJSONMap(spec.Scripts),
+		Enabled:    spec.Enabled,
+	}
+}
+
+func cloneChannelConfigMap(in domain.ChannelConfigMap) domain.ChannelConfigMap {
+	out := domain.ChannelConfigMap{}
+	for name, cfg := range in {
+		out[name] = cloneChannelConfig(cfg)
+	}
+	return out
+}
+
+func cloneChannelConfig(in map[string]interface{}) map[string]interface{} {
+	return cloneJSONMap(in)
+}
+
+func cloneJSONMap(in map[string]interface{}) map[string]interface{} {
+	if in == nil {
+		return map[string]interface{}{}
+	}
+	raw, err := json.Marshal(in)
+	if err != nil {
+		return cloneJSONMapShallow(in)
+	}
+	out := map[string]interface{}{}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return cloneJSONMapShallow(in)
+	}
+	return out
+}
+
+func cloneJSONMapShallow(in map[string]interface{}) map[string]interface{} {
+	out := make(map[string]interface{}, len(in))
+	for key, value := range in {
+		out[key] = value
+	}
+	return out
 }

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"nextai/apps/gateway/internal/domain"
+	"nextai/apps/gateway/internal/provider"
 	"nextai/apps/gateway/internal/repo"
 	"nextai/apps/gateway/internal/service/ports"
 )
@@ -326,7 +327,7 @@ func (s *Service) applyProviderConfigMutation(record mutationRecord) ([]string, 
 
 	if err := s.deps.Store.WriteSettings(func(st *ports.SettingsAggregate) error {
 		st.Providers = cloneProviderSettings(record.ProviderConfig)
-		activeProviderID := normalizeProviderID(st.ActiveLLM.ProviderID)
+		activeProviderID := provider.NormalizeProviderID(st.ActiveLLM.ProviderID)
 		if activeProviderID != "" {
 			if _, ok := st.Providers[activeProviderID]; !ok {
 				st.ActiveLLM = domain.ModelSlotConfig{}
@@ -752,7 +753,7 @@ func (s *Service) prepareActiveLLMMutation(operations []MutationOperation) (prep
 			Details: map[string]string{"error": err.Error()},
 		}
 	}
-	slot.ProviderID = normalizeProviderID(slot.ProviderID)
+	slot.ProviderID = provider.NormalizeProviderID(slot.ProviderID)
 	slot.Model = strings.TrimSpace(slot.Model)
 	if (slot.ProviderID == "") != (slot.Model == "") {
 		return preparedMutation{}, &ServiceError{
@@ -951,7 +952,7 @@ func decodeProviderSettings(raw interface{}) (map[string]repo.ProviderSetting, e
 
 	out := map[string]repo.ProviderSetting{}
 	for rawID, rawSetting := range parsed {
-		id := normalizeProviderID(rawID)
+		id := provider.NormalizeProviderID(rawID)
 		if id == "" {
 			return nil, errors.New("provider id cannot be empty")
 		}
@@ -959,12 +960,12 @@ func decodeProviderSettings(raw interface{}) (map[string]repo.ProviderSetting, e
 			continue
 		}
 		setting := rawSetting
-		normalizeProviderSetting(&setting)
+		provider.NormalizeProviderSetting(&setting)
 		if setting.TimeoutMS < 0 {
 			return nil, fmt.Errorf("provider %q timeout_ms must be >= 0", rawID)
 		}
-		setting.Headers = sanitizeStringMap(setting.Headers)
-		setting.ModelAliases = sanitizeStringMap(setting.ModelAliases)
+		setting.Headers = provider.SanitizeStringMap(setting.Headers)
+		setting.ModelAliases = provider.SanitizeStringMap(setting.ModelAliases)
 		out[id] = setting
 	}
 	return out, nil
@@ -980,19 +981,6 @@ func decodeModelSlot(raw interface{}) (domain.ModelSlotConfig, error) {
 		return domain.ModelSlotConfig{}, err
 	}
 	return out, nil
-}
-
-func sanitizeStringMap(in map[string]string) map[string]string {
-	out := map[string]string{}
-	for key, value := range in {
-		k := strings.TrimSpace(key)
-		v := strings.TrimSpace(value)
-		if k == "" || v == "" {
-			continue
-		}
-		out[k] = v
-	}
-	return out
 }
 
 func buildMutationConfirmHash(record mutationRecord) string {
@@ -1126,7 +1114,7 @@ func cloneProviderSettings(in map[string]repo.ProviderSetting) map[string]repo.P
 	out := map[string]repo.ProviderSetting{}
 	for id, raw := range in {
 		setting := raw
-		normalizeProviderSetting(&setting)
+		provider.NormalizeProviderSetting(&setting)
 		headers := map[string]string{}
 		for key, value := range setting.Headers {
 			headers[key] = value

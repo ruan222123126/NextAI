@@ -573,7 +573,116 @@ func TestProcessSelfOpsToolCallAutoInjectsRequestScope(t *testing.T) {
 	}
 }
 
-func TestProcessSpawnAgentToolCallAutoInjectsRequestScope(t *testing.T) {
+func TestProcessRequestUserInputToolCallNormalizesQuestionsForEventAndExecution(t *testing.T) {
+	t.Parallel()
+
+	var capturedInput map[string]interface{}
+	svc := NewService(Dependencies{
+		Runner: adapters.AgentRunner{
+			GenerateTurnFunc: func(context.Context, domain.AgentProcessRequest, runner.GenerateConfig, []runner.ToolDefinition) (runner.TurnResult, error) {
+				t.Fatalf("GenerateTurn should not be called when has tool call")
+				return runner.TurnResult{}, nil
+			},
+			GenerateTurnStreamFunc: func(context.Context, domain.AgentProcessRequest, runner.GenerateConfig, []runner.ToolDefinition, func(string)) (runner.TurnResult, error) {
+				t.Fatalf("GenerateTurnStream should not be called when has tool call")
+				return runner.TurnResult{}, nil
+			},
+		},
+		ToolRuntime: adapters.AgentToolRuntime{
+			ListToolDefinitionsFunc: func(string) []runner.ToolDefinition { return nil },
+			ExecuteToolCallFunc: func(_ context.Context, _ string, name string, input map[string]interface{}) (string, error) {
+				if name != "request_user_input" {
+					t.Fatalf("unexpected tool name: %s", name)
+				}
+				capturedInput = safeMap(input)
+				return `{"request_id":"req-flex","answers":{}}`, nil
+			},
+		},
+		ErrorMapper: adapters.AgentErrorMapper{
+			MapToolErrorFunc:   func(err error) (int, string, string) { return http.StatusBadRequest, "tool_error", err.Error() },
+			MapRunnerErrorFunc: func(err error) (int, string, string) { return http.StatusBadGateway, "runner_error", err.Error() },
+		},
+	})
+
+	emitted := make([]domain.AgentEvent, 0, 4)
+	_, processErr := svc.Process(context.Background(), ProcessParams{
+		Request: domain.AgentProcessRequest{
+			SessionID: "s-rui-flex",
+			UserID:    "u-rui-flex",
+			Channel:   "console",
+			BizParams: map[string]interface{}{
+				toolInputMetaCollaborationModeKey: "plan",
+			},
+		},
+		PromptMode:  "codex",
+		HasToolCall: true,
+		RequestedToolCall: ToolCall{
+			Name: "request_user_input",
+			Input: map[string]interface{}{
+				"request_id": "req-flex",
+				"questions": []interface{}{
+					map[string]interface{}{
+						"question": "先做最小闭环还是全量交付？",
+						"options": []interface{}{
+							map[string]interface{}{"label": "最小闭环"},
+							map[string]interface{}{"label": "全量交付", "description": "周期更长"},
+							map[string]interface{}{"label": "最小闭环"},
+						},
+					},
+					map[string]interface{}{
+						"id":       "scope",
+						"question": "本轮是否包含 Web？",
+					},
+				},
+			},
+		},
+	}, func(evt domain.AgentEvent) {
+		emitted = append(emitted, evt)
+	})
+	if processErr != nil {
+		t.Fatalf("unexpected process error: %+v", processErr)
+	}
+
+	if capturedInput == nil {
+		t.Fatal("expected execute tool input to be captured")
+	}
+	normalizedQuestions, ok := capturedInput["questions"].([]interface{})
+	if !ok || len(normalizedQuestions) != 2 {
+		t.Fatalf("captured questions=%#v", capturedInput["questions"])
+	}
+	firstQuestion, _ := normalizedQuestions[0].(map[string]interface{})
+	if firstQuestion["id"] != "q1" || firstQuestion["header"] != "问题 1" {
+		t.Fatalf("first normalized question=%#v", firstQuestion)
+	}
+	if firstQuestion["question"] != "先做最小闭环还是全量交付？" {
+		t.Fatalf("unexpected first question text=%#v", firstQuestion["question"])
+	}
+	firstOptions, ok := firstQuestion["options"].([]interface{})
+	if !ok || len(firstOptions) != 2 {
+		t.Fatalf("normalized options=%#v", firstQuestion["options"])
+	}
+
+	var toolCallInput map[string]interface{}
+	for _, evt := range emitted {
+		if evt.Type == "tool_call" && evt.ToolCall != nil && evt.ToolCall.Name == "request_user_input" {
+			toolCallInput = evt.ToolCall.Input
+			break
+		}
+	}
+	if len(toolCallInput) == 0 {
+		t.Fatalf("tool_call event input missing, events=%#v", emitted)
+	}
+	eventQuestions, ok := toolCallInput["questions"].([]interface{})
+	if !ok || len(eventQuestions) != 2 {
+		t.Fatalf("tool_call event questions=%#v", toolCallInput["questions"])
+	}
+	eventFirst, _ := eventQuestions[0].(map[string]interface{})
+	if eventFirst["id"] != "q1" || eventFirst["header"] != "问题 1" {
+		t.Fatalf("tool_call event first question=%#v", eventFirst)
+	}
+}
+
+func TestProcessSpawnAgentAliasNoLongerNormalizesOrInjectsScope(t *testing.T) {
 	t.Parallel()
 
 	svc := NewService(Dependencies{
@@ -590,32 +699,11 @@ func TestProcessSpawnAgentToolCallAutoInjectsRequestScope(t *testing.T) {
 		ToolRuntime: adapters.AgentToolRuntime{
 			ListToolDefinitionsFunc: func(string) []runner.ToolDefinition { return nil },
 			ExecuteToolCallFunc: func(_ context.Context, _ string, name string, input map[string]interface{}) (string, error) {
-				if name != "spawn_agent" {
+				if name != "functions.spawn_agent" {
 					t.Fatalf("unexpected tool name: %s", name)
 				}
-				if got, _ := input[toolInputMetaSessionIDKey].(string); got != "s-parent" {
-					t.Fatalf("session_id=%q, want=s-parent", got)
-				}
-				if got, _ := input[toolInputMetaUserIDKey].(string); got != "u-parent" {
-					t.Fatalf("user_id=%q, want=u-parent", got)
-				}
-				if got, _ := input[toolInputMetaChannelKey].(string); got != "console" {
-					t.Fatalf("channel=%q, want=console", got)
-				}
-				if got, _ := input[toolInputMetaPromptModeKey].(string); got != "codex" {
-					t.Fatalf("prompt_mode=%q, want=codex", got)
-				}
-				switch got := input[toolInputMetaAgentDepthKey].(type) {
-				case int:
-					if got != 0 {
-						t.Fatalf("agent_depth=%v, want=0", got)
-					}
-				case float64:
-					if got != 0 {
-						t.Fatalf("agent_depth=%v, want=0", got)
-					}
-				default:
-					t.Fatalf("agent_depth type invalid: %#v", input[toolInputMetaAgentDepthKey])
+				if _, exists := input[toolInputMetaSessionIDKey]; exists {
+					t.Fatalf("unexpected injected session scope: %#v", input)
 				}
 				return "ok", nil
 			},

@@ -125,16 +125,10 @@ func TestListToolDefinitionNamesCodexAddsNativeTools(t *testing.T) {
 		has[name] = true
 	}
 	for _, required := range []string{
-		"spawn_agent",
-		"send_input",
-		"resume_agent",
-		"wait",
-		"close_agent",
 		"exec_command",
 		"write_stdin",
-		"request_user_input",
-		"update_plan",
 		"apply_patch",
+		"self_ops",
 	} {
 		if !has[required] {
 			t.Fatalf("missing codex native tool %q from %v", required, names)
@@ -142,7 +136,7 @@ func TestListToolDefinitionNamesCodexAddsNativeTools(t *testing.T) {
 	}
 }
 
-func TestParseShortcutToolCallSupportsSpawnAgentAliasViaNormalization(t *testing.T) {
+func TestParseShortcutToolCallDoesNotNormalizeSpawnAgentAlias(t *testing.T) {
 	t.Parallel()
 
 	rawRequest := map[string]interface{}{
@@ -154,11 +148,8 @@ func TestParseShortcutToolCallSupportsSpawnAgentAliasViaNormalization(t *testing
 	if err != nil {
 		t.Fatalf("parse shortcut failed: %v", err)
 	}
-	if !ok {
-		t.Fatal("expected normalized spawn_agent alias shortcut match")
-	}
-	if call.Name != "spawn_agent" {
-		t.Fatalf("unexpected tool name: %q", call.Name)
+	if ok {
+		t.Fatalf("expected no shortcut match for removed alias, got=%+v", call)
 	}
 }
 
@@ -232,7 +223,7 @@ func TestParseShortcutToolCallSupportsWriteStdinAliasViaNormalization(t *testing
 	}
 }
 
-func TestParseShortcutToolCallSupportsUpdatePlanAliasViaNormalization(t *testing.T) {
+func TestParseShortcutToolCallDoesNotNormalizeUpdatePlanAlias(t *testing.T) {
 	t.Parallel()
 
 	rawRequest := map[string]interface{}{
@@ -246,10 +237,7 @@ func TestParseShortcutToolCallSupportsUpdatePlanAliasViaNormalization(t *testing
 	if err != nil {
 		t.Fatalf("parse shortcut failed: %v", err)
 	}
-	if !ok {
-		t.Fatal("expected normalized update_plan alias shortcut match")
-	}
-	if call.Name != "update_plan" {
-		t.Fatalf("unexpected tool name: %q", call.Name)
+	if ok {
+		t.Fatalf("expected no shortcut match for removed alias, got=%+v", call)
 	}
 }

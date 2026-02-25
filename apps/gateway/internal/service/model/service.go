@@ -92,7 +92,7 @@ func (s *Service) ConfigureProvider(input ConfigureProviderInput) (domain.Provid
 		return domain.ProviderInfo{}, err
 	}
 
-	providerID := normalizeProviderID(input.ProviderID)
+	providerID := provider.NormalizeProviderID(input.ProviderID)
 	if providerID == "" {
 		return domain.ProviderInfo{}, &ValidationError{
 			Code:    "invalid_provider_id",
@@ -113,7 +113,7 @@ func (s *Service) ConfigureProvider(input ConfigureProviderInput) (domain.Provid
 		}
 	}
 
-	sanitizedAliases, aliasErr := sanitizeModelAliases(input.ModelAliases)
+	sanitizedAliases, aliasErr := provider.SanitizeModelAliases(input.ModelAliases)
 	if aliasErr != nil {
 		return domain.ProviderInfo{}, &ValidationError{
 			Code:    "invalid_provider_config",
@@ -123,8 +123,8 @@ func (s *Service) ConfigureProvider(input ConfigureProviderInput) (domain.Provid
 
 	var out domain.ProviderInfo
 	if err := s.deps.Store.WriteSettings(func(st *ports.SettingsAggregate) error {
-		setting := getProviderSettingByID(st.Providers, providerID)
-		normalizeProviderSetting(&setting)
+		setting := provider.GetProviderSettingByID(st.Providers, providerID)
+		provider.NormalizeProviderSetting(&setting)
 		if input.APIKey != nil {
 			setting.APIKey = strings.TrimSpace(*input.APIKey)
 		}
@@ -146,7 +146,7 @@ func (s *Service) ConfigureProvider(input ConfigureProviderInput) (domain.Provid
 			setting.Store = &store
 		}
 		if input.Headers != nil {
-			setting.Headers = sanitizeStringMap(*input.Headers)
+			setting.Headers = provider.SanitizeStringMap(*input.Headers)
 		}
 		if input.TimeoutMS != nil {
 			setting.TimeoutMS = *input.TimeoutMS
@@ -168,7 +168,7 @@ func (s *Service) DeleteProvider(providerID string) (bool, error) {
 		return false, err
 	}
 
-	providerID = normalizeProviderID(providerID)
+	providerID = provider.NormalizeProviderID(providerID)
 	if providerID == "" {
 		return false, &ValidationError{
 			Code:    "invalid_provider_id",
@@ -179,12 +179,12 @@ func (s *Service) DeleteProvider(providerID string) (bool, error) {
 	deleted := false
 	if err := s.deps.Store.WriteSettings(func(st *ports.SettingsAggregate) error {
 		for key := range st.Providers {
-			if normalizeProviderID(key) == providerID {
+			if provider.NormalizeProviderID(key) == providerID {
 				delete(st.Providers, key)
 				deleted = true
 			}
 		}
-		if deleted && normalizeProviderID(st.ActiveLLM.ProviderID) == providerID {
+		if deleted && provider.NormalizeProviderID(st.ActiveLLM.ProviderID) == providerID {
 			st.ActiveLLM = domain.ModelSlotConfig{}
 		}
 		return nil
@@ -211,7 +211,7 @@ func (s *Service) SetActiveModels(body domain.ModelSlotConfig) (domain.ActiveMod
 		return domain.ActiveModelsInfo{}, err
 	}
 
-	body.ProviderID = normalizeProviderID(body.ProviderID)
+	body.ProviderID = provider.NormalizeProviderID(body.ProviderID)
 	body.Model = strings.TrimSpace(body.Model)
 	if body.ProviderID == "" || body.Model == "" {
 		return domain.ActiveModelsInfo{}, &ValidationError{
@@ -222,12 +222,12 @@ func (s *Service) SetActiveModels(body domain.ModelSlotConfig) (domain.ActiveMod
 
 	var out domain.ModelSlotConfig
 	if err := s.deps.Store.WriteSettings(func(st *ports.SettingsAggregate) error {
-		setting, ok := findProviderSettingByID(st.Providers, body.ProviderID)
+		setting, ok := provider.FindProviderSettingByID(st.Providers, body.ProviderID)
 		if !ok {
 			return ErrProviderNotFound
 		}
-		normalizeProviderSetting(&setting)
-		if !providerEnabled(setting) {
+		provider.NormalizeProviderSetting(&setting)
+		if !provider.ProviderEnabled(setting) {
 			return ErrProviderDisabled
 		}
 		resolvedModel, ok := provider.ResolveModelID(body.ProviderID, body.Model, setting.ModelAliases)
@@ -260,11 +260,11 @@ func (s *Service) collectProviderCatalog() ([]domain.ProviderInfo, map[string]st
 		settingsByID := map[string]repo.ProviderSetting{}
 
 		for rawID, setting := range st.Providers {
-			id := normalizeProviderID(rawID)
+			id := provider.NormalizeProviderID(rawID)
 			if id == "" {
 				continue
 			}
-			normalizeProviderSetting(&setting)
+			provider.NormalizeProviderSetting(&setting)
 			settingsByID[id] = setting
 		}
 
@@ -283,44 +283,27 @@ func (s *Service) collectProviderCatalog() ([]domain.ProviderInfo, map[string]st
 }
 
 func (s *Service) buildProviderInfo(providerID string, setting repo.ProviderSetting) domain.ProviderInfo {
-	normalizeProviderSetting(&setting)
+	provider.NormalizeProviderSetting(&setting)
 	spec := provider.ResolveProvider(providerID)
-	apiKey := s.resolveProviderAPIKey(providerID, setting)
+	apiKey := provider.ResolveProviderAPIKey(providerID, setting, s.deps.EnvLookup)
 	return domain.ProviderInfo{
 		ID:                 providerID,
 		Name:               spec.Name,
-		DisplayName:        resolveProviderDisplayName(setting, spec.Name),
+		DisplayName:        provider.ResolveProviderDisplayName(setting, spec.Name),
 		OpenAICompatible:   provider.ResolveAdapter(providerID) == provider.AdapterOpenAICompatible,
 		APIKeyPrefix:       spec.APIKeyPrefix,
 		Models:             provider.ResolveModels(providerID, setting.ModelAliases),
 		ReasoningEffort:    setting.ReasoningEffort,
-		Store:              providerStoreEnabled(setting),
-		Headers:            sanitizeStringMap(setting.Headers),
+		Store:              provider.ProviderStoreEnabled(setting),
+		Headers:            provider.SanitizeStringMap(setting.Headers),
 		TimeoutMS:          setting.TimeoutMS,
-		ModelAliases:       sanitizeStringMap(setting.ModelAliases),
+		ModelAliases:       provider.SanitizeStringMap(setting.ModelAliases),
 		AllowCustomBaseURL: spec.AllowCustomBaseURL,
-		Enabled:            providerEnabled(setting),
+		Enabled:            provider.ProviderEnabled(setting),
 		HasAPIKey:          strings.TrimSpace(apiKey) != "",
-		CurrentAPIKey:      maskKey(apiKey),
-		CurrentBaseURL:     s.resolveProviderBaseURL(providerID, setting),
+		CurrentAPIKey:      provider.MaskKey(apiKey),
+		CurrentBaseURL:     provider.ResolveProviderBaseURL(providerID, setting, s.deps.EnvLookup),
 	}
-}
-
-func (s *Service) resolveProviderAPIKey(providerID string, setting repo.ProviderSetting) string {
-	if key := strings.TrimSpace(setting.APIKey); key != "" {
-		return key
-	}
-	return strings.TrimSpace(s.deps.EnvLookup(providerEnvPrefix(providerID) + "_API_KEY"))
-}
-
-func (s *Service) resolveProviderBaseURL(providerID string, setting repo.ProviderSetting) string {
-	if baseURL := strings.TrimSpace(setting.BaseURL); baseURL != "" {
-		return baseURL
-	}
-	if envBaseURL := strings.TrimSpace(s.deps.EnvLookup(providerEnvPrefix(providerID) + "_BASE_URL")); envBaseURL != "" {
-		return envBaseURL
-	}
-	return provider.ResolveProvider(providerID).DefaultBaseURL
 }
 
 func (s *Service) validateStore() error {
@@ -328,84 +311,6 @@ func (s *Service) validateStore() error {
 		return errors.New("model state store is required")
 	}
 	return nil
-}
-
-func resolveProviderDisplayName(setting repo.ProviderSetting, defaultName string) string {
-	if displayName := strings.TrimSpace(setting.DisplayName); displayName != "" {
-		return displayName
-	}
-	return strings.TrimSpace(defaultName)
-}
-
-func providerEnvPrefix(providerID string) string {
-	return provider.EnvPrefix(providerID)
-}
-
-func normalizeProviderID(providerID string) string {
-	return strings.ToLower(strings.TrimSpace(providerID))
-}
-
-func providerEnabled(setting repo.ProviderSetting) bool {
-	if setting.Enabled == nil {
-		return true
-	}
-	return *setting.Enabled
-}
-
-func providerStoreEnabled(setting repo.ProviderSetting) bool {
-	if setting.Store == nil {
-		return false
-	}
-	return *setting.Store
-}
-
-func normalizeProviderSetting(setting *repo.ProviderSetting) {
-	if setting == nil {
-		return
-	}
-	setting.DisplayName = strings.TrimSpace(setting.DisplayName)
-	setting.APIKey = strings.TrimSpace(setting.APIKey)
-	setting.BaseURL = strings.TrimSpace(setting.BaseURL)
-	setting.ReasoningEffort = normalizeReasoningEffort(strings.TrimSpace(setting.ReasoningEffort))
-	if setting.Enabled == nil {
-		enabled := true
-		setting.Enabled = &enabled
-	}
-	if setting.Headers == nil {
-		setting.Headers = map[string]string{}
-	}
-	if setting.ModelAliases == nil {
-		setting.ModelAliases = map[string]string{}
-	}
-}
-
-func sanitizeStringMap(in map[string]string) map[string]string {
-	out := map[string]string{}
-	for key, value := range in {
-		k := strings.TrimSpace(key)
-		v := strings.TrimSpace(value)
-		if k == "" || v == "" {
-			continue
-		}
-		out[k] = v
-	}
-	return out
-}
-
-func sanitizeModelAliases(raw *map[string]string) (map[string]string, error) {
-	if raw == nil {
-		return nil, nil
-	}
-	out := map[string]string{}
-	for key, value := range *raw {
-		alias := strings.TrimSpace(key)
-		modelID := strings.TrimSpace(value)
-		if alias == "" || modelID == "" {
-			return nil, errors.New("model_aliases requires non-empty key and value")
-		}
-		out[alias] = modelID
-	}
-	return out, nil
 }
 
 var allowedReasoningEfforts = map[string]struct{}{
@@ -439,40 +344,6 @@ func providerSupportsReasoningEffort(providerID string) bool {
 
 func normalizeReasoningEffort(raw string) string {
 	return strings.ToLower(strings.TrimSpace(raw))
-}
-
-func getProviderSettingByID(providers map[string]repo.ProviderSetting, providerID string) repo.ProviderSetting {
-	if setting, ok := findProviderSettingByID(providers, providerID); ok {
-		return setting
-	}
-	setting := repo.ProviderSetting{}
-	normalizeProviderSetting(&setting)
-	return setting
-}
-
-func findProviderSettingByID(providers map[string]repo.ProviderSetting, providerID string) (repo.ProviderSetting, bool) {
-	if providers == nil {
-		return repo.ProviderSetting{}, false
-	}
-	if setting, ok := providers[providerID]; ok {
-		return setting, true
-	}
-	for key, setting := range providers {
-		if normalizeProviderID(key) == providerID {
-			return setting, true
-		}
-	}
-	return repo.ProviderSetting{}, false
-}
-
-func maskKey(s string) string {
-	if s == "" {
-		return ""
-	}
-	if len(s) <= 6 {
-		return "***"
-	}
-	return s[:3] + "***" + s[len(s)-3:]
 }
 
 func (e *ValidationError) String() string {

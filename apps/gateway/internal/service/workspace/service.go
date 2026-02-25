@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"nextai/apps/gateway/internal/domain"
+	"nextai/apps/gateway/internal/provider"
 	"nextai/apps/gateway/internal/repo"
 	"nextai/apps/gateway/internal/service/ports"
 )
@@ -250,7 +251,7 @@ func (s *Service) PutFile(filePath string, body []byte) error {
 		return s.deps.Store.WriteSettings(func(st *ports.SettingsAggregate) error {
 			st.Providers = providers
 			if st.ActiveLLM.ProviderID != "" {
-				if _, ok := findProviderSettingByID(st.Providers, st.ActiveLLM.ProviderID); !ok {
+				if _, ok := provider.FindProviderSettingByID(st.Providers, st.ActiveLLM.ProviderID); !ok {
 					st.ActiveLLM = domain.ModelSlotConfig{}
 				}
 			}
@@ -264,7 +265,7 @@ func (s *Service) PutFile(filePath string, body []byte) error {
 				Message: "invalid request body",
 			}
 		}
-		req.ProviderID = normalizeProviderID(req.ProviderID)
+		req.ProviderID = provider.NormalizeProviderID(req.ProviderID)
 		req.Model = strings.TrimSpace(req.Model)
 		if (req.ProviderID == "") != (req.Model == "") {
 			return &ValidationError{
@@ -277,7 +278,7 @@ func (s *Service) PutFile(filePath string, body []byte) error {
 				st.ActiveLLM = domain.ModelSlotConfig{}
 				return nil
 			}
-			if _, ok := findProviderSettingByID(st.Providers, req.ProviderID); !ok {
+			if _, ok := provider.FindProviderSettingByID(st.Providers, req.ProviderID); !ok {
 				return &ValidationError{
 					Code:    "provider_not_found",
 					Message: "provider not found",
@@ -588,7 +589,7 @@ func normalizeWorkspaceEnvs(in map[string]string) (map[string]string, error) {
 func normalizeWorkspaceProviders(in map[string]repo.ProviderSetting) (map[string]repo.ProviderSetting, error) {
 	out := map[string]repo.ProviderSetting{}
 	for rawID, rawSetting := range in {
-		id := normalizeProviderID(rawID)
+		id := provider.NormalizeProviderID(rawID)
 		if id == "" {
 			return nil, errors.New("provider id cannot be empty")
 		}
@@ -596,12 +597,12 @@ func normalizeWorkspaceProviders(in map[string]repo.ProviderSetting) (map[string
 			continue
 		}
 		setting := rawSetting
-		normalizeProviderSetting(&setting)
+		provider.NormalizeProviderSetting(&setting)
 		if setting.TimeoutMS < 0 {
 			return nil, fmt.Errorf("provider %q timeout_ms must be >= 0", rawID)
 		}
-		setting.Headers = sanitizeStringMap(setting.Headers)
-		setting.ModelAliases = sanitizeStringMap(setting.ModelAliases)
+		setting.Headers = provider.SanitizeStringMap(setting.Headers)
+		setting.ModelAliases = provider.SanitizeStringMap(setting.ModelAliases)
 		out[id] = setting
 	}
 	return out, nil
@@ -636,7 +637,7 @@ func normalizeWorkspaceSkills(in map[string]domain.SkillSpec, dataDir string) (m
 }
 
 func normalizeWorkspaceActiveLLM(in domain.ModelSlotConfig, providers map[string]repo.ProviderSetting) (domain.ModelSlotConfig, error) {
-	providerID := normalizeProviderID(in.ProviderID)
+	providerID := provider.NormalizeProviderID(in.ProviderID)
 	modelID := strings.TrimSpace(in.Model)
 	if providerID == "" && modelID == "" {
 		return domain.ModelSlotConfig{}, nil
@@ -670,7 +671,7 @@ func cloneWorkspaceProviders(in map[string]repo.ProviderSetting) map[string]repo
 	out := map[string]repo.ProviderSetting{}
 	for id, raw := range in {
 		setting := raw
-		normalizeProviderSetting(&setting)
+		provider.NormalizeProviderSetting(&setting)
 		headers := map[string]string{}
 		for key, value := range setting.Headers {
 			headers[key] = value
@@ -734,58 +735,6 @@ func jsonSize(v interface{}) int {
 		return 0
 	}
 	return len(buf)
-}
-
-func normalizeProviderID(providerID string) string {
-	return strings.ToLower(strings.TrimSpace(providerID))
-}
-
-func normalizeProviderSetting(setting *repo.ProviderSetting) {
-	if setting == nil {
-		return
-	}
-	setting.DisplayName = strings.TrimSpace(setting.DisplayName)
-	setting.APIKey = strings.TrimSpace(setting.APIKey)
-	setting.BaseURL = strings.TrimSpace(setting.BaseURL)
-	setting.ReasoningEffort = strings.ToLower(strings.TrimSpace(setting.ReasoningEffort))
-	if setting.Enabled == nil {
-		enabled := true
-		setting.Enabled = &enabled
-	}
-	if setting.Headers == nil {
-		setting.Headers = map[string]string{}
-	}
-	if setting.ModelAliases == nil {
-		setting.ModelAliases = map[string]string{}
-	}
-}
-
-func sanitizeStringMap(in map[string]string) map[string]string {
-	out := map[string]string{}
-	for key, value := range in {
-		k := strings.TrimSpace(key)
-		v := strings.TrimSpace(value)
-		if k == "" || v == "" {
-			continue
-		}
-		out[k] = v
-	}
-	return out
-}
-
-func findProviderSettingByID(providers map[string]repo.ProviderSetting, providerID string) (repo.ProviderSetting, bool) {
-	if providers == nil {
-		return repo.ProviderSetting{}, false
-	}
-	if setting, ok := providers[providerID]; ok {
-		return setting, true
-	}
-	for key, setting := range providers {
-		if normalizeProviderID(key) == providerID {
-			return setting, true
-		}
-	}
-	return repo.ProviderSetting{}, false
 }
 
 func safeMap(v map[string]interface{}) map[string]interface{} {

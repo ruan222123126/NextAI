@@ -19,7 +19,7 @@ func (s RepoStateStore) ReadSettings(fn func(state ports.SettingsAggregate)) {
 	if s.Store == nil || fn == nil {
 		return
 	}
-	s.Store.Read(func(state *repo.State) {
+	s.Store.ReadSettings(func(state *repo.State) {
 		fn(ports.SettingsAggregate{
 			Envs:      state.Envs,
 			Skills:    state.Skills,
@@ -34,7 +34,7 @@ func (s RepoStateStore) WriteSettings(fn func(state *ports.SettingsAggregate) er
 	if s.Store == nil {
 		return errors.New("state store is unavailable")
 	}
-	return s.Store.Write(func(state *repo.State) error {
+	return s.Store.WriteSettings(func(state *repo.State) error {
 		if fn == nil {
 			return nil
 		}
@@ -61,7 +61,7 @@ func (s RepoStateStore) ReadConversations(fn func(state ports.ConversationsAggre
 	if s.Store == nil || fn == nil {
 		return
 	}
-	s.Store.Read(func(state *repo.State) {
+	s.Store.ReadConversations(func(state *repo.State) {
 		fn(ports.ConversationsAggregate{
 			Chats:     state.Chats,
 			Histories: state.Histories,
@@ -73,7 +73,7 @@ func (s RepoStateStore) WriteConversations(fn func(state *ports.ConversationsAgg
 	if s.Store == nil {
 		return errors.New("state store is unavailable")
 	}
-	return s.Store.Write(func(state *repo.State) error {
+	return s.Store.WriteConversations(func(state *repo.State) error {
 		if fn == nil {
 			return nil
 		}
@@ -94,7 +94,7 @@ func (s RepoStateStore) ReadSession(fn func(state ports.SessionAggregate)) {
 	if s.Store == nil || fn == nil {
 		return
 	}
-	s.Store.Read(func(state *repo.State) {
+	s.Store.ReadSession(func(state *repo.State) {
 		fn(ports.SessionAggregate{
 			Chats:     state.Chats,
 			Providers: state.Providers,
@@ -107,7 +107,7 @@ func (s RepoStateStore) WriteSession(fn func(state *ports.SessionAggregate) erro
 	if s.Store == nil {
 		return errors.New("state store is unavailable")
 	}
-	return s.Store.Write(func(state *repo.State) error {
+	return s.Store.WriteSession(func(state *repo.State) error {
 		if fn == nil {
 			return nil
 		}
@@ -130,7 +130,7 @@ func (s RepoStateStore) ReadCron(fn func(state ports.CronAggregate)) {
 	if s.Store == nil || fn == nil {
 		return
 	}
-	s.Store.Read(func(state *repo.State) {
+	s.Store.ReadCron(func(state *repo.State) {
 		fn(ports.CronAggregate{
 			Jobs:   state.CronJobs,
 			States: state.CronStates,
@@ -142,7 +142,7 @@ func (s RepoStateStore) WriteCron(fn func(state *ports.CronAggregate) error) err
 	if s.Store == nil {
 		return errors.New("state store is unavailable")
 	}
-	return s.Store.Write(func(state *repo.State) error {
+	return s.Store.WriteCron(func(state *repo.State) error {
 		if fn == nil {
 			return nil
 		}

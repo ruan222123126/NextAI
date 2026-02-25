@@ -24,7 +24,6 @@ type ProcessParams struct {
 	GenerateConfig    runner.GenerateConfig
 	ToolDefinitions   []runner.ToolDefinition
 	PromptMode        string
-	CollaborationMode string
 	HasToolCall       bool
 	RequestedToolCall ToolCall
 	Streaming         bool
@@ -126,7 +125,7 @@ func (s *Service) Process(
 			eventToolName = execName
 		}
 		toolInput := normalizeDirectToolCallInput(execName, safeMap(params.RequestedToolCall.Input))
-		toolInput = enrichNativeToolInput(execName, toolInput, params.Request, params.PromptMode, params.CollaborationMode, fmt.Sprintf("direct_tool_call_%d", step))
+		toolInput = enrichNativeToolInput(execName, toolInput, params.Request, params.PromptMode, fmt.Sprintf("direct_tool_call_%d", step))
 		eventToolInput := normalizeToolCallEventInput(execName, safeMap(params.RequestedToolCall.Input), toolInput)
 
 		appendEvent(domain.AgentEvent{Type: "step_started", Step: step})
@@ -150,7 +149,8 @@ func (s *Service) Process(
 			ToolResult: &domain.AgentToolResultPayload{
 				Name:    eventToolName,
 				OK:      true,
-				Summary: summarizeAgentEventText(reply),
+				Summary: summarizeAgentToolResult(execName, eventToolName, reply),
+				Output:  strings.TrimSpace(reply),
 			},
 		})
 		appendReplyDeltas(step, reply)
@@ -205,6 +205,7 @@ func (s *Service) Process(
 						Name:    recoveredCall.Name,
 						OK:      false,
 						Summary: summarizeAgentEventText(recoveredCall.Feedback),
+						Output:  strings.TrimSpace(recoveredCall.Feedback),
 					},
 				})
 				workflowInput = append(workflowInput,
@@ -285,7 +286,7 @@ func (s *Service) Process(
 				execName = strings.ToLower(rawCallName)
 			}
 			execInput := normalizeProviderToolInput(execName, strings.TrimSpace(params.PromptMode), safeMap(call.Arguments))
-			execInput = enrichNativeToolInput(execName, execInput, params.Request, params.PromptMode, params.CollaborationMode, call.ID)
+			execInput = enrichNativeToolInput(execName, execInput, params.Request, params.PromptMode, call.ID)
 			eventToolName := rawCallName
 			if eventToolName == "" {
 				eventToolName = execName
@@ -308,7 +309,8 @@ func (s *Service) Process(
 					ToolResult: &domain.AgentToolResultPayload{
 						Name:    eventToolName,
 						OK:      false,
-						Summary: summarizeAgentEventText(toolReply),
+						Summary: summarizeAgentToolResult(execName, eventToolName, toolReply),
+						Output:  strings.TrimSpace(toolReply),
 					},
 				})
 				workflowInput = append(workflowInput, domain.AgentInputMessage{
@@ -328,7 +330,8 @@ func (s *Service) Process(
 				ToolResult: &domain.AgentToolResultPayload{
 					Name:    eventToolName,
 					OK:      true,
-					Summary: summarizeAgentEventText(toolReply),
+					Summary: summarizeAgentToolResult(execName, eventToolName, toolReply),
+					Output:  strings.TrimSpace(toolReply),
 				},
 			})
 			workflowInput = append(workflowInput, domain.AgentInputMessage{
@@ -467,6 +470,15 @@ func summarizeAgentEventText(text string) string {
 	return string(runes[:160]) + "..."
 }
 
+func summarizeAgentToolResult(execName string, eventName string, text string) string {
+	normalizedExecName := strings.ToLower(strings.TrimSpace(execName))
+	normalizedEventName := strings.ToLower(strings.TrimSpace(eventName))
+	if normalizedExecName == "output_plan" || normalizedEventName == "output_plan" || normalizedEventName == "functions.output_plan" {
+		return strings.TrimSpace(text)
+	}
+	return summarizeAgentEventText(text)
+}
+
 func safeMap(v map[string]interface{}) map[string]interface{} {
 	if v == nil {
 		return map[string]interface{}{}
@@ -515,20 +527,6 @@ func normalizeProviderToolName(name string) string {
 		return "screenshot"
 	case "selfops", "self_ops":
 		return "self_ops"
-	case "spawnagent", "spawn_agent", "functions.spawn_agent":
-		return "spawn_agent"
-	case "sendinput", "send_input", "functions.send_input":
-		return "send_input"
-	case "resumeagent", "resume_agent", "functions.resume_agent":
-		return "resume_agent"
-	case "wait", "functions.wait":
-		return "wait"
-	case "closeagent", "close_agent", "functions.close_agent":
-		return "close_agent"
-	case "requestuserinput", "request_user_input", "functions.request_user_input":
-		return "request_user_input"
-	case "updateplan", "update_plan", "functions.update_plan":
-		return "update_plan"
 	case "applypatch", "apply_patch", "functions.apply_patch":
 		return "apply_patch"
 	default:
@@ -827,10 +825,12 @@ const (
 	toolInputMetaSessionIDKey         = "_nextai_session_id"
 	toolInputMetaUserIDKey            = "_nextai_user_id"
 	toolInputMetaChannelKey           = "_nextai_channel"
-	toolInputMetaCollaborationModeKey = "_nextai_collaboration_mode"
 	toolInputMetaPromptModeKey        = "_nextai_prompt_mode"
 	toolInputMetaAgentDepthKey        = "_nextai_agent_depth"
 	toolInputMetaRequestIDKey         = "_nextai_request_id"
+	toolInputMetaCollaborationModeKey = "_nextai_collaboration_mode"
+	toolInputMetaPlanModeEnabledKey   = "_nextai_plan_mode_enabled"
+	toolInputBizPlanModeEnabledKey    = "plan_mode_enabled"
 )
 
 func enrichNativeToolInput(
@@ -838,35 +838,77 @@ func enrichNativeToolInput(
 	input map[string]interface{},
 	req domain.AgentProcessRequest,
 	promptMode string,
-	collaborationMode string,
 	fallbackRequestID string,
 ) map[string]interface{} {
 	out := safeMap(input)
-	switch strings.ToLower(strings.TrimSpace(name)) {
+	normalizedName := strings.ToLower(strings.TrimSpace(name))
+	switch normalizedName {
 	case "self_ops":
 		return enrichSelfOpsToolInput(out, req)
-	case "spawn_agent", "send_input", "resume_agent", "wait", "close_agent", "update_plan", "request_user_input":
+	case "request_user_input":
 		out[toolInputMetaSessionIDKey] = strings.TrimSpace(req.SessionID)
 		out[toolInputMetaUserIDKey] = strings.TrimSpace(req.UserID)
 		out[toolInputMetaChannelKey] = strings.TrimSpace(req.Channel)
-		out[toolInputMetaCollaborationModeKey] = strings.TrimSpace(collaborationMode)
 		out[toolInputMetaPromptModeKey] = strings.TrimSpace(promptMode)
+		out[toolInputMetaPlanModeEnabledKey] = parseToolInputPlanModeEnabledFromBizParams(req.BizParams)
+		if strings.TrimSpace(stringifyToolInputValue(out[toolInputMetaCollaborationModeKey])) == "" {
+			if collabMode := strings.TrimSpace(stringifyToolInputValue(req.BizParams[toolInputMetaCollaborationModeKey])); collabMode != "" {
+				out[toolInputMetaCollaborationModeKey] = collabMode
+			}
+		}
 		if strings.TrimSpace(stringifyToolInputValue(out[toolInputMetaAgentDepthKey])) == "" {
 			out[toolInputMetaAgentDepthKey] = parseToolInputAgentDepthFromBizParams(req.BizParams)
 		}
-		if strings.EqualFold(name, "request_user_input") {
-			requestID := strings.TrimSpace(stringifyToolInputValue(out["request_id"]))
-			if requestID == "" {
-				requestID = strings.TrimSpace(fallbackRequestID)
+		requestID := strings.TrimSpace(stringifyToolInputValue(out["request_id"]))
+		if requestID == "" {
+			requestID = strings.TrimSpace(fallbackRequestID)
+		}
+		if requestID != "" {
+			out["request_id"] = requestID
+			out[toolInputMetaRequestIDKey] = requestID
+		}
+		out["questions"] = normalizeRequestUserInputQuestions(out["questions"])
+		return out
+	case "update_plan", "output_plan", "spawn_agent", "send_input", "resume_agent", "wait", "close_agent":
+		out[toolInputMetaSessionIDKey] = strings.TrimSpace(req.SessionID)
+		out[toolInputMetaUserIDKey] = strings.TrimSpace(req.UserID)
+		out[toolInputMetaChannelKey] = strings.TrimSpace(req.Channel)
+		out[toolInputMetaPromptModeKey] = strings.TrimSpace(promptMode)
+		out[toolInputMetaPlanModeEnabledKey] = parseToolInputPlanModeEnabledFromBizParams(req.BizParams)
+		if strings.TrimSpace(stringifyToolInputValue(out[toolInputMetaCollaborationModeKey])) == "" {
+			if collabMode := strings.TrimSpace(stringifyToolInputValue(req.BizParams[toolInputMetaCollaborationModeKey])); collabMode != "" {
+				out[toolInputMetaCollaborationModeKey] = collabMode
 			}
-			if requestID != "" {
-				out["request_id"] = requestID
-				out[toolInputMetaRequestIDKey] = requestID
-			}
+		}
+		if normalizedName == "spawn_agent" && strings.TrimSpace(stringifyToolInputValue(out[toolInputMetaAgentDepthKey])) == "" {
+			out[toolInputMetaAgentDepthKey] = parseToolInputAgentDepthFromBizParams(req.BizParams)
 		}
 		return out
 	default:
 		return out
+	}
+}
+
+func parseToolInputPlanModeEnabledFromBizParams(bizParams map[string]interface{}) bool {
+	if len(bizParams) == 0 {
+		return false
+	}
+	raw, exists := bizParams[toolInputBizPlanModeEnabledKey]
+	if !exists {
+		return false
+	}
+	switch value := raw.(type) {
+	case bool:
+		return value
+	case string:
+		switch strings.ToLower(strings.TrimSpace(value)) {
+		case "true", "1", "yes", "on":
+			return true
+		default:
+			return false
+		}
+	default:
+		return false
 	}
 }
 
@@ -928,9 +970,96 @@ func normalizeToolCallEventInput(name string, rawInput map[string]interface{}, e
 		if requestID != "" && strings.TrimSpace(stringifyToolInputValue(out["request_id"])) == "" {
 			out["request_id"] = requestID
 		}
+		if questions, exists := execInput["questions"]; exists {
+			out["questions"] = questions
+		}
 		return out
 	default:
 		return out
+	}
+}
+
+func normalizeRequestUserInputQuestions(raw interface{}) []interface{} {
+	items, ok := raw.([]interface{})
+	if !ok || len(items) == 0 {
+		return []interface{}{}
+	}
+	normalized := make([]interface{}, 0, len(items))
+	seenIDs := map[string]struct{}{}
+	for idx, item := range items {
+		row, ok := item.(map[string]interface{})
+		if !ok || len(row) == 0 {
+			continue
+		}
+		question := strings.TrimSpace(stringifyToolInputValue(row["question"]))
+		if question == "" {
+			continue
+		}
+		id := strings.TrimSpace(stringifyToolInputValue(row["id"]))
+		if id == "" {
+			id = fmt.Sprintf("q%d", idx+1)
+		}
+		id = dedupeRequestUserInputQuestionID(id, seenIDs)
+		seenIDs[id] = struct{}{}
+
+		header := strings.TrimSpace(stringifyToolInputValue(row["header"]))
+		if header == "" {
+			header = fmt.Sprintf("问题 %d", idx+1)
+		}
+
+		normalizedOptions := make([]interface{}, 0, 3)
+		if rawOptions, exists := row["options"]; exists {
+			if options, ok := rawOptions.([]interface{}); ok {
+				seenOptionLabels := map[string]struct{}{}
+				for _, rawOption := range options {
+					optionRow, ok := rawOption.(map[string]interface{})
+					if !ok || len(optionRow) == 0 {
+						continue
+					}
+					label := strings.TrimSpace(stringifyToolInputValue(optionRow["label"]))
+					if label == "" {
+						continue
+					}
+					normalizedLabel := strings.ToLower(label)
+					if _, exists := seenOptionLabels[normalizedLabel]; exists {
+						continue
+					}
+					seenOptionLabels[normalizedLabel] = struct{}{}
+					optionPayload := map[string]interface{}{"label": label}
+					if description := strings.TrimSpace(stringifyToolInputValue(optionRow["description"])); description != "" {
+						optionPayload["description"] = description
+					}
+					normalizedOptions = append(normalizedOptions, optionPayload)
+				}
+			}
+		}
+
+		questionPayload := map[string]interface{}{
+			"id":       id,
+			"header":   header,
+			"question": question,
+		}
+		if len(normalizedOptions) > 0 {
+			questionPayload["options"] = normalizedOptions
+		}
+		normalized = append(normalized, questionPayload)
+	}
+	return normalized
+}
+
+func dedupeRequestUserInputQuestionID(base string, seen map[string]struct{}) string {
+	id := strings.TrimSpace(base)
+	if id == "" {
+		id = "q"
+	}
+	if _, exists := seen[id]; !exists {
+		return id
+	}
+	for suffix := 2; ; suffix++ {
+		candidate := fmt.Sprintf("%s_%d", id, suffix)
+		if _, exists := seen[candidate]; !exists {
+			return candidate
+		}
 	}
 }
 

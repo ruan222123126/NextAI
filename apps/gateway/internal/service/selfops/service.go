@@ -256,7 +256,7 @@ func (s *Service) SetSessionModel(input SetSessionModelInput) (SetSessionModelOu
 	sessionID := strings.TrimSpace(input.SessionID)
 	userID := strings.TrimSpace(input.UserID)
 	channel := normalizeChannel(input.Channel)
-	providerID := normalizeProviderID(input.ProviderID)
+	providerID := provider.NormalizeProviderID(input.ProviderID)
 	modelID := strings.TrimSpace(input.Model)
 	if sessionID == "" || userID == "" || providerID == "" || modelID == "" {
 		return SetSessionModelOutput{}, &ServiceError{
@@ -404,10 +404,6 @@ func nowISO(now time.Time) string {
 	return now.UTC().Format(time.RFC3339)
 }
 
-func normalizeProviderID(raw string) string {
-	return strings.ToLower(strings.TrimSpace(raw))
-}
-
 func normalizeChannel(raw string) string {
 	normalized := strings.ToLower(strings.TrimSpace(raw))
 	if normalized == "" {
@@ -441,7 +437,7 @@ func parseChatActiveLLMOverride(meta map[string]interface{}) (domain.ChatActiveL
 	switch value := raw.(type) {
 	case domain.ChatActiveLLMOverride:
 		override := value
-		override.ProviderID = normalizeProviderID(override.ProviderID)
+		override.ProviderID = provider.NormalizeProviderID(override.ProviderID)
 		override.Model = strings.TrimSpace(override.Model)
 		override.UpdatedAt = strings.TrimSpace(override.UpdatedAt)
 		if override.ProviderID == "" || override.Model == "" {
@@ -450,7 +446,7 @@ func parseChatActiveLLMOverride(meta map[string]interface{}) (domain.ChatActiveL
 		return override, true
 	case map[string]interface{}:
 		override := domain.ChatActiveLLMOverride{
-			ProviderID: normalizeProviderID(stringValue(value["provider_id"])),
+			ProviderID: provider.NormalizeProviderID(stringValue(value["provider_id"])),
 			Model:      strings.TrimSpace(stringValue(value["model"])),
 			UpdatedAt:  strings.TrimSpace(stringValue(value["updated_at"])),
 		}
@@ -464,7 +460,7 @@ func parseChatActiveLLMOverride(meta map[string]interface{}) (domain.ChatActiveL
 }
 
 func resolveAndValidateModel(providers map[string]repo.ProviderSetting, providerID, modelID string) (domain.ModelSlotConfig, error) {
-	providerID = normalizeProviderID(providerID)
+	providerID = provider.NormalizeProviderID(providerID)
 	modelID = strings.TrimSpace(modelID)
 	if providerID == "" || modelID == "" {
 		return domain.ModelSlotConfig{}, &ServiceError{
@@ -472,7 +468,7 @@ func resolveAndValidateModel(providers map[string]repo.ProviderSetting, provider
 			Message: "provider_id and model are required",
 		}
 	}
-	setting, ok := findProviderSettingByID(providers, providerID)
+	setting, ok := provider.FindProviderSettingByID(providers, providerID)
 	if !ok {
 		return domain.ModelSlotConfig{}, &ServiceError{
 			Code:    "session_model_invalid",
@@ -480,8 +476,8 @@ func resolveAndValidateModel(providers map[string]repo.ProviderSetting, provider
 			Details: map[string]string{"provider_id": providerID},
 		}
 	}
-	normalizeProviderSetting(&setting)
-	if !providerEnabled(setting) {
+	provider.NormalizeProviderSetting(&setting)
+	if !provider.ProviderEnabled(setting) {
 		return domain.ModelSlotConfig{}, &ServiceError{
 			Code:    "session_model_invalid",
 			Message: "provider is disabled",
@@ -503,48 +499,6 @@ func resolveAndValidateModel(providers map[string]repo.ProviderSetting, provider
 		ProviderID: providerID,
 		Model:      resolvedModel,
 	}, nil
-}
-
-func findProviderSettingByID(providers map[string]repo.ProviderSetting, providerID string) (repo.ProviderSetting, bool) {
-	if providers == nil {
-		return repo.ProviderSetting{}, false
-	}
-	if setting, ok := providers[providerID]; ok {
-		return setting, true
-	}
-	for key, setting := range providers {
-		if normalizeProviderID(key) == providerID {
-			return setting, true
-		}
-	}
-	return repo.ProviderSetting{}, false
-}
-
-func normalizeProviderSetting(setting *repo.ProviderSetting) {
-	if setting == nil {
-		return
-	}
-	setting.DisplayName = strings.TrimSpace(setting.DisplayName)
-	setting.APIKey = strings.TrimSpace(setting.APIKey)
-	setting.BaseURL = strings.TrimSpace(setting.BaseURL)
-	setting.ReasoningEffort = strings.ToLower(strings.TrimSpace(setting.ReasoningEffort))
-	if setting.Enabled == nil {
-		enabled := true
-		setting.Enabled = &enabled
-	}
-	if setting.Headers == nil {
-		setting.Headers = map[string]string{}
-	}
-	if setting.ModelAliases == nil {
-		setting.ModelAliases = map[string]string{}
-	}
-}
-
-func providerEnabled(setting repo.ProviderSetting) bool {
-	if setting.Enabled == nil {
-		return true
-	}
-	return *setting.Enabled
 }
 
 func stringValue(raw interface{}) string {
