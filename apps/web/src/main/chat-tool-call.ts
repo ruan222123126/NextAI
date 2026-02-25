@@ -28,6 +28,7 @@ export function createChatToolCallHelpers(ctx: ChatToolCallContext) {
     "functions.close_agent": "close_agent",
     "functions.request_user_input": "request_user_input",
     "functions.update_plan": "update_plan",
+    "functions.output_plan": "output_plan",
     "functions.apply_patch": "apply_patch",
   };
   const maxSummaryLineRangeCount = 3;

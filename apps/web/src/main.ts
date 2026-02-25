@@ -15,7 +15,6 @@ import type {
   AgentStreamEvent,
   AgentToolCallPayload,
   AgentToolResultPayload,
-  CollaborationMode,
   ChannelsSettingsLevel,
   ChatHistoryResponse,
   ChatSpec,
@@ -41,6 +40,7 @@ import type {
   ModelModalities,
   ModelSlotConfig,
   ModelsSettingsLevel,
+  PlanModeState,
   PromptMode,
   ProviderInfo,
   ProviderKVKind,
@@ -103,7 +103,6 @@ interface RuntimeConfigResponse {
 interface SystemPromptTokenScenario {
   promptMode: PromptMode;
   taskCommand: string;
-  collaborationMode: string;
   sessionID: string;
   cacheKey: string;
 }
@@ -191,8 +190,37 @@ const newChatButton = mustElement<HTMLButtonElement>("new-chat");
 const chatList = mustElement<HTMLUListElement>("chat-list");
 const chatTitle = mustElement<HTMLElement>("chat-title");
 const chatSession = mustElement<HTMLElement>("chat-session");
-const chatPromptModeSelect = mustElement<HTMLSelectElement>("chat-prompt-mode-select");
-const chatCollaborationModeSelect = mustElement<HTMLSelectElement>("chat-collaboration-mode-select");
+const chatPromptModeSelect = resolveChatPromptModeSelect();
+const chatPlanModeSwitch = mustElement<HTMLInputElement>("chat-plan-mode-switch");
+const chatPlanStageBadge = mustElement<HTMLElement>("chat-plan-stage-badge");
+const planModePanel = mustElement<HTMLElement>("plan-mode-panel");
+const planModeHint = mustElement<HTMLElement>("plan-mode-hint");
+const planClarifyCounter = mustElement<HTMLElement>("plan-clarify-counter");
+const planQuestionsWrap = mustElement<HTMLElement>("plan-questions-wrap");
+const planClarifyForm = mustElement<HTMLElement>("plan-clarify-form");
+const planClarifySubmitButton = mustElement<HTMLButtonElement>("plan-clarify-submit-btn");
+const planSpecWrap = mustElement<HTMLElement>("plan-spec-wrap");
+const planGoalValue = mustElement<HTMLElement>("plan-goal-value");
+const planScopeInList = mustElement<HTMLUListElement>("plan-scope-in-list");
+const planScopeOutList = mustElement<HTMLUListElement>("plan-scope-out-list");
+const planConstraintsList = mustElement<HTMLUListElement>("plan-constraints-list");
+const planAssumptionsList = mustElement<HTMLUListElement>("plan-assumptions-list");
+const planTasksList = mustElement<HTMLUListElement>("plan-tasks-list");
+const planAcceptanceList = mustElement<HTMLUListElement>("plan-acceptance-list");
+const planRisksList = mustElement<HTMLUListElement>("plan-risks-list");
+const planSummaryValue = mustElement<HTMLElement>("plan-summary-value");
+const planReviseInput = mustElement<HTMLTextAreaElement>("plan-revise-input");
+const planReviseButton = mustElement<HTMLButtonElement>("plan-revise-btn");
+const planExecuteButton = mustElement<HTMLButtonElement>("plan-execute-btn");
+const planDisableButton = mustElement<HTMLButtonElement>("plan-disable-btn");
+const requestUserInputModal = mustElement<HTMLElement>("request-user-input-modal");
+const requestUserInputModalTitle = mustElement<HTMLElement>("request-user-input-modal-title");
+const requestUserInputModalProgress = mustElement<HTMLElement>("request-user-input-modal-progress");
+const requestUserInputModalQuestion = mustElement<HTMLElement>("request-user-input-modal-question");
+const requestUserInputModalOptions = mustElement<HTMLUListElement>("request-user-input-modal-options");
+const requestUserInputModalCustomInput = mustElement<HTMLTextAreaElement>("request-user-input-modal-custom-input");
+const requestUserInputCancelButton = mustElement<HTMLButtonElement>("request-user-input-cancel-btn");
+const requestUserInputSubmitButton = mustElement<HTMLButtonElement>("request-user-input-submit-btn");
 const searchChatInput = mustElement<HTMLInputElement>("search-chat-input");
 const searchChatResults = mustElement<HTMLUListElement>("search-chat-results");
 const messageList = mustElement<HTMLUListElement>("message-list");
@@ -333,7 +361,15 @@ const state = {
   activeChatId: null as string | null,
   activeSessionId: newSessionID(),
   activePromptMode: "default" as PromptMode,
-  activeCollaborationMode: "default" as CollaborationMode,
+  planModeEnabled: false,
+  planModeState: "off" as PlanModeState,
+  planSpec: null,
+  planClarifyAskedCount: 0,
+  planClarifyMaxCount: 5,
+  planClarifyUnresolved: [] as string[],
+  planClarifyQuestions: [],
+  planExecutionSessionId: "",
+  planSourcePromptVersion: "",
   messages: [] as ViewMessage[],
   messageOutputOrder: 0,
   sending: false,
@@ -588,8 +624,12 @@ const chatFeature = createChatFeature({
   }),
   reloadChatsButton,
   newChatButton,
-  chatPromptModeSelect,
-  chatCollaborationModeSelect,
+  chatPlanModeSwitch,
+  planClarifyForm,
+  planClarifySubmitButton,
+  planReviseButton,
+  planExecuteButton,
+  planDisableButton,
   composerForm,
   composerMain,
   messageInput,
@@ -633,7 +673,36 @@ const chatFeature = createChatFeature({
     chatTitle,
     chatSession,
     chatPromptModeSelect,
-    chatCollaborationModeSelect,
+    chatPlanModeSwitch,
+    chatPlanStageBadge,
+    planModePanel,
+    planModeHint,
+    planClarifyCounter,
+    planQuestionsWrap,
+    planClarifyForm,
+    planClarifySubmitButton,
+    planSpecWrap,
+    planGoalValue,
+    planScopeInList,
+    planScopeOutList,
+    planConstraintsList,
+    planAssumptionsList,
+    planTasksList,
+    planAcceptanceList,
+    planRisksList,
+    planSummaryValue,
+    planReviseInput,
+    planReviseButton,
+    planExecuteButton,
+    planDisableButton,
+    requestUserInputModal,
+    requestUserInputModalTitle,
+    requestUserInputModalProgress,
+    requestUserInputModalQuestion,
+    requestUserInputModalOptions,
+    requestUserInputModalCustomInput,
+    requestUserInputCancelButton,
+    requestUserInputSubmitButton,
     searchChatInput,
     searchChatResults,
     messageList,
@@ -657,9 +726,7 @@ const {
   handleComposerAttachmentFiles,
   extractDroppedFilePaths,
   normalizePromptMode,
-  normalizeCollaborationMode,
   setActivePromptMode,
-  setActiveCollaborationMode,
   renderChatHeader,
   renderChatList,
   renderSearchChatResults,
@@ -956,15 +1023,13 @@ function applyPromptContextIntrospectOverride(enabled: boolean, notify = false):
 
 function resolveSystemPromptTokenScenario(promptMode: PromptMode): SystemPromptTokenScenario {
   const taskCommand = "";
-  const collaborationMode = "";
   const sessionID = "";
   const tokenSourceKey = runtimeFlags.prompt_context_introspect ? "introspect" : "fallback";
   return {
     promptMode,
     taskCommand,
-    collaborationMode,
     sessionID,
-    cacheKey: `${promptMode}|${collaborationMode}|${taskCommand}|${sessionID}|${tokenSourceKey}`,
+    cacheKey: `${promptMode}|${taskCommand}|${sessionID}|${tokenSourceKey}`,
   };
 }
 
@@ -1067,9 +1132,6 @@ async function loadSystemPromptTokens(scenario: SystemPromptTokenScenario): Prom
       const query = new URLSearchParams({
         prompt_mode: scenario.promptMode,
       });
-      if (scenario.collaborationMode !== "") {
-        query.set("collaboration_mode", scenario.collaborationMode);
-      }
       if (scenario.taskCommand !== "") {
         query.set("task_command", scenario.taskCommand);
       }
@@ -2020,4 +2082,18 @@ function mustElement<T extends Element>(id: string): T {
     throw new Error(t("error.missingElement", { id }));
   }
   return element as unknown as T;
+}
+
+function resolveChatPromptModeSelect(): HTMLSelectElement {
+  const element = document.getElementById("chat-prompt-mode-select");
+  if (element instanceof HTMLSelectElement) {
+    return element;
+  }
+  const select = document.createElement("select");
+  const option = document.createElement("option");
+  option.value = "default";
+  option.textContent = "default";
+  select.append(option);
+  select.value = "default";
+  return select;
 }

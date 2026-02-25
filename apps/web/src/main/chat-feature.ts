@@ -17,8 +17,12 @@ interface ChatFeatureContext {
   renderComposerTokenEstimate: () => void;
   reloadChatsButton: HTMLButtonElement;
   newChatButton: HTMLButtonElement;
-  chatPromptModeSelect: HTMLSelectElement;
-  chatCollaborationModeSelect: HTMLSelectElement;
+  chatPlanModeSwitch: HTMLInputElement;
+  planClarifyForm: HTMLElement;
+  planClarifySubmitButton: HTMLButtonElement;
+  planReviseButton: HTMLButtonElement;
+  planExecuteButton: HTMLButtonElement;
+  planDisableButton: HTMLButtonElement;
   composerForm: HTMLFormElement;
   composerMain: HTMLElement;
   messageInput: HTMLTextAreaElement;
@@ -40,8 +44,12 @@ export function createChatFeature(ctx: ChatFeatureContext): FeatureModule<any> {
     renderComposerTokenEstimate,
     reloadChatsButton,
     newChatButton,
-    chatPromptModeSelect,
-    chatCollaborationModeSelect,
+    chatPlanModeSwitch,
+    planClarifyForm,
+    planClarifySubmitButton,
+    planReviseButton,
+    planExecuteButton,
+    planDisableButton,
     composerForm,
     composerMain,
     messageInput,
@@ -88,12 +96,28 @@ export function createChatFeature(ctx: ChatFeatureContext): FeatureModule<any> {
       setStatus(t("status.draftReady"), "info");
     });
 
-    on(chatPromptModeSelect, "change", () => {
-      domain.setActivePromptMode(domain.normalizePromptMode(chatPromptModeSelect.value), { announce: true });
+    on(chatPlanModeSwitch, "change", () => {
+      void domain.togglePlanMode(chatPlanModeSwitch.checked);
     });
 
-    on(chatCollaborationModeSelect, "change", () => {
-      domain.setActiveCollaborationMode(domain.normalizeCollaborationMode(chatCollaborationModeSelect.value), { announce: true });
+    on(planClarifySubmitButton, "click", (event: Event) => {
+      event.preventDefault();
+      void domain.submitPlanClarifyAnswers();
+    });
+
+    on(planReviseButton, "click", (event: Event) => {
+      event.preventDefault();
+      void domain.revisePlan();
+    });
+
+    on(planExecuteButton, "click", (event: Event) => {
+      event.preventDefault();
+      void domain.executePlan();
+    });
+
+    on(planDisableButton, "click", (event: Event) => {
+      event.preventDefault();
+      void domain.togglePlanMode(false);
     });
 
     on(sendButton, "click", (event: Event) => {

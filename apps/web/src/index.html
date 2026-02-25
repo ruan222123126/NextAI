@@ -494,21 +494,17 @@
                       <path d="M16 16L21 21"></path>
                     </svg>
                   </button>
-                  <label class="chat-prompt-mode-toggle" for="chat-prompt-mode-select">
-                    <span data-i18n="chat.promptMode">提示词模式</span>
-                    <select id="chat-prompt-mode-select" class="chat-prompt-mode-select" data-select-search="off">
-                      <option value="default" data-i18n="chat.promptModeDefault">默认</option>
+                  <label class="chat-prompt-mode-toggle" hidden>
+                    <span>协作模式</span>
+                    <select id="chat-collaboration-mode-select" class="chat-prompt-mode-select" disabled>
+                      <option value="default">Default</option>
                     </select>
                   </label>
-                  <label class="chat-prompt-mode-toggle" for="chat-collaboration-mode-select">
-                    <span data-i18n="chat.collaborationMode">协作模式</span>
-                    <select id="chat-collaboration-mode-select" class="chat-prompt-mode-select" data-select-search="off">
-                      <option value="default" data-i18n="chat.collaborationModeDefault">默认</option>
-                      <option value="plan" data-i18n="chat.collaborationModePlan">计划</option>
-                      <option value="execute" data-i18n="chat.collaborationModeExecute">执行</option>
-                      <option value="pair_programming" data-i18n="chat.collaborationModePairProgramming">结对编程</option>
-                    </select>
+                  <label class="chat-plan-mode-toggle" for="chat-plan-mode-switch">
+                    <span data-i18n="chat.planMode">Plan 模式</span>
+                    <input id="chat-plan-mode-switch" type="checkbox" />
                   </label>
+                  <span id="chat-plan-stage-badge" class="plan-stage-badge" hidden></span>
                   <span id="chat-session" class="session-badge"></span>
                 </div>
               </div>
@@ -521,6 +517,66 @@
 
               <form id="composer" class="composer">
                 <div class="composer-shell">
+                  <section id="plan-mode-panel" class="plan-mode-panel" hidden>
+                    <div class="plan-mode-head">
+                      <h3 data-i18n="chat.planPanelTitle">计划面板</h3>
+                      <span id="plan-clarify-counter" class="plan-clarify-counter">0/5</span>
+                    </div>
+                    <p id="plan-mode-hint" class="plan-mode-hint"></p>
+
+                    <div id="plan-questions-wrap" class="plan-questions-wrap" hidden>
+                      <div id="plan-clarify-form" class="plan-clarify-form"></div>
+                      <button id="plan-clarify-submit-btn" type="button" data-i18n="chat.planClarifySubmit">提交澄清答案</button>
+                    </div>
+
+                    <div id="plan-spec-wrap" class="plan-spec-wrap" hidden>
+                      <div class="plan-section">
+                        <h4 data-i18n="chat.planGoal">目标</h4>
+                        <p id="plan-goal-value"></p>
+                      </div>
+                      <div class="plan-section">
+                        <h4 data-i18n="chat.planScopeIn">范围（包含）</h4>
+                        <ul id="plan-scope-in-list"></ul>
+                      </div>
+                      <div class="plan-section">
+                        <h4 data-i18n="chat.planScopeOut">范围（不包含）</h4>
+                        <ul id="plan-scope-out-list"></ul>
+                      </div>
+                      <div class="plan-section">
+                        <h4 data-i18n="chat.planConstraints">约束</h4>
+                        <ul id="plan-constraints-list"></ul>
+                      </div>
+                      <div class="plan-section">
+                        <h4 data-i18n="chat.planAssumptions">假设</h4>
+                        <ul id="plan-assumptions-list"></ul>
+                      </div>
+                      <div class="plan-section">
+                        <h4 data-i18n="chat.planTasks">任务清单</h4>
+                        <ul id="plan-tasks-list"></ul>
+                      </div>
+                      <div class="plan-section">
+                        <h4 data-i18n="chat.planAcceptance">验收标准</h4>
+                        <ul id="plan-acceptance-list"></ul>
+                      </div>
+                      <div class="plan-section">
+                        <h4 data-i18n="chat.planRisks">风险</h4>
+                        <ul id="plan-risks-list"></ul>
+                      </div>
+                      <div class="plan-section">
+                        <h4 data-i18n="chat.planSummary">执行摘要</h4>
+                        <p id="plan-summary-value"></p>
+                      </div>
+                    </div>
+
+                    <div class="plan-actions">
+                      <textarea id="plan-revise-input" rows="2" data-i18n-placeholder="chat.planRevisePlaceholder" placeholder="补充你想调整的计划内容"></textarea>
+                      <div class="plan-actions-row">
+                        <button id="plan-revise-btn" type="button" data-i18n="chat.planRevise">补充修改计划</button>
+                        <button id="plan-execute-btn" type="button" data-i18n="chat.planExecute">执行计划</button>
+                        <button id="plan-disable-btn" type="button" class="secondary-btn" data-i18n="chat.planDisable">关闭 Plan 模式</button>
+                      </div>
+                    </div>
+                  </section>
                   <div id="composer-main" class="composer-main">
                     <textarea
                       id="message-input"
@@ -700,6 +756,30 @@
               <h3 data-i18n="search.results">Search Results</h3>
               <ul id="search-chat-results" class="search-result-list detail-list"></ul>
             </section>
+          </div>
+        </section>
+      </div>
+      <div id="request-user-input-modal" class="modal-shell is-hidden" aria-hidden="true">
+        <div class="modal-backdrop" data-request-user-input-close="true"></div>
+        <section class="request-user-input-modal-panel" role="dialog" aria-modal="true" aria-labelledby="request-user-input-modal-title">
+          <div class="request-user-input-modal-head">
+            <p id="request-user-input-modal-progress" class="request-user-input-modal-progress"></p>
+            <h2 id="request-user-input-modal-title"></h2>
+          </div>
+          <p id="request-user-input-modal-question" class="request-user-input-modal-question"></p>
+          <ul id="request-user-input-modal-options" class="request-user-input-modal-options"></ul>
+          <label class="request-user-input-modal-custom">
+            <span data-i18n="chat.userInputCustomLabel">其他补充（可选）</span>
+            <textarea
+              id="request-user-input-modal-custom-input"
+              rows="2"
+              data-i18n-placeholder="chat.userInputCustomPlaceholder"
+              placeholder="不在选项里就写这里"
+            ></textarea>
+          </label>
+          <div class="request-user-input-modal-actions">
+            <button id="request-user-input-cancel-btn" class="secondary-btn" type="button" data-i18n="common.cancel">取消</button>
+            <button id="request-user-input-submit-btn" type="button" data-i18n="chat.userInputSubmit">提交</button>
           </div>
         </section>
       </div>

@@ -938,16 +938,6 @@ body.workspace-import-open {
   word-break: break-word;
 }
 
-.chat-prompt-mode-toggle {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 12px;
-  color: var(--ink-subtle);
-  user-select: none;
-  white-space: nowrap;
-}
-
 .chat-head-quick-btn {
   height: 26px;
   padding: 0 10px;
@@ -966,15 +956,199 @@ body.workspace-import-open {
   background: rgba(255, 255, 255, 0.94);
 }
 
-.chat-prompt-mode-select {
-  min-width: 108px;
-  padding: 4px 8px;
-  border-radius: 8px;
-  border: 1px solid rgba(28, 26, 23, 0.18);
-  background: rgba(255, 255, 255, 0.85);
-  color: var(--ink-body);
+.chat-plan-mode-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   font-size: 12px;
-  line-height: 1.2;
+  color: var(--ink-subtle);
+  user-select: none;
+  white-space: nowrap;
+}
+
+.chat-plan-mode-toggle input[type="checkbox"] {
+  width: 14px;
+  height: 14px;
+  accent-color: rgba(197, 79, 38, 0.95);
+}
+
+.plan-stage-badge {
+  font-size: 11px;
+  color: rgba(115, 52, 22, 0.96);
+  background: rgba(236, 182, 119, 0.32);
+  border: 1px solid rgba(197, 79, 38, 0.28);
+  border-radius: 999px;
+  padding: 5px 10px;
+  white-space: nowrap;
+}
+
+.plan-mode-panel {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: calc(100% + 10px);
+  z-index: 24;
+  margin: 0;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 16px;
+  background: rgba(24, 26, 33, 0.96);
+  color: rgba(245, 247, 255, 0.94);
+  box-shadow: 0 14px 34px rgba(0, 0, 0, 0.35);
+  padding: 12px;
+  display: grid;
+  gap: 10px;
+  max-height: min(48vh, 420px);
+  overflow: auto;
+}
+
+.plan-mode-panel,
+.plan-mode-panel.is-ready-actions {
+  display: none;
+}
+
+.plan-mode-panel.is-ready-actions {
+  max-height: none;
+}
+
+.plan-mode-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.plan-mode-head h3 {
+  margin: 0;
+  font-size: 13px;
+  color: rgba(246, 248, 255, 0.95);
+}
+
+.plan-clarify-counter {
+  font-size: 11px;
+  color: rgba(238, 242, 255, 0.86);
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 999px;
+  padding: 3px 9px;
+}
+
+.plan-mode-hint {
+  margin: 0;
+  font-size: 12px;
+  color: rgba(230, 234, 247, 0.84);
+}
+
+.plan-questions-wrap {
+  display: grid;
+  gap: 8px;
+}
+
+.plan-clarify-form {
+  display: grid;
+  gap: 8px;
+}
+
+.plan-question-card {
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 10px;
+  padding: 9px;
+  display: grid;
+  gap: 7px;
+  margin: 0;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.plan-question-card legend {
+  font-size: 12px;
+  color: rgba(247, 249, 255, 0.92);
+  padding: 0 4px;
+}
+
+.plan-question-option {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  font-size: 12px;
+  color: rgba(235, 239, 252, 0.9);
+}
+
+.plan-question-option input[type="radio"] {
+  accent-color: #15b8ff;
+}
+
+.plan-question-card textarea {
+  min-height: 54px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 10px;
+  background: rgba(16, 18, 24, 0.92);
+  color: rgba(246, 249, 255, 0.95);
+  padding: 8px 10px;
+}
+
+.plan-spec-wrap {
+  display: grid;
+  gap: 8px;
+}
+
+.plan-section h4 {
+  margin: 0 0 4px;
+  font-size: 12px;
+  color: var(--ink-title);
+}
+
+.plan-section p {
+  margin: 0;
+  font-size: 12px;
+  color: var(--ink-body);
+}
+
+.plan-section ul {
+  margin: 0;
+  padding-left: 18px;
+  display: grid;
+  gap: 3px;
+}
+
+.plan-section li {
+  font-size: 12px;
+  color: var(--ink-body);
+}
+
+.plan-task-item p,
+.plan-risk-mitigation {
+  margin: 3px 0 0;
+  font-size: 11px;
+  color: var(--ink-subtle);
+}
+
+.plan-empty-item {
+  list-style: none;
+  margin-left: -18px;
+  color: var(--ink-subtle);
+}
+
+.plan-actions {
+  display: grid;
+  gap: 8px;
+}
+
+.plan-actions textarea {
+  min-height: 52px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 10px;
+  background: rgba(16, 18, 24, 0.92);
+  color: rgba(246, 249, 255, 0.95);
+  padding: 9px 10px;
+}
+
+.plan-actions-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.plan-actions-row button {
+  min-height: 30px;
 }
 
 @media (max-width: 900px) {
@@ -983,7 +1157,7 @@ body.workspace-import-open {
     row-gap: 6px;
   }
 
-  .chat-prompt-mode-toggle {
+  .chat-plan-mode-toggle {
     order: 2;
   }
 
@@ -994,6 +1168,12 @@ body.workspace-import-open {
   .session-badge {
     flex: 1 1 100%;
     text-align: right;
+  }
+
+  .plan-mode-panel {
+    bottom: calc(100% + 8px);
+    max-height: min(56vh, 460px);
+    padding: 10px;
   }
 }
 
@@ -1564,6 +1744,8 @@ body.workspace-import-open {
   background: transparent;
   box-shadow: none;
   padding: 0;
+  position: relative;
+  overflow: visible;
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -2504,6 +2686,123 @@ body.cron-workflow-pseudo-fullscreen {
   border: 1px solid rgba(28, 26, 23, 0.14);
   box-shadow: 0 30px 60px rgba(49, 36, 26, 0.35);
   animation: rise-in 180ms ease-out;
+}
+
+#request-user-input-modal {
+  z-index: 27;
+  align-items: flex-end;
+  justify-content: flex-end;
+  padding: 14px;
+}
+
+.request-user-input-modal-panel {
+  position: relative;
+  z-index: 1;
+  width: min(430px, calc(100vw - 28px));
+  max-height: min(86vh, 620px);
+  overflow: auto;
+  border-radius: 16px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: linear-gradient(164deg, rgba(36, 40, 50, 0.97), rgba(18, 20, 28, 0.98));
+  color: rgba(246, 248, 255, 0.95);
+  box-shadow: 0 26px 48px rgba(6, 8, 12, 0.5);
+  padding: 12px;
+  display: grid;
+  gap: 10px;
+  animation: rise-in 160ms ease-out;
+}
+
+.request-user-input-modal-head {
+  display: grid;
+  gap: 4px;
+}
+
+.request-user-input-modal-progress {
+  margin: 0;
+  font-size: 11px;
+  color: rgba(195, 208, 233, 0.84);
+}
+
+.request-user-input-modal-head h2 {
+  margin: 0;
+  font-size: 14px;
+  color: rgba(249, 251, 255, 0.98);
+}
+
+.request-user-input-modal-question {
+  margin: 0;
+  font-size: 13px;
+  color: rgba(234, 240, 255, 0.9);
+}
+
+.request-user-input-modal-options {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.request-user-input-modal-option-btn {
+  width: 100%;
+  text-align: left;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.04);
+  color: rgba(245, 248, 255, 0.92);
+  padding: 10px 11px;
+  display: grid;
+  gap: 4px;
+  transition: border-color 120ms ease, background-color 120ms ease, transform 120ms ease;
+}
+
+.request-user-input-modal-option-btn:hover,
+.request-user-input-modal-option-btn:focus-visible {
+  border-color: rgba(117, 216, 255, 0.55);
+  background: rgba(31, 76, 110, 0.3);
+}
+
+.request-user-input-modal-option-btn.is-selected {
+  border-color: rgba(76, 204, 255, 0.9);
+  background: rgba(18, 78, 112, 0.5);
+}
+
+.request-user-input-modal-option-label {
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+.request-user-input-modal-option-desc {
+  font-size: 12px;
+  color: rgba(214, 226, 248, 0.84);
+  line-height: 1.4;
+}
+
+.request-user-input-modal-custom {
+  display: grid;
+  gap: 6px;
+}
+
+.request-user-input-modal-custom span {
+  font-size: 12px;
+  color: rgba(220, 230, 248, 0.86);
+}
+
+.request-user-input-modal-custom textarea {
+  resize: vertical;
+  min-height: 54px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  background: rgba(12, 15, 22, 0.92);
+  color: rgba(247, 249, 255, 0.96);
+  padding: 8px 10px;
+}
+
+.request-user-input-modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
 }
 
 #workspace-editor-modal {

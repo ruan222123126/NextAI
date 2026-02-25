@@ -20,6 +20,20 @@ export class WebShellFlowPage {
     return this.requireByID<HTMLSelectElement>("chat-prompt-mode-select");
   }
 
+  planModeSwitch(): HTMLInputElement {
+    return this.requireByID<HTMLInputElement>("chat-plan-mode-switch");
+  }
+
+  setPlanMode(enabled: boolean): void {
+    const input = this.planModeSwitch();
+    input.checked = enabled;
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+  }
+
+  planStageBadgeText(): string {
+    return this.byID<HTMLElement>("chat-plan-stage-badge")?.textContent ?? "";
+  }
+
   collaborationModeSelect(): HTMLSelectElement {
     return this.requireByID<HTMLSelectElement>("chat-collaboration-mode-select");
   }

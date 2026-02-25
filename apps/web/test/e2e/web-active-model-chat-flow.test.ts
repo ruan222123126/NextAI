@@ -410,11 +410,11 @@ describe("web e2e: auto activate model then send chat", () => {
 
     await import("../../src/main.ts");
 
-    const promptModeSelect = document.getElementById("chat-prompt-mode-select") as HTMLSelectElement;
+    const promptModeSelect = document.getElementById("chat-prompt-mode-select");
     const collaborationModeSelect = document.getElementById("chat-collaboration-mode-select") as HTMLSelectElement;
     const collaborationModeLabel = collaborationModeSelect.closest<HTMLElement>(".chat-prompt-mode-toggle");
     expect(collaborationModeLabel).not.toBeNull();
-    expect(promptModeSelect.value).toBe("default");
+    expect(promptModeSelect).toBeNull();
     expect(collaborationModeSelect.disabled).toBe(true);
     expect(collaborationModeLabel?.hidden).toBe(true);
   });

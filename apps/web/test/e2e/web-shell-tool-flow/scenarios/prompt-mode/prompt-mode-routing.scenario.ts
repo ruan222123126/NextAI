@@ -59,9 +59,6 @@ describe("web e2e: prompt 模板与模式场景 - prompt_mode 路由", () => {
 
     await mountWebApp();
 
-    const promptModeSelect = page.promptModeSelect();
-    expect(promptModeSelect.value).toBe("default");
-
     page.sendMessage("first");
     await waitFor(() => processCalls >= 1, 4000);
     page.sendMessage("second");
@@ -152,10 +149,7 @@ describe("web e2e: prompt 模板与模式场景 - prompt_mode 路由", () => {
 
     await mountWebApp();
 
-    const promptModeSelect = page.promptModeSelect();
-
     await waitFor(() => page.chatItemButton("chat-invalid") !== null, 4000);
-    expect(promptModeSelect.value).toBe("default");
 
     page.sendMessage("for invalid mode");
     await waitFor(() => processCalls >= 1, 4000);
@@ -164,7 +158,6 @@ describe("web e2e: prompt 模板与模式场景 - prompt_mode 路由", () => {
     const defaultChatButton = page.chatItemButton("chat-default");
     expect(defaultChatButton).not.toBeNull();
     defaultChatButton?.click();
-    await waitFor(() => promptModeSelect.value === "default", 4000);
 
     page.sendMessage("for default");
     await waitFor(() => processCalls >= 2, 4000);
@@ -223,11 +216,7 @@ describe("web e2e: prompt 模板与模式场景 - prompt_mode 路由", () => {
 
     await mountWebApp();
 
-    const promptModeSelect = page.promptModeSelect();
-    expect(promptModeSelect.value).toBe("default");
-
     page.clickNewChat();
-    expect(promptModeSelect.value).toBe("default");
 
     page.sendMessage("for new chat");
     await waitFor(() => processCalls >= 1, 4000);

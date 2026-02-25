@@ -1,9 +1,13 @@
 import { createChatToolCallHelpers } from "./chat-tool-call.js";
 import type {
   AgentStreamEvent,
-  CollaborationMode,
   ChatDomainContext,
   ChatHistoryResponse,
+  PlanAnswerValue,
+  PlanModeState,
+  PlanQuestion,
+  PlanSpec,
+  PlanStateResponse,
   ChatSpec,
   DeleteResult,
   PromptMode,
@@ -52,7 +56,36 @@ export function createChatDomain(ctx: ChatDomainContext) {
     chatTitle,
     chatSession,
     chatPromptModeSelect,
-    chatCollaborationModeSelect,
+    chatPlanModeSwitch,
+    chatPlanStageBadge,
+    planModePanel,
+    planModeHint,
+    planClarifyCounter,
+    planQuestionsWrap,
+    planClarifyForm,
+    planClarifySubmitButton,
+    planSpecWrap,
+    planGoalValue,
+    planScopeInList,
+    planScopeOutList,
+    planConstraintsList,
+    planAssumptionsList,
+    planTasksList,
+    planAcceptanceList,
+    planRisksList,
+    planSummaryValue,
+    planReviseInput,
+    planReviseButton,
+    planExecuteButton,
+    planDisableButton,
+    requestUserInputModal,
+    requestUserInputModalTitle,
+    requestUserInputModalProgress,
+    requestUserInputModalQuestion,
+    requestUserInputModalOptions,
+    requestUserInputModalCustomInput,
+    requestUserInputCancelButton,
+    requestUserInputSubmitButton,
     searchChatInput,
     searchChatResults,
     messageList,
@@ -70,9 +103,15 @@ export function createChatDomain(ctx: ChatDomainContext) {
   let messagesDigest = "";
   let activeStreamAbortController: AbortController | null = null;
   const handledRequestUserInputRequests = new Set<string>();
+  const handledOutputPlanPromptKeys = new Set<string>();
+  let requestUserInputPromptChain: Promise<unknown> = Promise.resolve();
+  let outputPlanPromptInFlight = false;
   const STREAM_REPLY_RETRY_LIMIT = 5;
   const DEFAULT_STREAM_REPLY_RETRY_DELAY_MS = 15_000;
   const RETRYABLE_STREAM_ERROR_MESSAGE_MARKERS = ["err_incomplete_chunked_encoding", "incomplete chunked encoding", "failed to fetch", "network request failed", "networkerror", "load failed", "fetch failed"];
+  const PLAN_MODE_DEFAULT_MAX_COUNT = 5;
+  const OUTPUT_PLAN_EXECUTE_QUESTION_ID = "output_plan_execute";
+  const OUTPUT_PLAN_EXECUTE_WAIT_TIMEOUT_MS = 20_000;
   const {
     isToolCallRawNotice,
     normalizeToolName,
@@ -145,16 +184,23 @@ async function reloadChats(options: { includeQQHistory?: boolean } = {}): Promis
     if (state.activeChatId && !state.chats.some((chat) => chat.id === state.activeChatId)) {
       state.activeChatId = null;
       state.activePromptMode = "default";
-      state.activeCollaborationMode = "default";
+      resetPlanState();
       activeChatCleared = true;
     }
 
     if (!chatsChanged && !activeChatCleared) {
       return;
     }
+    if (state.activeChatId) {
+      const active = state.chats.find((chat) => chat.id === state.activeChatId);
+      if (active) {
+        syncPlanStateFromChatMeta(active.meta);
+      }
+    }
     renderChatList();
     renderSearchChatResults();
     renderChatHeader();
+    renderPlanPanel();
   } catch (error) {
     setStatus(asErrorMessage(error), "error");
   }
@@ -171,8 +217,9 @@ async function openChat(chatID: string): Promise<void> {
   state.activeChatId = chat.id;
   state.activeSessionId = chat.session_id;
   state.activePromptMode = resolveChatPromptMode(chat.meta);
-  state.activeCollaborationMode = resolveChatCollaborationMode(chat.meta);
+  syncPlanStateFromChatMeta(chat.meta);
   renderChatHeader();
+  renderPlanPanel();
   syncActiveChatSelections();
 
   try {
@@ -243,9 +290,10 @@ function startDraftSession(): void {
   state.activeChatId = null;
   state.activeSessionId = newSessionID();
   state.activePromptMode = "default";
-  state.activeCollaborationMode = "default";
+  resetPlanState();
   state.messages = [];
   renderChatHeader();
+  renderPlanPanel();
   renderChatList();
   renderSearchChatResults();
   renderMessages();
@@ -455,6 +503,735 @@ function pauseReply(): void {
     return;
   }
   activeStreamAbortController.abort();
+}
+
+function toStringArray(raw: unknown): string[] {
+  if (!Array.isArray(raw)) {
+    return [];
+  }
+  const out: string[] = [];
+  for (const item of raw) {
+    if (typeof item !== "string") {
+      continue;
+    }
+    const value = item.trim();
+    if (value === "" || out.includes(value)) {
+      continue;
+    }
+    out.push(value);
+  }
+  return out;
+}
+
+function normalizePlanModeState(raw: unknown): PlanModeState {
+  const value = typeof raw === "string" ? raw.trim().toLowerCase() : "";
+  switch (value) {
+    case "off":
+    case "planning_intake":
+    case "planning_clarify":
+    case "planning_ready":
+    case "planning_revising":
+    case "executing":
+    case "done":
+    case "aborted":
+      return value;
+    default:
+      return "off";
+  }
+}
+
+function dedupeQuestionID(base: string, seen: Set<string>): string {
+  const seed = base.trim() === "" ? "q" : base.trim();
+  if (!seen.has(seed)) {
+    return seed;
+  }
+  let suffix = 2;
+  while (true) {
+    const candidate = `${seed}_${suffix}`;
+    if (!seen.has(candidate)) {
+      return candidate;
+    }
+    suffix += 1;
+  }
+}
+
+function defaultQuestionID(index: number): string {
+  return `q${index}`;
+}
+
+function defaultQuestionHeader(index: number): string {
+  return `问题 ${index}`;
+}
+
+function normalizePlanQuestions(raw: unknown): PlanQuestion[] {
+  if (!Array.isArray(raw)) {
+    return [];
+  }
+  const out: PlanQuestion[] = [];
+  const seenIDs = new Set<string>();
+  for (const item of raw) {
+    if (!item || typeof item !== "object") {
+      continue;
+    }
+    const row = item as Record<string, unknown>;
+    const question = typeof row.question === "string" ? row.question.trim() : "";
+    if (question === "") {
+      continue;
+    }
+    const fallbackIndex = out.length + 1;
+    const idSeed = typeof row.id === "string" ? row.id.trim() : "";
+    const id = dedupeQuestionID(idSeed !== "" ? idSeed : defaultQuestionID(fallbackIndex), seenIDs);
+    seenIDs.add(id);
+    const header = typeof row.header === "string" ? row.header.trim() : "";
+    const normalizedHeader = header !== "" ? header : defaultQuestionHeader(fallbackIndex);
+    const options = Array.isArray(row.options)
+      ? row.options
+        .map((option) => {
+          if (!option || typeof option !== "object") {
+            return null;
+          }
+          const optionRow = option as Record<string, unknown>;
+          const label = typeof optionRow.label === "string" ? optionRow.label.trim() : "";
+          const description = typeof optionRow.description === "string" ? optionRow.description.trim() : "";
+          if (label === "") {
+            return null;
+          }
+          return description === "" ? { label } : { label, description };
+        })
+        .filter((option): option is { label: string; description?: string } => option !== null)
+      : [];
+    out.push({
+      id,
+      header: normalizedHeader,
+      question,
+      options,
+    });
+  }
+  return out;
+}
+
+function normalizePlanSpec(raw: unknown): PlanSpec | null {
+  if (!raw || typeof raw !== "object") {
+    return null;
+  }
+  const row = raw as Record<string, unknown>;
+  const goal = typeof row.goal === "string" ? row.goal.trim() : "";
+  if (goal === "") {
+    return null;
+  }
+  const tasks = Array.isArray(row.tasks)
+    ? row.tasks
+      .map((item) => {
+        if (!item || typeof item !== "object") {
+          return null;
+        }
+        const task = item as Record<string, unknown>;
+        const id = typeof task.id === "string" ? task.id.trim() : "";
+        const title = typeof task.title === "string" ? task.title.trim() : "";
+        if (id === "" || title === "") {
+          return null;
+        }
+        const status = typeof task.status === "string" ? task.status.trim().toLowerCase() : "pending";
+        return {
+          id,
+          title,
+          description: typeof task.description === "string" ? task.description.trim() : "",
+          depends_on: toStringArray(task.depends_on),
+          status: (status === "in_progress" || status === "completed" || status === "blocked" ? status : "pending") as PlanSpec["tasks"][number]["status"],
+          deliverables: toStringArray(task.deliverables),
+          verification: toStringArray(task.verification),
+        };
+      })
+      .filter((item): item is PlanSpec["tasks"][number] => item !== null)
+    : [];
+  const risks = Array.isArray(row.risks)
+    ? row.risks
+      .map((item) => {
+        if (!item || typeof item !== "object") {
+          return null;
+        }
+        const risk = item as Record<string, unknown>;
+        const id = typeof risk.id === "string" ? risk.id.trim() : "";
+        const title = typeof risk.title === "string" ? risk.title.trim() : "";
+        if (id === "" || title === "") {
+          return null;
+        }
+        return {
+          id,
+          title,
+          description: typeof risk.description === "string" ? risk.description.trim() : "",
+          mitigation: typeof risk.mitigation === "string" ? risk.mitigation.trim() : "",
+        };
+      })
+      .filter((item): item is PlanSpec["risks"][number] => item !== null)
+    : [];
+  return {
+    goal,
+    scope_in: toStringArray(row.scope_in),
+    scope_out: toStringArray(row.scope_out),
+    constraints: toStringArray(row.constraints),
+    assumptions: toStringArray(row.assumptions),
+    tasks,
+    acceptance_criteria: toStringArray(row.acceptance_criteria),
+    risks,
+    summary_for_execution: typeof row.summary_for_execution === "string" ? row.summary_for_execution.trim() : "",
+    revision: typeof row.revision === "number" && Number.isFinite(row.revision) ? row.revision : 0,
+    updated_at: typeof row.updated_at === "string" ? row.updated_at : "",
+  };
+}
+
+function resetPlanState(): void {
+  state.planModeEnabled = false;
+  state.planModeState = "off";
+  state.planSpec = null;
+  state.planClarifyAskedCount = 0;
+  state.planClarifyMaxCount = PLAN_MODE_DEFAULT_MAX_COUNT;
+  state.planClarifyUnresolved = [];
+  state.planClarifyQuestions = [];
+  state.planExecutionSessionId = "";
+  state.planSourcePromptVersion = "";
+}
+
+function syncPlanStateFromChatMeta(meta: Record<string, unknown> | undefined): void {
+  if (!meta) {
+    resetPlanState();
+    return;
+  }
+  const enabled = meta.plan_mode_enabled === true;
+  state.planModeEnabled = enabled;
+  state.planModeState = normalizePlanModeState(meta.plan_mode_state);
+  if (!enabled) {
+    state.planModeState = "off";
+  }
+  state.planSpec = normalizePlanSpec(meta.plan_spec);
+  state.planClarifyAskedCount = typeof meta.clarify_asked_count === "number" ? Math.max(0, Math.floor(meta.clarify_asked_count)) : 0;
+  const parsedMax = typeof meta.clarify_max_count === "number" ? Math.floor(meta.clarify_max_count) : PLAN_MODE_DEFAULT_MAX_COUNT;
+  state.planClarifyMaxCount = parsedMax > 0 ? parsedMax : PLAN_MODE_DEFAULT_MAX_COUNT;
+  state.planClarifyUnresolved = toStringArray(meta.clarify_unresolved);
+  state.planExecutionSessionId = typeof meta.plan_execution_session_id === "string" ? meta.plan_execution_session_id.trim() : "";
+  state.planSourcePromptVersion = typeof meta.plan_source_prompt_version === "string" ? meta.plan_source_prompt_version.trim() : "";
+  state.planClarifyQuestions = [];
+}
+
+function syncActiveChatPlanMetaFromState(): void {
+  const active = state.chats.find((chat) => chat.id === state.activeChatId);
+  if (!active) {
+    return;
+  }
+  if (!active.meta) {
+    active.meta = {};
+  }
+  active.meta.plan_mode_enabled = state.planModeEnabled;
+  active.meta.plan_mode_state = state.planModeState;
+  active.meta.clarify_asked_count = state.planClarifyAskedCount;
+  active.meta.clarify_max_count = state.planClarifyMaxCount;
+  active.meta.clarify_unresolved = [...state.planClarifyUnresolved];
+  active.meta.plan_execution_session_id = state.planExecutionSessionId;
+  active.meta.plan_source_prompt_version = state.planSourcePromptVersion;
+  if (state.planSpec) {
+    active.meta.plan_spec = state.planSpec;
+  } else {
+    delete active.meta.plan_spec;
+  }
+}
+
+function applyPlanStateResponse(response: PlanStateResponse): void {
+  state.planModeEnabled = response.plan_mode_enabled === true;
+  state.planModeState = normalizePlanModeState(response.plan_mode_state);
+  if (!state.planModeEnabled) {
+    state.planModeState = "off";
+  }
+  state.planSpec = normalizePlanSpec(response.plan_spec ?? null);
+  state.planClarifyAskedCount = Math.max(0, Math.floor(response.clarify_asked_count ?? 0));
+  const parsedMax = Math.floor(response.clarify_max_count ?? PLAN_MODE_DEFAULT_MAX_COUNT);
+  state.planClarifyMaxCount = parsedMax > 0 ? parsedMax : PLAN_MODE_DEFAULT_MAX_COUNT;
+  state.planClarifyUnresolved = toStringArray(response.clarify_unresolved);
+  state.planExecutionSessionId = typeof response.plan_execution_session_id === "string" ? response.plan_execution_session_id.trim() : "";
+  state.planSourcePromptVersion = typeof response.plan_source_prompt_version === "string" ? response.plan_source_prompt_version.trim() : "";
+  state.planClarifyQuestions = normalizePlanQuestions(response.questions);
+  syncActiveChatPlanMetaFromState();
+  renderChatHeader();
+  renderPlanPanel();
+}
+
+function resolvePlanStageLabel(stateValue: PlanModeState): string {
+  switch (stateValue) {
+    case "planning_intake":
+      return t("chat.planStageIntake");
+    case "planning_clarify":
+      return t("chat.planStageClarify");
+    case "planning_ready":
+      return t("chat.planStageReady");
+    case "planning_revising":
+      return t("chat.planStageRevising");
+    case "executing":
+      return t("chat.planStageExecuting");
+    case "done":
+      return t("chat.planStageDone");
+    case "aborted":
+      return t("chat.planStageAborted");
+    default:
+      return "";
+  }
+}
+
+function resolvePlanHintText(stateValue: PlanModeState): string {
+  switch (stateValue) {
+    case "planning_intake":
+      return t("chat.planHintIntake");
+    case "planning_clarify":
+      return t("chat.planHintClarify");
+    case "planning_ready":
+      return t("chat.planHintReady");
+    case "planning_revising":
+      return t("chat.planHintRevising");
+    case "executing":
+      return t("chat.planHintExecuting");
+    case "done":
+      return t("chat.planHintDone");
+    case "aborted":
+      return t("chat.planHintAborted");
+    default:
+      return t("chat.planHintOff");
+  }
+}
+
+function renderPlanStringList(list: HTMLUListElement, values: string[], emptyText: string): void {
+  list.innerHTML = "";
+  if (values.length === 0) {
+    const li = document.createElement("li");
+    li.className = "plan-empty-item";
+    li.textContent = emptyText;
+    list.appendChild(li);
+    return;
+  }
+  values.forEach((value) => {
+    const li = document.createElement("li");
+    li.textContent = value;
+    list.appendChild(li);
+  });
+}
+
+function renderPlanTasksList(spec: PlanSpec | null): void {
+  planTasksList.innerHTML = "";
+  if (!spec || spec.tasks.length === 0) {
+    const li = document.createElement("li");
+    li.className = "plan-empty-item";
+    li.textContent = t("chat.planEmpty");
+    planTasksList.appendChild(li);
+    return;
+  }
+  spec.tasks.forEach((task) => {
+    const li = document.createElement("li");
+    li.className = "plan-task-item";
+    const status = document.createElement("strong");
+    status.textContent = `[${task.status}]`;
+    const title = document.createElement("span");
+    title.textContent = ` ${task.title}`;
+    li.append(status, title);
+    if (task.description) {
+      const desc = document.createElement("p");
+      desc.textContent = task.description;
+      li.appendChild(desc);
+    }
+    if (task.depends_on.length > 0) {
+      const dep = document.createElement("p");
+      dep.className = "plan-task-deps";
+      dep.textContent = `${t("chat.planTaskDepends")}: ${task.depends_on.join(", ")}`;
+      li.appendChild(dep);
+    }
+    planTasksList.appendChild(li);
+  });
+}
+
+function renderPlanRisksList(spec: PlanSpec | null): void {
+  planRisksList.innerHTML = "";
+  if (!spec || spec.risks.length === 0) {
+    const li = document.createElement("li");
+    li.className = "plan-empty-item";
+    li.textContent = t("chat.planEmpty");
+    planRisksList.appendChild(li);
+    return;
+  }
+  spec.risks.forEach((risk) => {
+    const li = document.createElement("li");
+    const title = document.createElement("strong");
+    title.textContent = risk.title;
+    li.appendChild(title);
+    if (risk.description) {
+      const desc = document.createElement("p");
+      desc.textContent = risk.description;
+      li.appendChild(desc);
+    }
+    if (risk.mitigation) {
+      const mitigation = document.createElement("p");
+      mitigation.className = "plan-risk-mitigation";
+      mitigation.textContent = `${t("chat.planRiskMitigation")}: ${risk.mitigation}`;
+      li.appendChild(mitigation);
+    }
+    planRisksList.appendChild(li);
+  });
+}
+
+function renderPlanClarifyForm(): void {
+  planClarifyForm.innerHTML = "";
+  const shouldRenderQuestions = state.planModeEnabled && state.planModeState === "planning_clarify" && state.planClarifyQuestions.length > 0;
+  if (!shouldRenderQuestions) {
+    return;
+  }
+  state.planClarifyQuestions.forEach((question) => {
+    const fieldset = document.createElement("fieldset");
+    fieldset.className = "plan-question-card";
+    fieldset.dataset.questionId = question.id;
+
+    const legend = document.createElement("legend");
+    legend.textContent = question.header ? `${question.header} · ${question.question}` : question.question;
+    fieldset.appendChild(legend);
+
+    if (Array.isArray(question.options) && question.options.length > 0) {
+      question.options.forEach((option) => {
+        const label = document.createElement("label");
+        label.className = "plan-question-option";
+        const radio = document.createElement("input");
+        radio.type = "radio";
+        radio.name = `plan-option-${question.id}`;
+        radio.value = option.label;
+        label.appendChild(radio);
+        const text = document.createElement("span");
+        text.textContent = option.description ? `${option.label} - ${option.description}` : option.label;
+        label.appendChild(text);
+        fieldset.appendChild(label);
+      });
+    }
+
+    const freeInput = document.createElement("textarea");
+    freeInput.name = `plan-free-${question.id}`;
+    freeInput.rows = 2;
+    freeInput.placeholder = t("chat.planClarifyFreeInput");
+    fieldset.appendChild(freeInput);
+    planClarifyForm.appendChild(fieldset);
+  });
+}
+
+function collectPlanClarifyAnswers(): Record<string, PlanAnswerValue> {
+  const answers: Record<string, PlanAnswerValue> = {};
+  state.planClarifyQuestions.forEach((question) => {
+    const selected = planClarifyForm.querySelector<HTMLInputElement>(`input[name="plan-option-${question.id}"]:checked`);
+    const freeInput = planClarifyForm.querySelector<HTMLTextAreaElement>(`textarea[name="plan-free-${question.id}"]`);
+    const values: string[] = [];
+    if (selected && selected.value.trim() !== "") {
+      values.push(selected.value.trim());
+    }
+    if (freeInput && freeInput.value.trim() !== "") {
+      values.push(freeInput.value.trim());
+    }
+    if (values.length > 0) {
+      answers[question.id] = { answers: values };
+    }
+  });
+  return answers;
+}
+
+function renderPlanPanel(): void {
+  planModePanel.hidden = true;
+  planModePanel.classList.remove("is-ready-actions");
+  chatPlanModeSwitch.checked = state.planModeEnabled;
+  chatPlanStageBadge.hidden = !state.planModeEnabled;
+  chatPlanStageBadge.textContent = state.planModeEnabled ? resolvePlanStageLabel(state.planModeState) : "";
+
+  planModeHint.textContent = resolvePlanHintText(state.planModeState);
+  planClarifyCounter.hidden = true;
+  planClarifyCounter.textContent = t("chat.planClarifyCounter", {
+    asked: state.planClarifyAskedCount,
+    max: state.planClarifyMaxCount,
+  });
+
+  renderPlanClarifyForm();
+  planQuestionsWrap.hidden = true;
+  planSpecWrap.hidden = true;
+  planGoalValue.textContent = state.planSpec?.goal ?? t("chat.planEmpty");
+  renderPlanStringList(planScopeInList, state.planSpec?.scope_in ?? [], t("chat.planEmpty"));
+  renderPlanStringList(planScopeOutList, state.planSpec?.scope_out ?? [], t("chat.planEmpty"));
+  renderPlanStringList(planConstraintsList, state.planSpec?.constraints ?? [], t("chat.planEmpty"));
+  renderPlanStringList(planAssumptionsList, state.planSpec?.assumptions ?? [], t("chat.planEmpty"));
+  renderPlanTasksList(state.planSpec);
+  renderPlanStringList(planAcceptanceList, state.planSpec?.acceptance_criteria ?? [], t("chat.planEmpty"));
+  renderPlanRisksList(state.planSpec);
+  planSummaryValue.textContent = state.planSpec?.summary_for_execution ?? t("chat.planEmpty");
+  planReviseInput.hidden = true;
+  planReviseButton.hidden = true;
+  planExecuteButton.hidden = true;
+  planDisableButton.hidden = true;
+
+  const locked = state.sending;
+  chatPlanModeSwitch.disabled = locked;
+  planClarifySubmitButton.hidden = true;
+  planClarifySubmitButton.disabled = true;
+  planReviseButton.disabled = true;
+  planExecuteButton.disabled = true;
+  planDisableButton.disabled = locked || !state.planModeEnabled;
+  updateComposerPlaceholder();
+}
+
+function updateComposerPlaceholder(): void {
+  messageInput.placeholder = state.planModeEnabled ? t("chat.planInputPlaceholder") : t("chat.inputPlaceholder");
+}
+
+async function ensurePlanChatID(): Promise<string> {
+  if (state.activeChatId) {
+    return state.activeChatId;
+  }
+  const created = await requestJSON<ChatSpec>("/chats", {
+    method: "POST",
+    body: {
+      name: t("chat.draftTitle"),
+      session_id: state.activeSessionId,
+      user_id: state.userId,
+      channel: WEB_CHAT_CHANNEL,
+      meta: {},
+    },
+  });
+  await reloadChats({ includeQQHistory: false });
+  await openChat(created.id);
+  return created.id;
+}
+
+async function togglePlanMode(
+  enabled: boolean,
+  options: { confirm?: boolean; announce?: boolean } = {},
+): Promise<void> {
+  await getBootstrapTask();
+  syncControlState();
+  const announce = options.announce !== false;
+  const targetEnabled = enabled;
+  try {
+    const chatID = await ensurePlanChatID();
+    const response = await requestJSON<PlanStateResponse>("/agent/plan/toggle", {
+      method: "POST",
+      body: {
+        chat_id: chatID,
+        enabled: targetEnabled,
+        confirm: options.confirm === true,
+      },
+    });
+    applyPlanStateResponse(response);
+    if (announce) {
+      setStatus(targetEnabled ? t("status.planModeEnabled") : t("status.planModeDisabled"), "info");
+    }
+  } catch (error) {
+    const message = asErrorMessage(error);
+    if (!targetEnabled && message.includes("plan_toggle_confirmation_required") && options.confirm !== true) {
+      const confirmed = window.confirm(t("chat.planDisableConfirm"));
+      if (confirmed) {
+        await togglePlanMode(false, { ...options, confirm: true });
+        return;
+      }
+      chatPlanModeSwitch.checked = state.planModeEnabled;
+      return;
+    }
+    chatPlanModeSwitch.checked = state.planModeEnabled;
+    setStatus(message, "error");
+  } finally {
+    renderPlanPanel();
+  }
+}
+
+function toRequestUserInputQuestionsFromPlan(questions: PlanQuestion[]): RequestUserInputQuestion[] {
+  const seenIDs = new Set<string>();
+  return questions
+    .map((question, idx) => {
+      const prompt = typeof question.question === "string" ? question.question.trim() : "";
+      if (prompt === "") {
+        return null;
+      }
+      const fallbackIndex = idx + 1;
+      const idSeed = typeof question.id === "string" ? question.id.trim() : "";
+      const id = dedupeQuestionID(idSeed !== "" ? idSeed : defaultQuestionID(fallbackIndex), seenIDs);
+      seenIDs.add(id);
+      const headerSeed = typeof question.header === "string" ? question.header.trim() : "";
+      const header = headerSeed !== "" ? headerSeed : defaultQuestionHeader(fallbackIndex);
+      const options = Array.isArray(question.options)
+        ? question.options
+          .map((option) => {
+            const label = typeof option.label === "string" ? option.label.trim() : "";
+            const description = typeof option.description === "string" ? option.description.trim() : "";
+            if (label === "") {
+              return null;
+            }
+            return description === "" ? { label } : { label, description };
+          })
+          .filter((option): option is RequestUserInputQuestionOption => option !== null)
+        : [];
+      return {
+        id,
+        header,
+        question: prompt,
+        options,
+      };
+    })
+    .filter((question): question is RequestUserInputQuestion => question !== null);
+}
+
+function toPlanClarifyAnswerPayload(
+  answers: Record<string, RequestUserInputAnswer>,
+): Record<string, PlanAnswerValue> {
+  const payload: Record<string, PlanAnswerValue> = {};
+  for (const [questionID, answer] of Object.entries(answers)) {
+    const id = questionID.trim();
+    if (id === "") {
+      continue;
+    }
+    const normalizedAnswers = toStringArray(answer.answers);
+    if (normalizedAnswers.length === 0) {
+      continue;
+    }
+    payload[id] = { answers: normalizedAnswers };
+  }
+  return payload;
+}
+
+async function runPlanClarifyFlow(chatID: string, questions: PlanQuestion[]): Promise<PlanStateResponse | null> {
+  let pendingQuestions = toRequestUserInputQuestionsFromPlan(questions);
+  while (pendingQuestions.length > 0) {
+    const answers = await askQuestionsWithModal(pendingQuestions);
+    if (answers === null) {
+      setStatus(t("status.planClarifyCancelled"), "info");
+      return null;
+    }
+    const response = await requestJSON<PlanStateResponse>("/agent/plan/clarify/answer", {
+      method: "POST",
+      body: {
+        chat_id: chatID,
+        answers: toPlanClarifyAnswerPayload(answers),
+      },
+    });
+    applyPlanStateResponse(response);
+    if (response.plan_mode_state !== "planning_clarify") {
+      return response;
+    }
+    setStatus(t("status.planClarifyRequested"), "info");
+    pendingQuestions = toRequestUserInputQuestionsFromPlan(normalizePlanQuestions(response.questions));
+    if (pendingQuestions.length === 0) {
+      return response;
+    }
+  }
+  return null;
+}
+
+async function compilePlanFromInput(userInput: string): Promise<void> {
+  const chatID = await ensurePlanChatID();
+  const response = await requestJSON<PlanStateResponse>("/agent/plan/compile", {
+    method: "POST",
+    body: {
+      chat_id: chatID,
+      user_input: userInput,
+    },
+  });
+  applyPlanStateResponse(response);
+  if (response.plan_mode_state === "planning_clarify") {
+    setStatus(t("status.planClarifyRequested"), "info");
+    const next = await runPlanClarifyFlow(chatID, normalizePlanQuestions(response.questions));
+    if (next && next.plan_mode_state !== "planning_clarify") {
+      setStatus(t("status.planReady"), "info");
+    }
+    return;
+  }
+  setStatus(t("status.planReady"), "info");
+}
+
+async function submitPlanClarifyAnswers(): Promise<void> {
+  if (!state.planModeEnabled || state.planModeState !== "planning_clarify") {
+    setStatus(t("status.planNotInClarify"), "error");
+    return;
+  }
+  if (state.planClarifyQuestions.length === 0) {
+    setStatus(t("status.planClarifyPending"), "info");
+    return;
+  }
+  const chatID = state.activeChatId ?? await ensurePlanChatID();
+  const response = await runPlanClarifyFlow(chatID, state.planClarifyQuestions);
+  if (response && response.plan_mode_state !== "planning_clarify") {
+    setStatus(t("status.planReady"), "info");
+  }
+}
+
+async function revisePlan(): Promise<void> {
+  if (!state.planModeEnabled || state.planModeState !== "planning_ready" || !state.planSpec) {
+    setStatus(t("status.planNotReady"), "error");
+    return;
+  }
+  const feedback = planReviseInput.value.trim();
+  if (feedback === "") {
+    setStatus(t("status.planFeedbackRequired"), "error");
+    return;
+  }
+  const chatID = state.activeChatId ?? await ensurePlanChatID();
+  const response = await requestJSON<PlanStateResponse>("/agent/plan/revise", {
+    method: "POST",
+    body: {
+      chat_id: chatID,
+      natural_language_feedback: feedback,
+    },
+  });
+  planReviseInput.value = "";
+  applyPlanStateResponse(response);
+  setStatus(t("status.planRevised"), "info");
+}
+
+interface ExecutePlanOptions {
+  autoKickoff?: boolean;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    window.setTimeout(resolve, ms);
+  });
+}
+
+async function waitForSendingIdle(timeoutMS = OUTPUT_PLAN_EXECUTE_WAIT_TIMEOUT_MS): Promise<void> {
+  const startedAt = Date.now();
+  while (state.sending) {
+    if (Date.now() - startedAt >= timeoutMS) {
+      throw new Error("timed out waiting for current stream to finish");
+    }
+    await sleep(50);
+  }
+}
+
+async function triggerPlanExecutionKickoff(message: string): Promise<void> {
+  const text = message.trim();
+  if (text === "") {
+    return;
+  }
+  messageInput.value = text;
+  await sendMessage();
+}
+
+async function executePlan(options: ExecutePlanOptions = {}): Promise<void> {
+  if (!state.planModeEnabled || state.planModeState !== "planning_ready" || !state.planSpec) {
+    setStatus(t("status.planNotReady"), "error");
+    return;
+  }
+  const autoKickoff = options.autoKickoff === true;
+  const kickoffMessage = autoKickoff ? t("chat.planExecuteAutoKickoffMessage") : "";
+  const chatID = state.activeChatId ?? await ensurePlanChatID();
+  const response = await requestJSON<{ execution_session_id?: string }>("/agent/plan/execute", {
+    method: "POST",
+    body: { chat_id: chatID },
+  });
+  const executionSessionID = typeof response.execution_session_id === "string" ? response.execution_session_id.trim() : "";
+  if (executionSessionID === "") {
+    throw new Error("plan execute response missing execution_session_id");
+  }
+  await reloadChats();
+  const matched = state.chats.find((chat) => chat.session_id === executionSessionID);
+  if (matched) {
+    await openChat(matched.id);
+  }
+  setStatus(t("status.planExecuteStarted", { sessionId: executionSessionID }), "info");
+  if (autoKickoff) {
+    await triggerPlanExecutionKickoff(kickoffMessage);
+  }
 }
 
 async function sendMessage(): Promise<void> {
@@ -783,7 +1560,7 @@ async function streamReply(
     channel: WEB_CHAT_CHANNEL,
     stream: true,
   };
-  payload.biz_params = mergePromptModeBizParams(bizParams, state.activePromptMode, state.activeCollaborationMode);
+  payload.biz_params = mergePromptModeBizParams(bizParams, state.activePromptMode);
 
   const requestBody = JSON.stringify(payload);
   const retryDelayMS = resolveStreamReplyRetryDelayMS();
@@ -1114,48 +1891,16 @@ function normalizePromptMode(raw: unknown): PromptMode {
   void raw;
   return "default";
 }
-function normalizeCollaborationMode(raw: unknown): CollaborationMode {
-  if (typeof raw !== "string") {
-    return "default";
-  }
-  const normalized = raw.trim().toLowerCase();
-  if (normalized === "plan") {
-    return "plan";
-  }
-  if (normalized === "execute") {
-    return "execute";
-  }
-  if (normalized === "pair_programming" || normalized === "pair-programming" || normalized === "pairprogramming") {
-    return "pair_programming";
-  }
-  return "default";
-}
 function resolveChatPromptMode(meta: Record<string, unknown> | undefined): PromptMode {
   return normalizePromptMode(meta?.[PROMPT_MODE_META_KEY]);
-}
-function resolveChatCollaborationMode(meta: Record<string, unknown> | undefined): CollaborationMode {
-  return normalizeCollaborationMode(meta?.collaboration_mode);
 }
 function mergePromptModeBizParams(
   bizParams: Record<string, unknown> | undefined,
   promptMode: PromptMode,
-  collaborationMode: CollaborationMode,
 ): Record<string, unknown> {
   const merged: Record<string, unknown> = bizParams ? { ...bizParams } : {};
   merged[PROMPT_MODE_META_KEY] = promptMode;
-  void collaborationMode;
-  delete merged.collaboration_mode;
   return merged;
-}
-function syncCollaborationModeControlState(): void {
-  const enabled = false;
-  const collaborationModeLabel = chatCollaborationModeSelect.closest<HTMLElement>(".chat-prompt-mode-toggle");
-  chatCollaborationModeSelect.disabled = !enabled;
-  chatCollaborationModeSelect.setAttribute("aria-disabled", enabled ? "false" : "true");
-  if (collaborationModeLabel) {
-    collaborationModeLabel.hidden = !enabled;
-    collaborationModeLabel.setAttribute("aria-hidden", enabled ? "false" : "true");
-  }
 }
 function setActivePromptMode(nextMode: PromptMode, options: { announce?: boolean } = {}): void {
   const normalized = normalizePromptMode(nextMode);
@@ -1174,44 +1919,21 @@ function setActivePromptMode(nextMode: PromptMode, options: { announce?: boolean
   }
   renderComposerTokenEstimate();
 }
-function setActiveCollaborationMode(nextMode: CollaborationMode, options: { announce?: boolean } = {}): void {
-  const normalized = normalizeCollaborationMode(nextMode);
-  const changed = state.activeCollaborationMode !== normalized;
-  state.activeCollaborationMode = normalized;
-  const active = state.chats.find((chat) => chat.id === state.activeChatId);
-  if (active) {
-    if (!active.meta) {
-      active.meta = {};
-    }
-    active.meta.collaboration_mode = normalized;
-  }
-  renderChatHeader();
-  if (options.announce && changed) {
-    let statusKey: I18nKey = "status.collaborationModeDefaultEnabled";
-    if (normalized === "plan") {
-      statusKey = "status.collaborationModePlanEnabled";
-    } else if (normalized === "execute") {
-      statusKey = "status.collaborationModeExecuteEnabled";
-    } else if (normalized === "pair_programming") {
-      statusKey = "status.collaborationModePairProgrammingEnabled";
-    }
-    setStatus(t(statusKey), "info");
-  }
-  renderComposerTokenEstimate();
-}
 function renderChatHeader(): void {
   const active = state.chats.find((chat) => chat.id === state.activeChatId);
   if (active) {
     state.activePromptMode = resolveChatPromptMode(active.meta);
-    state.activeCollaborationMode = resolveChatCollaborationMode(active.meta);
   }
   chatTitle.textContent = active ? active.name : t("chat.draftTitle");
   const sessionId = state.activeSessionId;
   chatSession.textContent = sessionId;
   chatSession.title = sessionId;
   chatPromptModeSelect.value = state.activePromptMode;
-  chatCollaborationModeSelect.value = state.activeCollaborationMode;
-  syncCollaborationModeControlState();
+  chatPlanModeSwitch.checked = state.planModeEnabled;
+  chatPlanStageBadge.textContent = state.planModeEnabled ? resolvePlanStageLabel(state.planModeState) : "";
+  chatPlanStageBadge.hidden = !state.planModeEnabled;
+  updateComposerPlaceholder();
+  renderPlanPanel();
 }
 function syncActiveChatSelections(): void {
   const activeChatID = state.activeChatId ?? "";
@@ -1293,7 +2015,7 @@ function handleToolCallEvent(event: AgentStreamEvent, assistantID: string): void
 }
 interface RequestUserInputQuestionOption {
   label: string;
-  description: string;
+  description?: string;
 }
 interface RequestUserInputQuestion {
   id: string;
@@ -1321,7 +2043,10 @@ async function maybeHandleRequestUserInputToolCall(event: AgentStreamEvent): Pro
   handledRequestUserInputRequests.add(requestID);
 
   const questions = parseRequestUserInputQuestions(input.questions);
-  const answers = promptRequestUserInputAnswers(questions) ?? {};
+  const answers = await askQuestionsWithModal(questions);
+  if (answers === null) {
+    setStatus(t("status.requestUserInputCancelled"), "info");
+  }
   try {
     await requestJSON<{ accepted?: boolean; request_id?: string }>("/agent/tool-input-answer", {
       method: "POST",
@@ -1330,7 +2055,7 @@ async function maybeHandleRequestUserInputToolCall(event: AgentStreamEvent): Pro
         session_id: state.activeSessionId,
         user_id: state.userId,
         channel: WEB_CHAT_CHANNEL,
-        answers,
+        answers: answers ?? {},
       },
     });
   } catch (error) {
@@ -1343,17 +2068,22 @@ function parseRequestUserInputQuestions(raw: unknown): RequestUserInputQuestion[
     return [];
   }
   const out: RequestUserInputQuestion[] = [];
+  const seenIDs = new Set<string>();
   for (const item of raw) {
     if (!item || typeof item !== "object") {
       continue;
     }
     const row = item as Record<string, unknown>;
-    const id = typeof row.id === "string" ? row.id.trim() : "";
-    const header = typeof row.header === "string" ? row.header.trim() : "";
     const question = typeof row.question === "string" ? row.question.trim() : "";
-    if (id === "" || header === "" || question === "") {
+    if (question === "") {
       continue;
     }
+    const fallbackIndex = out.length + 1;
+    const idSeed = typeof row.id === "string" ? row.id.trim() : "";
+    const id = dedupeQuestionID(idSeed !== "" ? idSeed : defaultQuestionID(fallbackIndex), seenIDs);
+    seenIDs.add(id);
+    const headerSeed = typeof row.header === "string" ? row.header.trim() : "";
+    const header = headerSeed !== "" ? headerSeed : defaultQuestionHeader(fallbackIndex);
     const options = parseRequestUserInputQuestionOptions(row.options);
     out.push({
       id,
@@ -1369,6 +2099,7 @@ function parseRequestUserInputQuestionOptions(raw: unknown): RequestUserInputQue
     return [];
   }
   const out: RequestUserInputQuestionOption[] = [];
+  const seenLabels = new Set<string>();
   for (const item of raw) {
     if (!item || typeof item !== "object") {
       continue;
@@ -1376,57 +2107,175 @@ function parseRequestUserInputQuestionOptions(raw: unknown): RequestUserInputQue
     const row = item as Record<string, unknown>;
     const label = typeof row.label === "string" ? row.label.trim() : "";
     const description = typeof row.description === "string" ? row.description.trim() : "";
-    if (label === "" || description === "") {
+    if (label === "") {
       continue;
     }
-    out.push({ label, description });
+    const normalizedLabel = label.toLowerCase();
+    if (seenLabels.has(normalizedLabel)) {
+      continue;
+    }
+    seenLabels.add(normalizedLabel);
+    out.push(description === "" ? { label } : { label, description });
   }
   return out;
 }
-function promptRequestUserInputAnswers(
+function setRequestUserInputModalOpen(open: boolean): void {
+  requestUserInputModal.classList.toggle("is-hidden", !open);
+  requestUserInputModal.setAttribute("aria-hidden", String(!open));
+}
+function askQuestionsWithModal(
   questions: RequestUserInputQuestion[],
-): Record<string, RequestUserInputAnswer> | null {
+): Promise<Record<string, RequestUserInputAnswer> | null> {
+  const task = requestUserInputPromptChain.then(() => askQuestionsWithModalNow(questions));
+  requestUserInputPromptChain = task.catch(() => undefined);
+  return task;
+}
+async function askQuestionsWithModalNow(
+  questions: RequestUserInputQuestion[],
+): Promise<Record<string, RequestUserInputAnswer> | null> {
   const answers: Record<string, RequestUserInputAnswer> = {};
   for (let index = 0; index < questions.length; index += 1) {
     const question = questions[index];
-    const promptText = formatRequestUserInputPrompt(question, index, questions.length);
-    const raw = window.prompt(promptText);
-    if (raw === null) {
+    const picked = await askSingleQuestionWithModal(question, index, questions.length);
+    if (picked === null) {
       return null;
     }
-    const parsed = raw
-      .split(",")
-      .map((item) => item.trim())
-      .filter((item) => item !== "");
-    if (parsed.length > 0) {
-      answers[question.id] = { answers: parsed };
-      continue;
-    }
-    if (question.options.length > 0) {
-      answers[question.id] = { answers: [question.options[0].label] };
-    } else {
-      answers[question.id] = { answers: [] };
+    if (picked.length > 0) {
+      answers[question.id] = { answers: picked };
     }
   }
   return answers;
 }
-function formatRequestUserInputPrompt(
+function askSingleQuestionWithModal(
   question: RequestUserInputQuestion,
   index: number,
   total: number,
-): string {
-  const lines: string[] = [
-    `[${index + 1}/${total}] ${question.header}`,
-    question.question,
-  ];
-  if (question.options.length > 0) {
-    lines.push("可选项：");
-    question.options.forEach((option, optionIndex) => {
-      lines.push(`${optionIndex + 1}. ${option.label} - ${option.description}`);
+): Promise<string[] | null> {
+  return new Promise((resolve) => {
+    let selectedOption = question.options[0]?.label ?? "";
+    const optionButtons: HTMLButtonElement[] = [];
+    const current = index + 1;
+
+    const syncOptionSelectionState = (): void => {
+      optionButtons.forEach((button) => {
+        const isSelected = (button.dataset.optionLabel ?? "") === selectedOption;
+        button.classList.toggle("is-selected", isSelected);
+        button.setAttribute("aria-pressed", String(isSelected));
+      });
+    };
+
+    const cleanup = (): void => {
+      requestUserInputModal.removeEventListener("click", onModalClick);
+      requestUserInputCancelButton.removeEventListener("click", onCancel);
+      requestUserInputSubmitButton.removeEventListener("click", onSubmit);
+      document.removeEventListener("keydown", onKeyDown);
+      requestUserInputModalOptions.innerHTML = "";
+      requestUserInputModalCustomInput.value = "";
+      setRequestUserInputModalOpen(false);
+    };
+
+    const finalize = (value: string[] | null): void => {
+      cleanup();
+      resolve(value);
+    };
+
+    const onModalClick = (event: Event): void => {
+      const target = event.target;
+      if (!(target instanceof Element)) {
+        return;
+      }
+      if (target.closest("[data-request-user-input-close=\"true\"]")) {
+        finalize(null);
+      }
+    };
+
+    const onCancel = (event: Event): void => {
+      event.preventDefault();
+      finalize(null);
+    };
+
+    const onSubmit = (event: Event): void => {
+      event.preventDefault();
+      const answers: string[] = [];
+      if (selectedOption !== "") {
+        answers.push(selectedOption);
+      }
+      const customInput = requestUserInputModalCustomInput.value.trim();
+      if (customInput !== "") {
+        answers.push(customInput);
+      }
+      const normalizedAnswers = toStringArray(answers);
+      if (normalizedAnswers.length === 0 && question.options.length > 0) {
+        finalize([question.options[0].label]);
+        return;
+      }
+      finalize(normalizedAnswers);
+    };
+
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key !== "Escape") {
+        return;
+      }
+      if (requestUserInputModal.classList.contains("is-hidden")) {
+        return;
+      }
+      event.preventDefault();
+      finalize(null);
+    };
+
+    requestUserInputModalProgress.textContent = t("chat.userInputProgress", {
+      current,
+      total,
     });
-  }
-  lines.push("输入回答（可用逗号分隔多个答案）");
-  return lines.join("\n");
+    requestUserInputModalTitle.textContent = question.header;
+    requestUserInputModalQuestion.textContent = question.question;
+    requestUserInputModalOptions.innerHTML = "";
+    requestUserInputModalCustomInput.value = "";
+
+    question.options.forEach((option) => {
+      const row = document.createElement("li");
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "request-user-input-modal-option-btn";
+      button.dataset.optionLabel = option.label;
+
+      const label = document.createElement("span");
+      label.className = "request-user-input-modal-option-label";
+      label.textContent = option.label;
+      button.appendChild(label);
+
+      if (option.description) {
+        const desc = document.createElement("span");
+        desc.className = "request-user-input-modal-option-desc";
+        desc.textContent = option.description;
+        button.appendChild(desc);
+      }
+
+      button.addEventListener("click", () => {
+        selectedOption = option.label;
+        syncOptionSelectionState();
+      });
+
+      optionButtons.push(button);
+      row.appendChild(button);
+      requestUserInputModalOptions.appendChild(row);
+    });
+
+    requestUserInputModalOptions.hidden = question.options.length === 0;
+    syncOptionSelectionState();
+
+    requestUserInputModal.addEventListener("click", onModalClick);
+    requestUserInputCancelButton.addEventListener("click", onCancel);
+    requestUserInputSubmitButton.addEventListener("click", onSubmit);
+    document.addEventListener("keydown", onKeyDown);
+
+    setRequestUserInputModalOpen(true);
+    if (optionButtons.length > 0) {
+      optionButtons[0].focus();
+    } else {
+      requestUserInputModalCustomInput.focus();
+    }
+  });
 }
 function appendToolCallNoticeToAssistant(assistantID: string, notice: ViewToolCallNotice): void {
   const target = state.messages.find((item) => item.id === assistantID);
@@ -1525,12 +2374,140 @@ function formatToolCallRaw(event: AgentStreamEvent): string {
   }
   return "";
 }
+
+function normalizePlanStateResponsePayload(raw: unknown): PlanStateResponse | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return null;
+  }
+  const row = raw as Record<string, unknown>;
+  if (row.plan_mode_enabled !== true && row.plan_mode_enabled !== false) {
+    return null;
+  }
+  const planSpec = normalizePlanSpec(row.plan_spec);
+  return {
+    chat_id: typeof row.chat_id === "string" ? row.chat_id.trim() : (state.activeChatId ?? ""),
+    plan_mode_enabled: row.plan_mode_enabled === true,
+    plan_mode_state: normalizePlanModeState(row.plan_mode_state),
+    plan_spec: planSpec ?? undefined,
+    clarify_asked_count: typeof row.clarify_asked_count === "number" ? Math.max(0, Math.floor(row.clarify_asked_count)) : 0,
+    clarify_max_count: typeof row.clarify_max_count === "number"
+      ? Math.max(1, Math.floor(row.clarify_max_count))
+      : PLAN_MODE_DEFAULT_MAX_COUNT,
+    clarify_unresolved: toStringArray(row.clarify_unresolved),
+    plan_execution_session_id: typeof row.plan_execution_session_id === "string" ? row.plan_execution_session_id.trim() : "",
+    plan_source_prompt_version: typeof row.plan_source_prompt_version === "string" ? row.plan_source_prompt_version.trim() : "",
+    questions: normalizePlanQuestions(row.questions),
+  };
+}
+
+function parseOutputPlanToolResult(raw: string): PlanStateResponse | null {
+  const text = raw.trim();
+  if (text === "") {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(text) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return null;
+    }
+    const root = parsed as Record<string, unknown>;
+    const nested = root.plan_state;
+    if (nested && typeof nested === "object" && !Array.isArray(nested)) {
+      return normalizePlanStateResponsePayload(nested);
+    }
+    return normalizePlanStateResponsePayload(parsed);
+  } catch {
+    return null;
+  }
+}
+
+function buildOutputPlanPromptKey(response: PlanStateResponse): string {
+  const chatID = response.chat_id.trim();
+  const revision = response.plan_spec?.revision ?? -1;
+  const updatedAt = response.plan_spec?.updated_at ?? "";
+  const goal = response.plan_spec?.goal ?? "";
+  return `${chatID}|${revision}|${updatedAt}|${goal}`;
+}
+
+function shouldExecuteOutputPlan(
+  answers: Record<string, RequestUserInputAnswer> | null,
+  executeOptionLabel: string,
+): boolean {
+  if (!answers) {
+    return false;
+  }
+  const picked = answers[OUTPUT_PLAN_EXECUTE_QUESTION_ID]?.answers[0] ?? "";
+  return picked.trim() === executeOptionLabel;
+}
+
+async function maybePromptExecutePlanFromOutputPlan(response: PlanStateResponse): Promise<void> {
+  if (!response.plan_mode_enabled || response.plan_mode_state !== "planning_ready" || !response.plan_spec) {
+    return;
+  }
+  const key = buildOutputPlanPromptKey(response);
+  if (key !== "" && handledOutputPlanPromptKeys.has(key)) {
+    return;
+  }
+  if (outputPlanPromptInFlight) {
+    return;
+  }
+  if (key !== "") {
+    handledOutputPlanPromptKeys.add(key);
+  }
+  outputPlanPromptInFlight = true;
+  try {
+    const holdOptionLabel = t("chat.outputPlanExecuteOptionHold");
+    const executeOptionLabel = t("chat.outputPlanExecuteOptionExecute");
+    const answers = await askQuestionsWithModal([{
+      id: OUTPUT_PLAN_EXECUTE_QUESTION_ID,
+      header: t("chat.outputPlanExecutePromptHeader"),
+      question: t("chat.outputPlanExecutePromptQuestion"),
+      options: [
+        {
+          label: holdOptionLabel,
+          description: t("chat.outputPlanExecuteOptionHoldDesc"),
+        },
+        {
+          label: executeOptionLabel,
+          description: t("chat.outputPlanExecuteOptionExecuteDesc"),
+        },
+      ],
+    }]);
+    if (!shouldExecuteOutputPlan(answers, executeOptionLabel)) {
+      setStatus(t("status.outputPlanExecutionDeferred"), "info");
+      return;
+    }
+    await waitForSendingIdle();
+    await executePlan({ autoKickoff: true });
+  } catch (error) {
+    setStatus(asErrorMessage(error), "error");
+  } finally {
+    outputPlanPromptInFlight = false;
+  }
+}
+
+function maybeApplyOutputPlanToolResult(event: AgentStreamEvent, toolName: string): void {
+  if (toolName !== "output_plan") {
+    return;
+  }
+  const output = typeof event.tool_result?.output === "string" ? event.tool_result.output : "";
+  const summary = typeof event.tool_result?.summary === "string" ? event.tool_result.summary : "";
+  const response = parseOutputPlanToolResult(output) ?? parseOutputPlanToolResult(summary);
+  if (!response) {
+    return;
+  }
+  applyPlanStateResponse(response);
+  setStatus(t("status.planReady"), "info");
+  void maybePromptExecutePlanFromOutputPlan(response);
+}
+
 function applyToolResultEvent(event: AgentStreamEvent, assistantID: string): void {
   const raw = typeof event.raw === "string" ? event.raw : "";
   const toolName = normalizeToolName(event.tool_result?.name) || parseToolNameFromToolCallRaw(raw);
   if (toolName === "") {
     return;
   }
+  maybeApplyOutputPlanToolResult(event, toolName);
   const output = formatToolResultOutput(event.tool_result);
   const target = state.messages.find((item) => item.id === assistantID);
   if (!target) {
@@ -1703,14 +2680,16 @@ function normalizeTimeline(entries: ViewMessageTimelineEntry[]): ViewMessageTime
     startDraftSession,
     sendMessage,
     pauseReply,
+    togglePlanMode,
+    submitPlanClarifyAnswers,
+    revisePlan,
+    executePlan,
     isFileDragEvent,
     clearComposerFileDragState,
     handleComposerAttachmentFiles,
     extractDroppedFilePaths,
     normalizePromptMode,
-    normalizeCollaborationMode,
     setActivePromptMode,
-    setActiveCollaborationMode,
     renderChatHeader,
     renderChatList,
     renderSearchChatResults,

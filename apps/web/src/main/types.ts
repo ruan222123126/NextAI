@@ -13,7 +13,76 @@ import type {
 } from "@nextai/sdk-ts";
 
 export type PromptMode = "default";
-export type CollaborationMode = "default" | "plan" | "execute" | "pair_programming";
+export type PlanModeState =
+  | "off"
+  | "planning_intake"
+  | "planning_clarify"
+  | "planning_ready"
+  | "planning_revising"
+  | "executing"
+  | "done"
+  | "aborted";
+export type PlanTaskStatus = "pending" | "in_progress" | "completed" | "blocked";
+
+export interface PlanTask {
+  id: string;
+  title: string;
+  description: string;
+  depends_on: string[];
+  status: PlanTaskStatus;
+  deliverables: string[];
+  verification: string[];
+}
+
+export interface PlanRisk {
+  id: string;
+  title: string;
+  description: string;
+  mitigation: string;
+}
+
+export interface PlanSpec {
+  goal: string;
+  scope_in: string[];
+  scope_out: string[];
+  constraints: string[];
+  assumptions: string[];
+  tasks: PlanTask[];
+  acceptance_criteria: string[];
+  risks: PlanRisk[];
+  summary_for_execution: string;
+  revision: number;
+  updated_at: string;
+}
+
+export interface PlanQuestionOption {
+  label: string;
+  description?: string;
+}
+
+export interface PlanQuestion {
+  id: string;
+  header: string;
+  question: string;
+  options?: PlanQuestionOption[];
+}
+
+export interface PlanStateResponse {
+  chat_id: string;
+  plan_mode_enabled: boolean;
+  plan_mode_state: PlanModeState;
+  plan_spec?: PlanSpec;
+  clarify_asked_count: number;
+  clarify_max_count: number;
+  clarify_unresolved: string[];
+  plan_execution_session_id?: string;
+  plan_source_prompt_version?: string;
+  questions?: PlanQuestion[];
+}
+
+export interface PlanAnswerValue {
+  answers: string[];
+}
 
 export type ChatSpec = ContractChatSpec & { updated_at: string };
 
@@ -336,7 +405,15 @@ export interface WebAppState {
   activeChatId: string | null;
   activeSessionId: string;
   activePromptMode: PromptMode;
-  activeCollaborationMode: CollaborationMode;
+  planModeEnabled: boolean;
+  planModeState: PlanModeState;
+  planSpec: PlanSpec | null;
+  planClarifyAskedCount: number;
+  planClarifyMaxCount: number;
+  planClarifyUnresolved: string[];
+  planClarifyQuestions: PlanQuestion[];
+  planExecutionSessionId: string;
+  planSourcePromptVersion: string;
   messages: ViewMessage[];
   messageOutputOrder: number;
   sending: boolean;
@@ -432,7 +509,36 @@ export interface WebAppContext {
   chatTitle: HTMLElement;
   chatSession: HTMLElement;
   chatPromptModeSelect: HTMLSelectElement;
-  chatCollaborationModeSelect: HTMLSelectElement;
+  chatPlanModeSwitch: HTMLInputElement;
+  chatPlanStageBadge: HTMLElement;
+  planModePanel: HTMLElement;
+  planModeHint: HTMLElement;
+  planClarifyCounter: HTMLElement;
+  planQuestionsWrap: HTMLElement;
+  planClarifyForm: HTMLElement;
+  planClarifySubmitButton: HTMLButtonElement;
+  planSpecWrap: HTMLElement;
+  planGoalValue: HTMLElement;
+  planScopeInList: HTMLUListElement;
+  planScopeOutList: HTMLUListElement;
+  planConstraintsList: HTMLUListElement;
+  planAssumptionsList: HTMLUListElement;
+  planTasksList: HTMLUListElement;
+  planAcceptanceList: HTMLUListElement;
+  planRisksList: HTMLUListElement;
+  planSummaryValue: HTMLElement;
+  planReviseInput: HTMLTextAreaElement;
+  planReviseButton: HTMLButtonElement;
+  planExecuteButton: HTMLButtonElement;
+  planDisableButton: HTMLButtonElement;
+  requestUserInputModal: HTMLElement;
+  requestUserInputModalTitle: HTMLElement;
+  requestUserInputModalProgress: HTMLElement;
+  requestUserInputModalQuestion: HTMLElement;
+  requestUserInputModalOptions: HTMLUListElement;
+  requestUserInputModalCustomInput: HTMLTextAreaElement;
+  requestUserInputCancelButton: HTMLButtonElement;
+  requestUserInputSubmitButton: HTMLButtonElement;
   searchChatInput: HTMLInputElement;
   searchChatResults: HTMLUListElement;
   messageList: HTMLUListElement;
@@ -590,7 +696,36 @@ export type ChatDomainContext = Pick<WebAppContext,
   | "chatTitle"
   | "chatSession"
   | "chatPromptModeSelect"
-  | "chatCollaborationModeSelect"
+  | "chatPlanModeSwitch"
+  | "chatPlanStageBadge"
+  | "planModePanel"
+  | "planModeHint"
+  | "planClarifyCounter"
+  | "planQuestionsWrap"
+  | "planClarifyForm"
+  | "planClarifySubmitButton"
+  | "planSpecWrap"
+  | "planGoalValue"
+  | "planScopeInList"
+  | "planScopeOutList"
+  | "planConstraintsList"
+  | "planAssumptionsList"
+  | "planTasksList"
+  | "planAcceptanceList"
+  | "planRisksList"
+  | "planSummaryValue"
+  | "planReviseInput"
+  | "planReviseButton"
+  | "planExecuteButton"
+  | "planDisableButton"
+  | "requestUserInputModal"
+  | "requestUserInputModalTitle"
+  | "requestUserInputModalProgress"
+  | "requestUserInputModalQuestion"
+  | "requestUserInputModalOptions"
+  | "requestUserInputModalCustomInput"
+  | "requestUserInputCancelButton"
+  | "requestUserInputSubmitButton"
   | "searchChatInput"
   | "searchChatResults"
   | "messageList"
