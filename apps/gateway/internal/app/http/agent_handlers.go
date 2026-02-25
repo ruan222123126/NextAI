@@ -15,6 +15,12 @@ type AgentHandlers struct {
 	DeleteChat            stdhttp.HandlerFunc
 	ProcessAgent          stdhttp.HandlerFunc
 	GetAgentSystemLayers  stdhttp.HandlerFunc
+	TogglePlanMode        stdhttp.HandlerFunc
+	CompilePlan           stdhttp.HandlerFunc
+	SubmitPlanClarify     stdhttp.HandlerFunc
+	RevisePlan            stdhttp.HandlerFunc
+	ExecutePlan           stdhttp.HandlerFunc
+	GetPlan               stdhttp.HandlerFunc
 	BootstrapSession      stdhttp.HandlerFunc
 	SetSessionModel       stdhttp.HandlerFunc
 	PreviewMutation       stdhttp.HandlerFunc
@@ -36,6 +42,12 @@ func registerAgentRoutes(api chi.Router, handlers AgentHandlers) {
 
 	api.Post("/agent/process", mustHandler("process-agent", handlers.ProcessAgent))
 	api.Get("/agent/system-layers", mustHandler("get-agent-system-layers", handlers.GetAgentSystemLayers))
+	api.Post("/agent/plan/toggle", mustHandler("toggle-plan-mode", handlers.TogglePlanMode))
+	api.Post("/agent/plan/compile", mustHandler("compile-plan", handlers.CompilePlan))
+	api.Post("/agent/plan/clarify/answer", mustHandler("submit-plan-clarify", handlers.SubmitPlanClarify))
+	api.Post("/agent/plan/revise", mustHandler("revise-plan", handlers.RevisePlan))
+	api.Post("/agent/plan/execute", mustHandler("execute-plan", handlers.ExecutePlan))
+	api.Get("/agent/plan/{chat_id}", mustHandler("get-plan", handlers.GetPlan))
 	api.Post("/agent/self/sessions/bootstrap", mustHandler("selfops-bootstrap-session", handlers.BootstrapSession))
 	api.Put("/agent/self/sessions/{session_id}/model", mustHandler("selfops-set-session-model", handlers.SetSessionModel))
 	api.Post("/agent/self/config-mutations/preview", mustHandler("selfops-preview-mutation", handlers.PreviewMutation))

@@ -1042,6 +1042,200 @@ func TestContractRegressionModelsEndpointErrors(t *testing.T) {
 	}
 }
 
+func TestContractRegressionNineAPIBaseline(t *testing.T) {
+	srv := newTestServer(t)
+
+	processBody, err := json.Marshal(domain.AgentProcessRequest{
+		Input: []domain.AgentInputMessage{
+			{
+				Role:    "user",
+				Type:    "message",
+				Content: []domain.RuntimeContent{{Type: "text", Text: "nine-api baseline"}},
+			},
+		},
+		SessionID: "s-nine-api",
+		UserID:    "u-nine-api",
+		Channel:   "console",
+		Stream:    false,
+	})
+	if err != nil {
+		t.Fatalf("marshal process body failed: %v", err)
+	}
+
+	const createChatBody = `{
+		"id":"chat-nine-api",
+		"name":"nine-api-chat",
+		"session_id":"s-nine-api",
+		"user_id":"u-nine-api",
+		"channel":"console"
+	}`
+
+	type apiCase struct {
+		name   string
+		method string
+		path   string
+		body   string
+		assert func(t *testing.T, w *httptest.ResponseRecorder)
+	}
+
+	cases := []apiCase{
+		{
+			name:   "healthz",
+			method: http.MethodGet,
+			path:   "/healthz",
+			assert: func(t *testing.T, w *httptest.ResponseRecorder) {
+				t.Helper()
+				if w.Code != http.StatusOK {
+					t.Fatalf("healthz status=%d body=%s", w.Code, w.Body.String())
+				}
+				resp := decodeJSONObject(t, w)
+				ok, exists := resp["ok"].(bool)
+				if !exists || !ok {
+					t.Fatalf("expected ok=true body=%s", w.Body.String())
+				}
+			},
+		},
+		{
+			name:   "runtime_config",
+			method: http.MethodGet,
+			path:   "/runtime-config",
+			assert: func(t *testing.T, w *httptest.ResponseRecorder) {
+				t.Helper()
+				if w.Code != http.StatusOK {
+					t.Fatalf("runtime config status=%d body=%s", w.Code, w.Body.String())
+				}
+				resp := decodeJSONObject(t, w)
+				features := assertObjectField(t, resp, "features")
+				assertObjectHasKeys(t, features, []string{"prompt_templates", "prompt_context_introspect", "codex_mode_v2"})
+			},
+		},
+		{
+			name:   "create_chat",
+			method: http.MethodPost,
+			path:   "/chats",
+			body:   createChatBody,
+			assert: func(t *testing.T, w *httptest.ResponseRecorder) {
+				t.Helper()
+				if w.Code != http.StatusOK {
+					t.Fatalf("create chat status=%d body=%s", w.Code, w.Body.String())
+				}
+				resp := decodeJSONObject(t, w)
+				assertObjectHasKeys(t, resp, []string{"id", "session_id", "user_id", "channel"})
+				if id := assertStringField(t, resp, "id"); id != "chat-nine-api" {
+					t.Fatalf("chat id=%q, want=%q", id, "chat-nine-api")
+				}
+			},
+		},
+		{
+			name:   "list_chats",
+			method: http.MethodGet,
+			path:   "/chats?user_id=u-nine-api&channel=console",
+			assert: func(t *testing.T, w *httptest.ResponseRecorder) {
+				t.Helper()
+				if w.Code != http.StatusOK {
+					t.Fatalf("list chats status=%d body=%s", w.Code, w.Body.String())
+				}
+				chats := decodeJSONArrayObjects(t, w)
+				if len(chats) != 1 {
+					t.Fatalf("expected 1 chat, got=%d body=%s", len(chats), w.Body.String())
+				}
+				if id := assertStringField(t, chats[0], "id"); id != "chat-nine-api" {
+					t.Fatalf("chat id=%q, want=%q", id, "chat-nine-api")
+				}
+			},
+		},
+		{
+			name:   "process_agent",
+			method: http.MethodPost,
+			path:   "/agent/process",
+			body:   string(processBody),
+			assert: func(t *testing.T, w *httptest.ResponseRecorder) {
+				t.Helper()
+				if w.Code != http.StatusOK {
+					t.Fatalf("process agent status=%d body=%s", w.Code, w.Body.String())
+				}
+				resp := decodeJSONObject(t, w)
+				reply := assertStringField(t, resp, "reply")
+				if strings.TrimSpace(reply) == "" {
+					t.Fatalf("reply should not be empty, body=%s", w.Body.String())
+				}
+			},
+		},
+		{
+			name:   "list_cron_jobs",
+			method: http.MethodGet,
+			path:   "/cron/jobs",
+			assert: func(t *testing.T, w *httptest.ResponseRecorder) {
+				t.Helper()
+				if w.Code != http.StatusOK {
+					t.Fatalf("list cron jobs status=%d body=%s", w.Code, w.Body.String())
+				}
+				jobs := decodeJSONArrayObjects(t, w)
+				if len(jobs) == 0 {
+					t.Fatalf("expected non-empty cron jobs, body=%s", w.Body.String())
+				}
+			},
+		},
+		{
+			name:   "list_workspace_files",
+			method: http.MethodGet,
+			path:   "/workspace/files",
+			assert: func(t *testing.T, w *httptest.ResponseRecorder) {
+				t.Helper()
+				if w.Code != http.StatusOK {
+					t.Fatalf("list workspace files status=%d body=%s", w.Code, w.Body.String())
+				}
+				resp := decodeJSONObject(t, w)
+				if _, ok := resp["files"].([]interface{}); !ok {
+					t.Fatalf("files field should be array, body=%s", w.Body.String())
+				}
+			},
+		},
+		{
+			name:   "models_catalog",
+			method: http.MethodGet,
+			path:   "/models/catalog",
+			assert: func(t *testing.T, w *httptest.ResponseRecorder) {
+				t.Helper()
+				if w.Code != http.StatusOK {
+					t.Fatalf("models catalog status=%d body=%s", w.Code, w.Body.String())
+				}
+				catalog := decodeJSONObject(t, w)
+				assertObjectHasKeys(t, catalog, []string{"providers", "defaults", "active_llm", "provider_types"})
+			},
+		},
+		{
+			name:   "list_channel_types",
+			method: http.MethodGet,
+			path:   "/config/channels/types",
+			assert: func(t *testing.T, w *httptest.ResponseRecorder) {
+				t.Helper()
+				if w.Code != http.StatusOK {
+					t.Fatalf("list channel types status=%d body=%s", w.Code, w.Body.String())
+				}
+				var types []string
+				if err := json.Unmarshal(w.Body.Bytes(), &types); err != nil {
+					t.Fatalf("decode channel types failed: %v body=%s", err, w.Body.String())
+				}
+				if !containsString(types, "console") {
+					t.Fatalf("expected channel type \"console\", got=%v", types)
+				}
+			},
+		},
+	}
+	if len(cases) != 9 {
+		t.Fatalf("critical api baseline cases=%d, want=9", len(cases))
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			w := callJSONEndpoint(srv, tc.method, tc.path, tc.body)
+			tc.assert(t, w)
+		})
+	}
+}
+
 func TestContractRegressionListChatsResponseShape(t *testing.T) {
 	srv := newTestServer(t)
 

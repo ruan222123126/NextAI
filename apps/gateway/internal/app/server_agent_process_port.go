@@ -98,7 +98,7 @@ func (s *Server) processAgentCore(
 		MCPTools:     []turnRuntimeToolSpec{},
 		DynamicTools: []turnRuntimeToolSpec{},
 	}
-	sessionCollaborationMode := collaborationModeDefaultName
+	activePlanSnapshot := defaultPlanModeSnapshot()
 	if !hasRequestPromptMode {
 		effectivePromptMode = promptModeDefault
 		s.store.Read(func(state *repo.State) {
@@ -108,7 +108,7 @@ func (s *Server) processAgentCore(
 				}
 				effectivePromptMode = resolvePromptModeFromChatMeta(chat.Meta)
 				sessionRuntimeToolSet = parseTurnRuntimeToolSetFromChatMeta(chat.Meta)
-				sessionCollaborationMode = resolveCollaborationModeFromChatMeta(chat.Meta)
+				activePlanSnapshot = parsePlanModeSnapshot(chat.Meta)
 				return
 			}
 		})
@@ -119,34 +119,25 @@ func (s *Server) processAgentCore(
 					continue
 				}
 				sessionRuntimeToolSet = parseTurnRuntimeToolSetFromChatMeta(chat.Meta)
-				sessionCollaborationMode = resolveCollaborationModeFromChatMeta(chat.Meta)
+				activePlanSnapshot = parsePlanModeSnapshot(chat.Meta)
 				return
 			}
 		})
-	}
-
-	resolvedCollaborationMode, collaborationTransition, err := resolveTurnCollaborationMode(
-		effectivePromptMode,
-		sessionCollaborationMode,
-		req.BizParams,
-	)
-	if err != nil {
-		return domain.AgentProcessResponse{}, &ports.AgentProcessError{
-			Status:  http.StatusBadRequest,
-			Code:    "invalid_request",
-			Message: err.Error(),
-		}
 	}
 
 	runtimeSnapshot := s.buildTurnRuntimeSnapshotForInput(
 		effectivePromptMode,
 		req.Input,
 		req.SessionID,
-		resolvedCollaborationMode,
-		collaborationTransition.Event,
 	)
 	turnRuntimeToolSet := parseTurnRuntimeToolSetFromBizParams(req.BizParams)
 	runtimeSnapshot = s.applyRuntimeToolSetToSnapshot(runtimeSnapshot, sessionRuntimeToolSet, turnRuntimeToolSet)
+	if shouldInjectPlanSystemPromptLayers(runtimeSnapshot.Mode.PromptMode, activePlanSnapshot) {
+		runtimeSnapshot.AvailableTools = mergeTurnRuntimeToolNames(runtimeSnapshot.AvailableTools, []string{
+			"request_user_input",
+			"output_plan",
+		})
+	}
 
 	systemLayers, err := s.buildSystemLayersForTurnRuntime(runtimeSnapshot)
 	if err != nil {
@@ -156,6 +147,17 @@ func (s *Server) processAgentCore(
 			Code:    errorCode,
 			Message: errorMessage,
 		}
+	}
+	if shouldInjectPlanSystemPromptLayers(runtimeSnapshot.Mode.PromptMode, activePlanSnapshot) {
+		planSystemLayers, planErr := s.buildPlanSystemPromptLayers()
+		if planErr != nil {
+			return domain.AgentProcessResponse{}, &ports.AgentProcessError{
+				Status:  http.StatusServiceUnavailable,
+				Code:    "plan_prompt_unconfigured",
+				Message: "plan prompt is not configured",
+			}
+		}
+		systemLayers = planSystemLayers
 	}
 
 	cronChatMeta := cronChatMetaFromBizParams(req.BizParams)
@@ -196,19 +198,6 @@ func (s *Server) processAgentCore(
 			}
 			state.Chats[chatID] = chat
 		}
-		if runtimeSnapshot.Mode.PromptMode == promptModeCodex {
-			chat := state.Chats[chatID]
-			if chat.Meta == nil {
-				chat.Meta = map[string]interface{}{}
-			}
-			chat.Meta[chatMetaCollaborationModeKey] = runtimeSnapshot.Mode.CollaborationMode
-			if collaborationTransition.Event != "" {
-				chat.Meta[chatMetaCollaborationLastEventKey] = collaborationTransition.Event
-				chat.Meta[chatMetaCollaborationEventSourceKey] = collaborationTransition.Source
-				chat.Meta[chatMetaCollaborationUpdatedAtKey] = nowISO()
-			}
-			state.Chats[chatID] = chat
-		}
 		for _, input := range req.Input {
 			state.Histories[chatID] = append(state.Histories[chatID], domain.RuntimeMessage{
 				ID:      newID("msg"),
@@ -220,7 +209,7 @@ func (s *Server) processAgentCore(
 		historyInput = runtimeHistoryToAgentInputMessages(state.Histories[chatID])
 		chatSpec := state.Chats[chatID]
 		activeLLM = resolveChatActiveModelSlot(chatSpec.Meta, state)
-		providerSetting = getProviderSettingByID(state, activeLLM.ProviderID)
+		providerSetting = provider.GetProviderSettingByID(state.Providers, activeLLM.ProviderID)
 		return nil
 	}); err != nil {
 		return domain.AgentProcessResponse{}, &ports.AgentProcessError{
@@ -265,7 +254,7 @@ func (s *Server) processAgentCore(
 				PreviousResponseID: latestProviderResponseIDFromInput(historyInput),
 			}
 		} else {
-			if !providerEnabled(providerSetting) {
+			if !provider.ProviderEnabled(providerSetting) {
 				return domain.AgentProcessResponse{}, &ports.AgentProcessError{
 					Status:  http.StatusBadRequest,
 					Code:    "provider_disabled",
@@ -284,13 +273,13 @@ func (s *Server) processAgentCore(
 			generateConfig = runner.GenerateConfig{
 				ProviderID:         activeLLM.ProviderID,
 				Model:              activeLLM.Model,
-				APIKey:             resolveProviderAPIKey(activeLLM.ProviderID, providerSetting),
-				BaseURL:            resolveProviderBaseURL(activeLLM.ProviderID, providerSetting),
+				APIKey:             provider.ResolveProviderAPIKey(activeLLM.ProviderID, providerSetting, nil),
+				BaseURL:            provider.ResolveProviderBaseURL(activeLLM.ProviderID, providerSetting, nil),
 				AdapterID:          provider.ResolveAdapter(activeLLM.ProviderID),
-				Headers:            sanitizeStringMap(providerSetting.Headers),
+				Headers:            provider.SanitizeStringMap(providerSetting.Headers),
 				TimeoutMS:          providerSetting.TimeoutMS,
 				ReasoningEffort:    providerSetting.ReasoningEffort,
-				Store:              providerStoreEnabled(providerSetting),
+				Store:              provider.ProviderStoreEnabled(providerSetting),
 				PromptCacheKey:     req.SessionID,
 				PreviousResponseID: latestProviderResponseIDFromInput(historyInput),
 			}
@@ -311,22 +300,28 @@ func (s *Server) processAgentCore(
 	}
 	toolDefinitions := s.listToolDefinitionsForTurnRuntime(runtimeSnapshot)
 
+	reqForProcess := req
+	reqForProcess.BizParams = cloneJSONMap(req.BizParams)
+	if reqForProcess.BizParams == nil {
+		reqForProcess.BizParams = map[string]interface{}{}
+	}
+	reqForProcess.BizParams[chatMetaPlanModeEnabledKey] = activePlanSnapshot.Enabled
+
 	processResult, processErr := s.getAgentService().Process(
 		withTurnRuntimeToolContext(ctx, runtimeSnapshot),
 		agentservice.ProcessParams{
-			Request: req,
+			Request: reqForProcess,
 			RequestedToolCall: agentservice.ToolCall{
 				Name:  requestedToolCall.Name,
 				Input: requestedToolCall.Input,
 			},
-			HasToolCall:       hasToolCall,
-			Streaming:         streaming,
-			ReplyChunkSize:    replyChunkSizeDefault,
-			GenerateConfig:    generateConfig,
-			EffectiveInput:    effectiveInput,
-			PromptMode:        runtimeSnapshot.Mode.PromptMode,
-			CollaborationMode: runtimeSnapshot.Mode.CollaborationMode,
-			ToolDefinitions:   toolDefinitions,
+			HasToolCall:     hasToolCall,
+			Streaming:       streaming,
+			ReplyChunkSize:  replyChunkSizeDefault,
+			GenerateConfig:  generateConfig,
+			EffectiveInput:  effectiveInput,
+			PromptMode:      runtimeSnapshot.Mode.PromptMode,
+			ToolDefinitions: toolDefinitions,
 		},
 		emitEvent,
 	)

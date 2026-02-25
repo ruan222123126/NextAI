@@ -76,6 +76,92 @@ func TestExecuteUpdatePlanToolCallPersistsPlanSnapshot(t *testing.T) {
 	})
 }
 
+func TestExecuteOutputPlanToolCallPersistsPlanSpec(t *testing.T) {
+	srv := newTestServer(t)
+	const sessionID = "s-output-plan"
+	const userID = "u-output-plan"
+	const channel = "console"
+	const chatID = "chat-output-plan"
+
+	err := srv.store.Write(func(state *repo.State) error {
+		state.Chats[chatID] = domain.ChatSpec{
+			ID:        chatID,
+			Name:      "output-plan",
+			SessionID: sessionID,
+			UserID:    userID,
+			Channel:   channel,
+			CreatedAt: nowISO(),
+			UpdatedAt: nowISO(),
+			Meta: map[string]interface{}{
+				chatMetaPlanModeEnabledKey: true,
+				chatMetaPlanModeStateKey:   planModeStatePlanningIntake,
+			},
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("seed chat failed: %v", err)
+	}
+
+	result, invokeErr := srv.executeOutputPlanToolCall(map[string]interface{}{
+		"plan": map[string]interface{}{
+			"goal": "完成 Plan 模式改造",
+			"tasks": []interface{}{
+				map[string]interface{}{
+					"id":          "task-1",
+					"title":       "改造后端接口",
+					"description": "补齐输出接口并写入状态",
+					"depends_on":  []interface{}{},
+					"status":      "pending",
+					"deliverables": []interface{}{
+						"接口实现",
+					},
+					"verification": []interface{}{
+						"go test 通过",
+					},
+				},
+			},
+			"acceptance_criteria":   []interface{}{"计划可被执行"},
+			"summary_for_execution": "先改后端，再改前端，最后回归。",
+		},
+		requestUserInputMetaSessionIDKey: sessionID,
+		requestUserInputMetaUserIDKey:    userID,
+		requestUserInputMetaChannelKey:   channel,
+	})
+	if invokeErr != nil {
+		t.Fatalf("execute output_plan failed: %v", invokeErr)
+	}
+
+	decoded := map[string]interface{}{}
+	if err := json.Unmarshal([]byte(result), &decoded); err != nil {
+		t.Fatalf("decode output_plan result failed: %v result=%s", err, result)
+	}
+	if accepted, _ := decoded["accepted"].(bool); !accepted {
+		t.Fatalf("expected accepted=true, got=%#v", decoded)
+	}
+	planState, ok := decoded["plan_state"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected plan_state object, got=%#v", decoded["plan_state"])
+	}
+	if state := strings.TrimSpace(stringValue(planState["plan_mode_state"])); state != planModeStatePlanningReady {
+		t.Fatalf("expected plan_mode_state=%q, got=%q", planModeStatePlanningReady, state)
+	}
+
+	srv.store.Read(func(state *repo.State) {
+		chat := state.Chats[chatID]
+		snapshot := parsePlanModeSnapshot(chat.Meta)
+		if !snapshot.Enabled {
+			t.Fatalf("plan mode should stay enabled")
+		}
+		if normalizePlanModeState(snapshot.State) != planModeStatePlanningReady {
+			t.Fatalf("expected planning_ready, got=%q", snapshot.State)
+		}
+		if snapshot.Spec == nil || strings.TrimSpace(snapshot.Spec.Goal) == "" {
+			t.Fatalf("expected persisted plan spec, got=%#v", snapshot.Spec)
+		}
+	})
+}
+
 func TestRequestUserInputToolWaitsForAnswer(t *testing.T) {
 	srv := newTestServer(t)
 	const requestID = "req-rui-1"
@@ -144,6 +230,127 @@ func TestRequestUserInputToolWaitsForAnswer(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for request_user_input result")
+	}
+}
+
+func TestRequestUserInputToolAllowsPlanModeMetaWithoutCollaborationMode(t *testing.T) {
+	srv := newTestServer(t)
+	const requestID = "req-rui-plan-flag"
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	type toolResult struct {
+		reply string
+		err   error
+	}
+	resultCh := make(chan toolResult, 1)
+	go func() {
+		reply, err := srv.executeRequestUserInputToolCall(ctx, map[string]interface{}{
+			"request_id": requestID,
+			"questions": []interface{}{
+				map[string]interface{}{
+					"id":       "scope",
+					"header":   "范围确认",
+					"question": "是否只覆盖核心链路？",
+				},
+			},
+			requestUserInputMetaSessionIDKey:       "s-rui-plan",
+			requestUserInputMetaUserIDKey:          "u-rui-plan",
+			requestUserInputMetaChannelKey:         "console",
+			requestUserInputMetaPlanModeEnabledKey: true,
+		})
+		resultCh <- toolResult{reply: reply, err: err}
+	}()
+
+	waitForPending := time.NewTimer(800 * time.Millisecond)
+	defer waitForPending.Stop()
+	for {
+		srv.userInputMu.Lock()
+		_, exists := srv.pendingUserInput[requestID]
+		srv.userInputMu.Unlock()
+		if exists {
+			break
+		}
+		select {
+		case <-waitForPending.C:
+			t.Fatalf("pending request %q was not registered", requestID)
+		default:
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
+
+	answerReq := httptest.NewRequest(
+		http.MethodPost,
+		"/agent/tool-input-answer",
+		strings.NewReader(`{"request_id":"req-rui-plan-flag","session_id":"s-rui-plan","user_id":"u-rui-plan","channel":"console","answers":{"scope":{"answers":["是"]}}}`),
+	)
+	answerW := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(answerW, answerReq)
+	if answerW.Code != http.StatusOK {
+		t.Fatalf("submit answer status=%d body=%s", answerW.Code, answerW.Body.String())
+	}
+
+	select {
+	case got := <-resultCh:
+		if got.err != nil {
+			t.Fatalf("request_user_input should succeed with plan flag, got err=%v", got.err)
+		}
+		if !strings.Contains(got.reply, `"scope"`) || !strings.Contains(got.reply, `"是"`) {
+			t.Fatalf("unexpected request_user_input result=%s", got.reply)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for request_user_input result")
+	}
+}
+
+func TestParseRequestUserInputArgsAllowsFlexibleQuestionShape(t *testing.T) {
+	args, err := parseRequestUserInputArgs(map[string]interface{}{
+		"questions": []interface{}{
+			map[string]interface{}{
+				"question": "先保交付还是先保性能？",
+				"options": []interface{}{
+					map[string]interface{}{"label": "先保交付"},
+					map[string]interface{}{"label": "先保性能", "description": "允许周期更长"},
+					map[string]interface{}{"label": "先保交付"},
+				},
+			},
+			map[string]interface{}{
+				"id":       "scope",
+				"question": "本轮范围是否包含 Web？",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("parse request_user_input args failed: %v", err)
+	}
+	if len(args.Questions) != 2 {
+		t.Fatalf("questions len=%d want=2", len(args.Questions))
+	}
+
+	first := args.Questions[0]
+	if first.ID != "q1" {
+		t.Fatalf("first id=%q want=q1", first.ID)
+	}
+	if first.Header != "问题 1" {
+		t.Fatalf("first header=%q want=%q", first.Header, "问题 1")
+	}
+	if len(first.Options) != 2 {
+		t.Fatalf("first options len=%d want=2", len(first.Options))
+	}
+	if first.Options[0].Label != "先保交付" {
+		t.Fatalf("first option label=%q want=%q", first.Options[0].Label, "先保交付")
+	}
+	if first.Options[1].Description != "允许周期更长" {
+		t.Fatalf("first option description=%q want=%q", first.Options[1].Description, "允许周期更长")
+	}
+
+	second := args.Questions[1]
+	if second.ID != "scope" {
+		t.Fatalf("second id=%q want=scope", second.ID)
+	}
+	if second.Header != "问题 2" {
+		t.Fatalf("second header=%q want=%q", second.Header, "问题 2")
 	}
 }
 

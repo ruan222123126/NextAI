@@ -18,11 +18,13 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"nextai/apps/gateway/internal/app/cronapi"
 	apphttp "nextai/apps/gateway/internal/app/http"
 	"nextai/apps/gateway/internal/channel"
 	"nextai/apps/gateway/internal/config"
 	"nextai/apps/gateway/internal/domain"
 	"nextai/apps/gateway/internal/plugin"
+	"nextai/apps/gateway/internal/provider"
 	"nextai/apps/gateway/internal/repo"
 	"nextai/apps/gateway/internal/runner"
 	"nextai/apps/gateway/internal/service/adapters"
@@ -187,6 +189,15 @@ func codexPromptModeEnabled() bool {
 }
 
 func NewServer(cfg config.Config) (*Server, error) {
+	provider.ResetRegistry()
+	registryPath := strings.TrimSpace(cfg.ProviderRegistryFile)
+	if registryPath == "" {
+		registryPath = filepath.Join(cfg.DataDir, "config", "provider-registry.json")
+	}
+	if err := provider.LoadRegistryFromFile(registryPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("load provider registry failed: %w", err)
+	}
+
 	store, err := repo.NewStore(cfg.DataDir)
 	if err != nil {
 		return nil, err
@@ -329,6 +340,16 @@ func (s *Server) toolDisabled(name string) bool {
 }
 
 func (s *Server) Handler() http.Handler {
+	cronHandler := cronapi.NewHandler(cronapi.HandlerDependencies{
+		GetCronService:          func() cronapi.CronService { return s.getCronService() },
+		ExecuteCronJob:          s.executeCronJob,
+		WriteJSON:               writeJSON,
+		WriteErr:                writeErr,
+		ErrJobNotFound:          errCronJobNotFound,
+		ErrMaxConcurrency:       errCronMaxConcurrencyReached,
+		ErrDefaultCronProtected: errCronDefaultProtected,
+	})
+
 	return apphttp.NewRouter(
 		s.cfg.APIKey,
 		apphttp.Handlers{
@@ -346,6 +367,12 @@ func (s *Server) Handler() http.Handler {
 				DeleteChat:            s.deleteChat,
 				ProcessAgent:          s.processAgent,
 				GetAgentSystemLayers:  s.getAgentSystemLayers,
+				TogglePlanMode:        s.togglePlanMode,
+				CompilePlan:           s.compilePlan,
+				SubmitPlanClarify:     s.submitPlanClarifyAnswer,
+				RevisePlan:            s.revisePlan,
+				ExecutePlan:           s.executePlan,
+				GetPlan:               s.getPlan,
 				BootstrapSession:      s.bootstrapSession,
 				SetSessionModel:       s.setSessionModel,
 				PreviewMutation:       s.previewMutation,
@@ -355,47 +382,59 @@ func (s *Server) Handler() http.Handler {
 				GetQQInboundState:     s.getQQInboundState,
 			},
 			Cron: apphttp.CronHandlers{
-				ListCronJobs:  s.listCronJobs,
-				CreateCronJob: s.createCronJob,
-				GetCronJob:    s.getCronJob,
-				UpdateCronJob: s.updateCronJob,
-				DeleteCronJob: s.deleteCronJob,
-				PauseCronJob:  s.pauseCronJob,
-				ResumeCronJob: s.resumeCronJob,
-				RunCronJob:    s.runCronJob,
-				GetCronState:  s.getCronJobState,
+				ListCronJobs:  cronHandler.ListCronJobs,
+				CreateCronJob: cronHandler.CreateCronJob,
+				GetCronJob:    cronHandler.GetCronJob,
+				UpdateCronJob: cronHandler.UpdateCronJob,
+				DeleteCronJob: cronHandler.DeleteCronJob,
+				PauseCronJob:  cronHandler.PauseCronJob,
+				ResumeCronJob: cronHandler.ResumeCronJob,
+				RunCronJob:    cronHandler.RunCronJob,
+				GetCronState:  cronHandler.GetCronJobState,
 			},
 			Admin: apphttp.AdminHandlers{
-				ListProviders:      s.listProviders,
-				GetModelCatalog:    s.getModelCatalog,
-				ConfigureProvider:  s.configureProvider,
-				DeleteProvider:     s.deleteProvider,
-				GetActiveModels:    s.getActiveModels,
-				SetActiveModels:    s.setActiveModels,
-				ListEnvs:           s.listEnvs,
-				PutEnvs:            s.putEnvs,
-				DeleteEnv:          s.deleteEnv,
-				ListSkills:         s.listSkills,
-				ListAvailableSkill: s.listAvailableSkills,
-				BatchDisableSkills: s.batchDisableSkills,
-				BatchEnableSkills:  s.batchEnableSkills,
-				CreateSkill:        s.createSkill,
-				DisableSkill:       s.disableSkill,
-				EnableSkill:        s.enableSkill,
-				DeleteSkill:        s.deleteSkill,
-				LoadSkillFile:      s.loadSkillFile,
-				ListWorkspaceFiles: s.listWorkspaceFiles,
-				GetWorkspaceFile:   s.getWorkspaceFile,
-				PutWorkspaceFile:   s.putWorkspaceFile,
-				UploadWorkspace:    s.uploadWorkspaceFile,
-				DeleteWorkspace:    s.deleteWorkspaceFile,
-				ExportWorkspace:    s.exportWorkspace,
-				ImportWorkspace:    s.importWorkspace,
-				ListChannels:       s.listChannels,
-				ListChannelTypes:   s.listChannelTypes,
-				PutChannels:        s.putChannels,
-				GetChannel:         s.getChannel,
-				PutChannel:         s.putChannel,
+				Models: apphttp.AdminModelHandlers{
+					ListProviders:     s.listProviders,
+					GetModelCatalog:   s.getModelCatalog,
+					ConfigureProvider: s.configureProvider,
+					DeleteProvider:    s.deleteProvider,
+					GetActiveModels:   s.getActiveModels,
+					SetActiveModels:   s.setActiveModels,
+				},
+				Envs: apphttp.AdminEnvHandlers{
+					ListEnvs:  s.listEnvs,
+					PutEnvs:   s.putEnvs,
+					DeleteEnv: s.deleteEnv,
+				},
+				Skills: apphttp.AdminSkillHandlers{
+					ListSkills:         s.listSkills,
+					ListAvailableSkill: s.listAvailableSkills,
+					BatchDisableSkills: s.batchDisableSkills,
+					BatchEnableSkills:  s.batchEnableSkills,
+					CreateSkill:        s.createSkill,
+					DisableSkill:       s.disableSkill,
+					EnableSkill:        s.enableSkill,
+					DeleteSkill:        s.deleteSkill,
+					LoadSkillFile:      s.loadSkillFile,
+				},
+				Workspace: apphttp.AdminWorkspaceHandlers{
+					ListWorkspaceFiles: s.listWorkspaceFiles,
+					GetWorkspaceFile:   s.getWorkspaceFile,
+					PutWorkspaceFile:   s.putWorkspaceFile,
+					UploadWorkspace:    s.uploadWorkspaceFile,
+					DeleteWorkspace:    s.deleteWorkspaceFile,
+					ExportWorkspace:    s.exportWorkspace,
+					ImportWorkspace:    s.importWorkspace,
+				},
+				Config: apphttp.AdminConfigHandlers{
+					Channels: apphttp.AdminChannelHandlers{
+						ListChannels:     s.listChannels,
+						ListChannelTypes: s.listChannelTypes,
+						PutChannels:      s.putChannels,
+						GetChannel:       s.getChannel,
+						PutChannel:       s.putChannel,
+					},
+				},
 			},
 		},
 		webStaticHandler(s.cfg.WebDir),

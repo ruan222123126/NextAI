@@ -448,104 +448,25 @@ func buildToolDefinition(name string) runner.ToolDefinition {
 				"additionalProperties": true,
 			},
 		}
-	case "spawn_agent":
+	case "apply_patch":
 		return runner.ToolDefinition{
-			Name:        "spawn_agent",
-			Description: "Spawn a managed sub-agent and start its first turn. Accepts either plain message input or structured items.",
+			Name:        "apply_patch",
+			Description: "Apply a Codex-style patch payload to files on disk.",
 			Parameters: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
-					"id":                 map[string]interface{}{"type": "string"},
-					"agent_id":           map[string]interface{}{"type": "string"},
-					"message":            map[string]interface{}{"type": "string"},
-					"input":              map[string]interface{}{"type": "string"},
-					"task":               map[string]interface{}{"type": "string"},
-					"prompt":             map[string]interface{}{"type": "string"},
-					"items":              map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "object", "additionalProperties": true}},
-					"agent_type":         map[string]interface{}{"type": "string"},
-					"session_id":         map[string]interface{}{"type": "string"},
-					"user_id":            map[string]interface{}{"type": "string"},
-					"channel":            map[string]interface{}{"type": "string"},
-					"prompt_mode":        map[string]interface{}{"type": "string"},
-					"collaboration_mode": map[string]interface{}{"type": "string"},
+					"patch":   map[string]interface{}{"type": "string"},
+					"workdir": map[string]interface{}{"type": "string"},
+					"cwd":     map[string]interface{}{"type": "string"},
 				},
-				"additionalProperties": false,
-			},
-		}
-	case "send_input":
-		return runner.ToolDefinition{
-			Name:        "send_input",
-			Description: "Send input to a managed sub-agent. Use interrupt=true to cancel current work before queueing input.",
-			Parameters: map[string]interface{}{
-				"type": "object",
-				"properties": map[string]interface{}{
-					"id":       map[string]interface{}{"type": "string"},
-					"agent_id": map[string]interface{}{"type": "string"},
-					"message":  map[string]interface{}{"type": "string"},
-					"input":    map[string]interface{}{"type": "string"},
-					"task":     map[string]interface{}{"type": "string"},
-					"prompt":   map[string]interface{}{"type": "string"},
-					"items":    map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "object", "additionalProperties": true}},
-					"interrupt": map[string]interface{}{
-						"type": "boolean",
-					},
-				},
-				"additionalProperties": false,
-			},
-		}
-	case "resume_agent":
-		return runner.ToolDefinition{
-			Name:        "resume_agent",
-			Description: "Resume a managed sub-agent. Optionally accepts new input before resuming.",
-			Parameters: map[string]interface{}{
-				"type": "object",
-				"properties": map[string]interface{}{
-					"id":       map[string]interface{}{"type": "string"},
-					"agent_id": map[string]interface{}{"type": "string"},
-					"message":  map[string]interface{}{"type": "string"},
-					"input":    map[string]interface{}{"type": "string"},
-					"task":     map[string]interface{}{"type": "string"},
-					"prompt":   map[string]interface{}{"type": "string"},
-					"items":    map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "object", "additionalProperties": true}},
-				},
-				"additionalProperties": false,
-			},
-		}
-	case "wait":
-		return runner.ToolDefinition{
-			Name:        "wait",
-			Description: "Wait for one or many managed sub-agents to reach a non-running/final state.",
-			Parameters: map[string]interface{}{
-				"type": "object",
-				"properties": map[string]interface{}{
-					"id":       map[string]interface{}{"type": "string"},
-					"agent_id": map[string]interface{}{"type": "string"},
-					"ids":      map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
-					"timeout_ms": map[string]interface{}{
-						"type":    "integer",
-						"minimum": 1,
-					},
-				},
-				"additionalProperties": false,
-			},
-		}
-	case "close_agent":
-		return runner.ToolDefinition{
-			Name:        "close_agent",
-			Description: "Close a managed sub-agent.",
-			Parameters: map[string]interface{}{
-				"type": "object",
-				"properties": map[string]interface{}{
-					"id":       map[string]interface{}{"type": "string"},
-					"agent_id": map[string]interface{}{"type": "string"},
-				},
+				"required":             []string{"patch"},
 				"additionalProperties": false,
 			},
 		}
 	case "request_user_input":
 		return runner.ToolDefinition{
 			Name:        "request_user_input",
-			Description: "Ask user questions and wait for explicit answers before continuing.",
+			Description: "Ask 1-3 clarifying questions and wait for user answers via /agent/tool-input-answer.",
 			Parameters: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -568,12 +489,12 @@ func buildToolDefinition(name string) runner.ToolDefinition {
 											"label":       map[string]interface{}{"type": "string"},
 											"description": map[string]interface{}{"type": "string"},
 										},
-										"required":             []string{"label", "description"},
+										"required":             []string{"label"},
 										"additionalProperties": false,
 									},
 								},
 							},
-							"required":             []string{"id", "header", "question"},
+							"required":             []string{"question"},
 							"additionalProperties": false,
 						},
 					},
@@ -582,45 +503,20 @@ func buildToolDefinition(name string) runner.ToolDefinition {
 				"additionalProperties": false,
 			},
 		}
-	case "update_plan":
+	case "output_plan":
 		return runner.ToolDefinition{
-			Name:        "update_plan",
-			Description: "Update and persist the active task plan checklist.",
+			Name:        "output_plan",
+			Description: "Persist final structured plan into plan mode state.",
 			Parameters: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
-					"explanation": map[string]interface{}{"type": "string"},
 					"plan": map[string]interface{}{
-						"type":     "array",
-						"minItems": 1,
-						"items": map[string]interface{}{
-							"type": "object",
-							"properties": map[string]interface{}{
-								"step":   map[string]interface{}{"type": "string"},
-								"status": map[string]interface{}{"type": "string", "enum": []string{"pending", "in_progress", "completed"}},
-							},
-							"required":             []string{"step", "status"},
-							"additionalProperties": false,
-						},
+						"type":                 "object",
+						"additionalProperties": true,
 					},
 				},
 				"required":             []string{"plan"},
-				"additionalProperties": false,
-			},
-		}
-	case "apply_patch":
-		return runner.ToolDefinition{
-			Name:        "apply_patch",
-			Description: "Apply a Codex-style patch payload to files on disk.",
-			Parameters: map[string]interface{}{
-				"type": "object",
-				"properties": map[string]interface{}{
-					"patch":   map[string]interface{}{"type": "string"},
-					"workdir": map[string]interface{}{"type": "string"},
-					"cwd":     map[string]interface{}{"type": "string"},
-				},
-				"required":             []string{"patch"},
-				"additionalProperties": false,
+				"additionalProperties": true,
 			},
 		}
 	case "Bash":

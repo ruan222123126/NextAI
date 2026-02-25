@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"os/exec"
 	"strconv"
@@ -30,6 +31,7 @@ const (
 	requestUserInputMetaRequestIDKey         = "_nextai_request_id"
 	requestUserInputMetaPromptModeKey        = "_nextai_prompt_mode"
 	requestUserInputMetaAgentDepthKey        = "_nextai_agent_depth"
+	requestUserInputMetaPlanModeEnabledKey   = "_nextai_plan_mode_enabled"
 )
 
 var (
@@ -42,6 +44,10 @@ var (
 
 	errUpdatePlanInvalid      = errors.New("update_plan_invalid")
 	errUpdatePlanChatNotFound = errors.New("update_plan_chat_not_found")
+
+	errOutputPlanInvalid      = errors.New("output_plan_invalid")
+	errOutputPlanChatNotFound = errors.New("output_plan_chat_not_found")
+	errOutputPlanModeDisabled = errors.New("output_plan_mode_disabled")
 
 	errApplyPatchPayloadMissing = errors.New("apply_patch_payload_missing")
 	errApplyPatchBinaryMissing  = errors.New("apply_patch_binary_missing")
@@ -107,12 +113,12 @@ const (
 
 type requestUserInputQuestionOption struct {
 	Label       string `json:"label"`
-	Description string `json:"description"`
+	Description string `json:"description,omitempty"`
 }
 
 type requestUserInputQuestion struct {
-	ID       string                           `json:"id"`
-	Header   string                           `json:"header"`
+	ID       string                           `json:"id,omitempty"`
+	Header   string                           `json:"header,omitempty"`
 	Question string                           `json:"question"`
 	Options  []requestUserInputQuestionOption `json:"options,omitempty"`
 }
@@ -162,13 +168,18 @@ type updatePlanSnapshot struct {
 	UpdatedAt   string           `json:"updated_at"`
 }
 
+type outputPlanArgs struct {
+	Plan *domain.PlanSpec `json:"plan,omitempty"`
+}
+
 func (s *Server) executeRequestUserInputToolCall(ctx context.Context, input map[string]interface{}) (string, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 
 	collaborationMode := strings.TrimSpace(stringValue(input[requestUserInputMetaCollaborationModeKey]))
-	if !strings.EqualFold(collaborationMode, collaborationModePlanName) {
+	planModeEnabled := parseBoolFromAny(input[requestUserInputMetaPlanModeEnabledKey], false)
+	if !strings.EqualFold(collaborationMode, collaborationModePlanName) && !planModeEnabled {
 		return "", &toolError{
 			Code:    "tool_invoke_failed",
 			Message: `tool "request_user_input" invocation failed`,
@@ -374,24 +385,68 @@ func parseRequestUserInputArgs(input map[string]interface{}) (requestUserInputAr
 	}
 
 	seenIDs := map[string]struct{}{}
-	for _, question := range args.Questions {
-		id := strings.TrimSpace(question.ID)
-		header := strings.TrimSpace(question.Header)
+	normalizedQuestions := make([]requestUserInputQuestion, 0, len(args.Questions))
+	for idx, question := range args.Questions {
 		prompt := strings.TrimSpace(question.Question)
-		if id == "" || header == "" || prompt == "" {
+		if prompt == "" {
 			return requestUserInputArgs{}, errRequestUserInputQuestionsInvalid
 		}
-		if _, exists := seenIDs[id]; exists {
-			return requestUserInputArgs{}, errRequestUserInputQuestionsInvalid
+
+		id := strings.TrimSpace(question.ID)
+		if id == "" {
+			id = fmt.Sprintf("q%d", idx+1)
 		}
+		id = dedupeRequestUserInputQuestionID(id, seenIDs)
 		seenIDs[id] = struct{}{}
+
+		header := strings.TrimSpace(question.Header)
+		if header == "" {
+			header = fmt.Sprintf("问题 %d", idx+1)
+		}
+
+		normalizedOptions := make([]requestUserInputQuestionOption, 0, len(question.Options))
+		seenOptionLabels := map[string]struct{}{}
 		for _, option := range question.Options {
-			if strings.TrimSpace(option.Label) == "" || strings.TrimSpace(option.Description) == "" {
-				return requestUserInputArgs{}, errRequestUserInputQuestionsInvalid
+			label := strings.TrimSpace(option.Label)
+			if label == "" {
+				continue
 			}
+			normalizedKey := strings.ToLower(label)
+			if _, exists := seenOptionLabels[normalizedKey]; exists {
+				continue
+			}
+			seenOptionLabels[normalizedKey] = struct{}{}
+			normalizedOptions = append(normalizedOptions, requestUserInputQuestionOption{
+				Label:       label,
+				Description: strings.TrimSpace(option.Description),
+			})
+		}
+
+		normalizedQuestions = append(normalizedQuestions, requestUserInputQuestion{
+			ID:       id,
+			Header:   header,
+			Question: prompt,
+			Options:  normalizedOptions,
+		})
+	}
+	args.Questions = normalizedQuestions
+	return args, nil
+}
+
+func dedupeRequestUserInputQuestionID(base string, seen map[string]struct{}) string {
+	id := strings.TrimSpace(base)
+	if id == "" {
+		id = "q"
+	}
+	if _, exists := seen[id]; !exists {
+		return id
+	}
+	for suffix := 2; ; suffix++ {
+		candidate := fmt.Sprintf("%s_%d", id, suffix)
+		if _, exists := seen[candidate]; !exists {
+			return candidate
 		}
 	}
-	return args, nil
 }
 
 func encodeRequestUserInputToolResult(requestID string, response requestUserInputResponse) (string, error) {
@@ -510,6 +565,7 @@ func (s *Server) persistUpdatePlan(sessionID, userID, channel string, args updat
 				chat.Meta = map[string]interface{}{}
 			}
 			chat.Meta[updatePlanChatMetaKey] = updatePlanSnapshotToMeta(snapshot)
+			chat.Meta = applyUpdatePlanToPlanSpecMeta(chat.Meta, args.Plan)
 			chat.UpdatedAt = nowISO()
 			state.Chats[chatID] = chat
 			found = true
@@ -524,6 +580,179 @@ func (s *Server) persistUpdatePlan(sessionID, userID, channel string, args updat
 		return updatePlanSnapshot{}, errUpdatePlanChatNotFound
 	}
 	return snapshot, nil
+}
+
+func (s *Server) executeOutputPlanToolCall(input map[string]interface{}) (string, error) {
+	spec, err := parseOutputPlanArgs(input)
+	if err != nil {
+		return "", &toolError{
+			Code:    "tool_invoke_failed",
+			Message: `tool "output_plan" invocation failed`,
+			Err:     err,
+		}
+	}
+
+	sessionID := strings.TrimSpace(stringValue(input[requestUserInputMetaSessionIDKey]))
+	userID := strings.TrimSpace(stringValue(input[requestUserInputMetaUserIDKey]))
+	channel := strings.TrimSpace(stringValue(input[requestUserInputMetaChannelKey]))
+	if sessionID == "" || userID == "" || channel == "" {
+		return "", &toolError{
+			Code:    "tool_invoke_failed",
+			Message: `tool "output_plan" invocation failed`,
+			Err:     errOutputPlanInvalid,
+		}
+	}
+
+	planState, err := s.persistOutputPlanSpec(sessionID, userID, channel, spec)
+	if err != nil {
+		return "", &toolError{
+			Code:    "tool_invoke_failed",
+			Message: `tool "output_plan" invocation failed`,
+			Err:     err,
+		}
+	}
+	payload := map[string]interface{}{
+		"accepted":   true,
+		"plan_state": planState,
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return "", &toolError{
+			Code:    "tool_invalid_result",
+			Message: `tool "output_plan" returned invalid result`,
+			Err:     err,
+		}
+	}
+	return string(encoded), nil
+}
+
+func parseOutputPlanArgs(input map[string]interface{}) (domain.PlanSpec, error) {
+	payload := map[string]interface{}{}
+	for key, value := range safeMap(input) {
+		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(key)), "_nextai_") {
+			continue
+		}
+		payload[key] = value
+	}
+	if len(payload) == 0 {
+		return domain.PlanSpec{}, errOutputPlanInvalid
+	}
+
+	if rawPlanSpec, exists := payload["plan_spec"]; exists {
+		spec, err := decodeOutputPlanSpec(rawPlanSpec)
+		if err == nil {
+			return spec, nil
+		}
+	}
+
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return domain.PlanSpec{}, errOutputPlanInvalid
+	}
+	var args outputPlanArgs
+	if err := json.Unmarshal(encoded, &args); err != nil {
+		return domain.PlanSpec{}, errOutputPlanInvalid
+	}
+	if args.Plan != nil {
+		spec := normalizePlanSpec(*args.Plan)
+		if !hasMeaningfulOutputPlanSpec(spec) {
+			return domain.PlanSpec{}, errOutputPlanInvalid
+		}
+		return spec, nil
+	}
+
+	spec, err := decodeOutputPlanSpec(payload)
+	if err != nil {
+		return domain.PlanSpec{}, errOutputPlanInvalid
+	}
+	return spec, nil
+}
+
+func decodeOutputPlanSpec(raw interface{}) (domain.PlanSpec, error) {
+	encoded, err := json.Marshal(raw)
+	if err != nil {
+		return domain.PlanSpec{}, errOutputPlanInvalid
+	}
+	var spec domain.PlanSpec
+	if err := json.Unmarshal(encoded, &spec); err != nil {
+		return domain.PlanSpec{}, errOutputPlanInvalid
+	}
+	spec = normalizePlanSpec(spec)
+	if !hasMeaningfulOutputPlanSpec(spec) {
+		return domain.PlanSpec{}, errOutputPlanInvalid
+	}
+	return spec, nil
+}
+
+func hasMeaningfulOutputPlanSpec(spec domain.PlanSpec) bool {
+	return strings.TrimSpace(spec.Goal) != "" ||
+		len(spec.Tasks) > 0 ||
+		len(spec.ScopeIn) > 0 ||
+		len(spec.AcceptanceCriteria) > 0 ||
+		strings.TrimSpace(spec.SummaryForExecution) != ""
+}
+
+func (s *Server) persistOutputPlanSpec(sessionID, userID, channel string, spec domain.PlanSpec) (planStateResponse, error) {
+	response := planStateResponse{}
+	err := s.store.Write(func(state *repo.State) error {
+		selectedChatID := ""
+		selectedChat := domain.ChatSpec{}
+		found := false
+		for chatID, chat := range state.Chats {
+			if chat.SessionID != sessionID || chat.UserID != userID || chat.Channel != channel {
+				continue
+			}
+			if !found || shouldPreferOutputPlanChat(selectedChatID, selectedChat, chatID, chat) {
+				selectedChatID = chatID
+				selectedChat = chat
+				found = true
+			}
+		}
+		if !found {
+			return errOutputPlanChatNotFound
+		}
+
+		snapshot := parsePlanModeSnapshot(selectedChat.Meta)
+		if !snapshot.Enabled {
+			return errOutputPlanModeDisabled
+		}
+
+		validatedSpec, validateErr := s.validateAndRepairPlanSpec(spec)
+		if validateErr != nil {
+			return errOutputPlanInvalid
+		}
+		snapshot.Spec = &validatedSpec
+		snapshot.GoalInput = strings.TrimSpace(validatedSpec.Goal)
+		snapshot.ClarifyUnresolved = []string{}
+		snapshot.State = planModeStatePlanningReady
+		if version, versionErr := s.resolvePlanPromptVersion(); versionErr == nil {
+			snapshot.SourcePromptVersion = version
+		}
+
+		selectedChat.Meta = applyPlanModeSnapshot(selectedChat.Meta, snapshot)
+		selectedChat.UpdatedAt = nowISO()
+		state.Chats[selectedChatID] = selectedChat
+		response = encodePlanStateResponse(selectedChatID, snapshot, nil)
+		return nil
+	})
+	if err != nil {
+		return planStateResponse{}, err
+	}
+	return response, nil
+}
+
+func shouldPreferOutputPlanChat(currentID string, current domain.ChatSpec, nextID string, next domain.ChatSpec) bool {
+	currentSnapshot := parsePlanModeSnapshot(current.Meta)
+	nextSnapshot := parsePlanModeSnapshot(next.Meta)
+	if currentSnapshot.Enabled != nextSnapshot.Enabled {
+		return nextSnapshot.Enabled
+	}
+	currentUpdated := strings.TrimSpace(current.UpdatedAt)
+	nextUpdated := strings.TrimSpace(next.UpdatedAt)
+	if currentUpdated != nextUpdated {
+		return nextUpdated > currentUpdated
+	}
+	return strings.TrimSpace(nextID) < strings.TrimSpace(currentID)
 }
 
 func (s *Server) executeSpawnAgentToolCall(ctx context.Context, input map[string]interface{}) (string, error) {

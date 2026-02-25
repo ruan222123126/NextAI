@@ -39,13 +39,12 @@ func (result compiledSystemPromptResult) layerSlice() []systemPromptLayer {
 
 // codexLayerBuildOptions is kept for compatibility with existing call sites/tests.
 type codexLayerBuildOptions struct {
-	ModelSlug         string
-	Personality       string
-	SessionID         string
-	ReviewTask        bool
-	CompactTask       bool
-	MemoryTask        bool
-	CollaborationMode string
+	ModelSlug   string
+	Personality string
+	SessionID   string
+	ReviewTask  bool
+	CompactTask bool
+	MemoryTask  bool
 }
 
 func prependSystemLayers(input []domain.AgentInputMessage, layers []systemPromptLayer) []domain.AgentInputMessage {
@@ -93,12 +92,6 @@ func normalizeTurnRuntimeSnapshotForPromptCompiler(runtime TurnRuntimeSnapshot) 
 	if promptMode, ok := normalizePromptMode(runtime.Mode.PromptMode); ok {
 		normalized.Mode.PromptMode = promptMode
 	}
-	normalized.Mode.CollaborationMode = normalizeCollaborationModeName(runtime.Mode.CollaborationMode)
-	if event, ok := parseCollaborationEventName(runtime.Mode.CollaborationEvent); ok {
-		normalized.Mode.CollaborationEvent = event
-	} else {
-		normalized.Mode.CollaborationEvent = strings.TrimSpace(runtime.Mode.CollaborationEvent)
-	}
 	normalized.ApprovalPolicy = strings.TrimSpace(runtime.ApprovalPolicy)
 	if normalized.ApprovalPolicy == "" {
 		normalized.ApprovalPolicy = defaultTurnApprovalPolicy
@@ -120,7 +113,7 @@ func normalizeTurnRuntimeSnapshotForPromptCompiler(runtime TurnRuntimeSnapshot) 
 	} else {
 		normalized.MCP.Status = mcpStatusDisabled
 	}
-	return applyCollaborationModeToolConstraints(normalized)
+	return normalized
 }
 
 func (s *Server) compileSystemLayersForTurnRuntime(runtime TurnRuntimeSnapshot) (compiledSystemPromptResult, error) {
@@ -208,9 +201,6 @@ func (s *Server) buildCodexSystemLayersV2(runtime TurnRuntimeSnapshot) ([]system
 	if layers, err = appendCodexReviewHistoryLayersIfNeeded(layers, runtime); err != nil {
 		return nil, err
 	}
-	if layers, err = appendCodexCollaborationLayer(layers, runtime); err != nil {
-		return nil, err
-	}
 	if layers, err = appendCodexCompactLayersIfNeeded(layers, runtime); err != nil {
 		return nil, err
 	}
@@ -243,22 +233,14 @@ func (s *Server) buildCodexSystemLayersV2(runtime TurnRuntimeSnapshot) ([]system
 }
 
 func buildCodexTemplateVars(runtime TurnRuntimeSnapshot) map[string]string {
-	normalizedMode := normalizeCollaborationModeName(runtime.Mode.CollaborationMode)
 	availableTools := strings.Join(normalizeTurnRuntimeToolNames(runtime.AvailableTools), ", ")
 	dynamicTools := strings.Join(normalizeTurnRuntimeToolNames(runtime.DynamicTools), ", ")
-	requestUserInputAvailable := "false"
-	if runtimeHasAvailableTool(runtime, "request_user_input") {
-		requestUserInputAvailable = "true"
-	}
 	return map[string]string{
-		"KNOWN_MODE_NAMES":             knownCollaborationModeNames(),
-		"REQUEST_USER_INPUT_AVAILABLE": requestUserInputAvailable,
-		"TURN_MODE":                    normalizedMode,
-		"TURN_APPROVAL_POLICY":         strings.TrimSpace(runtime.ApprovalPolicy),
-		"TURN_SANDBOX_POLICY":          strings.TrimSpace(runtime.SandboxPolicy),
-		"TURN_AVAILABLE_TOOLS":         availableTools,
-		"TURN_MCP_STATUS":              strings.TrimSpace(runtime.MCP.Status),
-		"TURN_DYNAMIC_TOOLS":           dynamicTools,
+		"TURN_APPROVAL_POLICY": strings.TrimSpace(runtime.ApprovalPolicy),
+		"TURN_SANDBOX_POLICY":  strings.TrimSpace(runtime.SandboxPolicy),
+		"TURN_AVAILABLE_TOOLS": availableTools,
+		"TURN_MCP_STATUS":      strings.TrimSpace(runtime.MCP.Status),
+		"TURN_DYNAMIC_TOOLS":   dynamicTools,
 	}
 }
 
@@ -326,21 +308,19 @@ func joinOrNone(items []string) string {
 
 func hashCompiledSystemPrompt(runtime TurnRuntimeSnapshot, layers []compiledSystemPromptLayer) string {
 	type snapshotHashInput struct {
-		PromptMode         string   `json:"prompt_mode"`
-		CollaborationMode  string   `json:"collaboration_mode"`
-		CollaborationEvent string   `json:"collaboration_event,omitempty"`
-		ReviewTask         bool     `json:"review_task"`
-		CompactTask        bool     `json:"compact_task"`
-		MemoryTask         bool     `json:"memory_task"`
-		ApprovalPolicy     string   `json:"approval_policy"`
-		SandboxPolicy      string   `json:"sandbox_policy"`
-		AvailableTools     []string `json:"available_tools"`
-		MCPEnabled         bool     `json:"mcp_enabled"`
-		MCPStatus          string   `json:"mcp_status"`
-		DynamicTools       []string `json:"dynamic_tools"`
-		SessionID          string   `json:"session_id,omitempty"`
-		ModelSlug          string   `json:"model_slug,omitempty"`
-		Personality        string   `json:"personality,omitempty"`
+		PromptMode     string   `json:"prompt_mode"`
+		ReviewTask     bool     `json:"review_task"`
+		CompactTask    bool     `json:"compact_task"`
+		MemoryTask     bool     `json:"memory_task"`
+		ApprovalPolicy string   `json:"approval_policy"`
+		SandboxPolicy  string   `json:"sandbox_policy"`
+		AvailableTools []string `json:"available_tools"`
+		MCPEnabled     bool     `json:"mcp_enabled"`
+		MCPStatus      string   `json:"mcp_status"`
+		DynamicTools   []string `json:"dynamic_tools"`
+		SessionID      string   `json:"session_id,omitempty"`
+		ModelSlug      string   `json:"model_slug,omitempty"`
+		Personality    string   `json:"personality,omitempty"`
 	}
 	type layerHashInput struct {
 		Name        string `json:"name"`
@@ -367,21 +347,19 @@ func hashCompiledSystemPrompt(runtime TurnRuntimeSnapshot, layers []compiledSyst
 	payload := compilerHashInput{
 		CompilerVersion: systemPromptCompilerVersion,
 		Runtime: snapshotHashInput{
-			PromptMode:         strings.TrimSpace(runtime.Mode.PromptMode),
-			CollaborationMode:  strings.TrimSpace(runtime.Mode.CollaborationMode),
-			CollaborationEvent: strings.TrimSpace(runtime.Mode.CollaborationEvent),
-			ReviewTask:         runtime.Mode.ReviewTask,
-			CompactTask:        runtime.Mode.CompactTask,
-			MemoryTask:         runtime.Mode.MemoryTask,
-			ApprovalPolicy:     strings.TrimSpace(runtime.ApprovalPolicy),
-			SandboxPolicy:      strings.TrimSpace(runtime.SandboxPolicy),
-			AvailableTools:     normalizeTurnRuntimeToolNames(runtime.AvailableTools),
-			MCPEnabled:         runtime.MCP.Enabled,
-			MCPStatus:          strings.TrimSpace(runtime.MCP.Status),
-			DynamicTools:       normalizeTurnRuntimeToolNames(runtime.DynamicTools),
-			SessionID:          strings.TrimSpace(runtime.SessionID),
-			ModelSlug:          strings.TrimSpace(runtime.ModelSlug),
-			Personality:        strings.TrimSpace(runtime.Personality),
+			PromptMode:     strings.TrimSpace(runtime.Mode.PromptMode),
+			ReviewTask:     runtime.Mode.ReviewTask,
+			CompactTask:    runtime.Mode.CompactTask,
+			MemoryTask:     runtime.Mode.MemoryTask,
+			ApprovalPolicy: strings.TrimSpace(runtime.ApprovalPolicy),
+			SandboxPolicy:  strings.TrimSpace(runtime.SandboxPolicy),
+			AvailableTools: normalizeTurnRuntimeToolNames(runtime.AvailableTools),
+			MCPEnabled:     runtime.MCP.Enabled,
+			MCPStatus:      strings.TrimSpace(runtime.MCP.Status),
+			DynamicTools:   normalizeTurnRuntimeToolNames(runtime.DynamicTools),
+			SessionID:      strings.TrimSpace(runtime.SessionID),
+			ModelSlug:      strings.TrimSpace(runtime.ModelSlug),
+			Personality:    strings.TrimSpace(runtime.Personality),
 		},
 		Layers: layerInputs,
 	}

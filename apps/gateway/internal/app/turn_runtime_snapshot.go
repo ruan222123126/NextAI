@@ -127,7 +127,6 @@ func turnRuntimeSnapshotFromLegacyOptions(
 	snapshot.Mode.ReviewTask = options.ReviewTask
 	snapshot.Mode.CompactTask = options.CompactTask
 	snapshot.Mode.MemoryTask = options.MemoryTask
-	snapshot.Mode.CollaborationMode = normalizeCollaborationModeName(options.CollaborationMode)
 	return snapshot
 }
 
@@ -135,57 +134,31 @@ func (s *Server) buildTurnRuntimeSnapshotForInput(
 	promptMode string,
 	input []domain.AgentInputMessage,
 	sessionID string,
-	collaborationMode string,
-	collaborationEvent string,
 ) TurnRuntimeSnapshot {
 	snapshot := newTurnRuntimeSnapshot(promptMode, sessionID)
 	if snapshot.Mode.PromptMode == promptModeCodex {
 		snapshot.Mode.ReviewTask = isReviewTaskCommand(input)
 		snapshot.Mode.CompactTask = isCompactTaskCommand(input)
 		snapshot.Mode.MemoryTask = isMemoryTaskCommand(input)
-		snapshot.Mode.CollaborationMode = normalizeCollaborationModeName(collaborationMode)
-		if normalizedEvent, ok := parseCollaborationEventName(collaborationEvent); ok {
-			snapshot.Mode.CollaborationEvent = normalizedEvent
-		}
 	}
 	snapshot.AvailableTools = s.resolveAvailableToolDefinitionNames(snapshot.Mode.PromptMode)
-	return applyCollaborationModeToolConstraints(snapshot)
+	return snapshot
 }
 
 func (s *Server) buildTurnRuntimeSnapshotForSystemLayers(
 	promptMode string,
 	rawTaskCommand string,
 	sessionID string,
-	rawCollaborationMode string,
-	rawCollaborationEvent string,
 ) (TurnRuntimeSnapshot, error) {
 	snapshot := newTurnRuntimeSnapshot(promptMode, sessionID)
 	snapshot.AvailableTools = s.resolveAvailableToolDefinitionNames(snapshot.Mode.PromptMode)
 	if snapshot.Mode.PromptMode != promptModeCodex {
-		return applyCollaborationModeToolConstraints(snapshot), nil
-	}
-
-	modeName := collaborationModeDefaultName
-	if rawValue := strings.TrimSpace(rawCollaborationMode); rawValue != "" {
-		parsedMode, ok := parseCollaborationModeName(rawValue)
-		if !ok {
-			return TurnRuntimeSnapshot{}, errInvalidCollaborationMode
-		}
-		modeName = parsedMode
-	}
-	if rawValue := strings.TrimSpace(rawCollaborationEvent); rawValue != "" {
-		parsedEvent, ok := parseCollaborationEventName(rawValue)
-		if !ok {
-			return TurnRuntimeSnapshot{}, errInvalidCollaborationEvent
-		}
-		modeName = applyCollaborationModeEvent(modeName, parsedEvent)
-		snapshot.Mode.CollaborationEvent = parsedEvent
+		return snapshot, nil
 	}
 
 	taskCommand := strings.TrimSpace(rawTaskCommand)
 	if taskCommand == "" {
-		snapshot.Mode.CollaborationMode = modeName
-		return applyCollaborationModeToolConstraints(snapshot), nil
+		return snapshot, nil
 	}
 
 	normalizedTaskCommand, ok := normalizeSystemLayerTaskCommand(taskCommand)
@@ -200,8 +173,7 @@ func (s *Server) buildTurnRuntimeSnapshotForSystemLayers(
 	case memoryTaskCommand:
 		snapshot.Mode.MemoryTask = true
 	}
-	snapshot.Mode.CollaborationMode = modeName
-	return applyCollaborationModeToolConstraints(snapshot), nil
+	return snapshot, nil
 }
 
 func normalizeTurnRuntimeToolNames(raw []string) []string {

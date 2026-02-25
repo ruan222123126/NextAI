@@ -14,6 +14,7 @@ import (
 
 	"nextai/apps/gateway/internal/domain"
 	"nextai/apps/gateway/internal/plugin"
+	"nextai/apps/gateway/internal/provider"
 	"nextai/apps/gateway/internal/repo"
 	"nextai/apps/gateway/internal/runner"
 	agentprotocolservice "nextai/apps/gateway/internal/service/agentprotocol"
@@ -68,18 +69,9 @@ func (s *Server) getAgentSystemLayers(w http.ResponseWriter, r *http.Request) {
 		promptMode,
 		r.URL.Query().Get("task_command"),
 		r.URL.Query().Get("session_id"),
-		r.URL.Query().Get(collaborationBizParamsModeKey),
-		r.URL.Query().Get(collaborationBizParamsEventKey),
 	)
 	if err != nil {
-		switch {
-		case errors.Is(err, errInvalidCollaborationMode):
-			writeErr(w, http.StatusBadRequest, "invalid_request", "invalid collaboration_mode", nil)
-		case errors.Is(err, errInvalidCollaborationEvent), errors.Is(err, errConflictingCollaborationEvent):
-			writeErr(w, http.StatusBadRequest, "invalid_request", "invalid collaboration_event", nil)
-		default:
-			writeErr(w, http.StatusBadRequest, "invalid_request", "invalid task_command", nil)
-		}
+		writeErr(w, http.StatusBadRequest, "invalid_request", "invalid task_command", nil)
 		return
 	}
 
@@ -458,7 +450,7 @@ func resolveChatActiveModelSlot(meta map[string]interface{}, state *repo.State) 
 		return domain.ModelSlotConfig{}
 	}
 	return domain.ModelSlotConfig{
-		ProviderID: normalizeProviderID(state.ActiveLLM.ProviderID),
+		ProviderID: provider.NormalizeProviderID(state.ActiveLLM.ProviderID),
 		Model:      strings.TrimSpace(state.ActiveLLM.Model),
 	}
 }
@@ -473,7 +465,7 @@ func parseChatActiveModelOverride(meta map[string]interface{}) (domain.ModelSlot
 	}
 	switch value := rawOverride.(type) {
 	case map[string]interface{}:
-		providerID := normalizeProviderID(stringValue(value["provider_id"]))
+		providerID := provider.NormalizeProviderID(stringValue(value["provider_id"]))
 		modelID := strings.TrimSpace(stringValue(value["model"]))
 		if providerID == "" || modelID == "" {
 			return domain.ModelSlotConfig{}, false
@@ -483,7 +475,7 @@ func parseChatActiveModelOverride(meta map[string]interface{}) (domain.ModelSlot
 			Model:      modelID,
 		}, true
 	case domain.ChatActiveLLMOverride:
-		providerID := normalizeProviderID(value.ProviderID)
+		providerID := provider.NormalizeProviderID(value.ProviderID)
 		modelID := strings.TrimSpace(value.Model)
 		if providerID == "" || modelID == "" {
 			return domain.ModelSlotConfig{}, false
@@ -609,13 +601,6 @@ func latestProviderResponseIDFromInput(history []domain.AgentInputMessage) strin
 		}
 	}
 	return ""
-}
-
-func providerStoreEnabled(setting repo.ProviderSetting) bool {
-	if setting.Store == nil {
-		return false
-	}
-	return *setting.Store
 }
 
 func splitReplyChunks(text string, chunkSize int) []string {
@@ -1126,6 +1111,18 @@ func (s *Server) executeToolCallForPromptModeWithContext(ctx context.Context, pr
 	}
 
 	switch name {
+	case "apply_patch":
+		return s.executeApplyPatchToolCall(ctx, input)
+	case "open":
+		return s.executeOpenToolCall(input)
+	case "click", "screenshot":
+		return s.executeApproxBrowserToolCall(name, input)
+	case "request_user_input":
+		return s.executeRequestUserInputToolCall(ctx, input)
+	case "update_plan":
+		return s.executeUpdatePlanToolCall(input)
+	case "output_plan":
+		return s.executeOutputPlanToolCall(input)
 	case "spawn_agent":
 		return s.executeSpawnAgentToolCall(ctx, input)
 	case "send_input":
@@ -1136,16 +1133,6 @@ func (s *Server) executeToolCallForPromptModeWithContext(ctx context.Context, pr
 		return s.executeWaitAgentToolCall(ctx, input)
 	case "close_agent":
 		return s.executeCloseAgentToolCall(input)
-	case "request_user_input":
-		return s.executeRequestUserInputToolCall(ctx, input)
-	case "update_plan":
-		return s.executeUpdatePlanToolCall(input)
-	case "apply_patch":
-		return s.executeApplyPatchToolCall(ctx, input)
-	case "open":
-		return s.executeOpenToolCall(input)
-	case "click", "screenshot":
-		return s.executeApproxBrowserToolCall(name, input)
 	case "self_ops":
 		return s.executeSelfOpsToolCall(input)
 	default:

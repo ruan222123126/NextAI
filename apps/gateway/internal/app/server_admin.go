@@ -811,7 +811,7 @@ func normalizeWorkspaceChannels(in domain.ChannelConfigMap, supported map[string
 func normalizeWorkspaceProviders(in map[string]repo.ProviderSetting) (map[string]repo.ProviderSetting, error) {
 	out := map[string]repo.ProviderSetting{}
 	for rawID, rawSetting := range in {
-		id := normalizeProviderID(rawID)
+		id := provider.NormalizeProviderID(rawID)
 		if id == "" {
 			return nil, errors.New("provider id cannot be empty")
 		}
@@ -819,12 +819,12 @@ func normalizeWorkspaceProviders(in map[string]repo.ProviderSetting) (map[string
 			continue
 		}
 		setting := rawSetting
-		normalizeProviderSetting(&setting)
+		provider.NormalizeProviderSetting(&setting)
 		if setting.TimeoutMS < 0 {
 			return nil, fmt.Errorf("provider %q timeout_ms must be >= 0", rawID)
 		}
-		setting.Headers = sanitizeStringMap(setting.Headers)
-		setting.ModelAliases = sanitizeStringMap(setting.ModelAliases)
+		setting.Headers = provider.SanitizeStringMap(setting.Headers)
+		setting.ModelAliases = provider.SanitizeStringMap(setting.ModelAliases)
 		out[id] = setting
 	}
 	return out, nil
@@ -859,7 +859,7 @@ func normalizeWorkspaceSkills(in map[string]domain.SkillSpec, dataDir string) (m
 }
 
 func normalizeWorkspaceActiveLLM(in domain.ModelSlotConfig, providers map[string]repo.ProviderSetting) (domain.ModelSlotConfig, error) {
-	providerID := normalizeProviderID(in.ProviderID)
+	providerID := provider.NormalizeProviderID(in.ProviderID)
 	modelID := strings.TrimSpace(in.Model)
 	if providerID == "" && modelID == "" {
 		return domain.ModelSlotConfig{}, nil
@@ -893,7 +893,7 @@ func cloneWorkspaceProviders(in map[string]repo.ProviderSetting) map[string]repo
 	out := map[string]repo.ProviderSetting{}
 	for id, raw := range in {
 		setting := raw
-		normalizeProviderSetting(&setting)
+		provider.NormalizeProviderSetting(&setting)
 		headers := map[string]string{}
 		for key, value := range setting.Headers {
 			headers[key] = value
@@ -1062,6 +1062,12 @@ func mapToolError(err error) (status int, code string, message string) {
 				return http.StatusBadRequest, "invalid_tool_input", "update_plan payload is invalid"
 			case errors.Is(te.Err, errUpdatePlanChatNotFound):
 				return http.StatusBadRequest, "invalid_request", "update_plan target chat not found"
+			case errors.Is(te.Err, errOutputPlanInvalid):
+				return http.StatusBadRequest, "invalid_tool_input", "output_plan payload is invalid"
+			case errors.Is(te.Err, errOutputPlanChatNotFound):
+				return http.StatusBadRequest, "invalid_request", "output_plan target chat not found"
+			case errors.Is(te.Err, errOutputPlanModeDisabled):
+				return http.StatusBadRequest, "invalid_request", "output_plan requires plan mode enabled"
 			case errors.Is(te.Err, errApplyPatchPayloadMissing):
 				return http.StatusBadRequest, "invalid_tool_input", "apply_patch patch payload is required"
 			case errors.Is(te.Err, errApplyPatchBinaryMissing):
@@ -1221,173 +1227,6 @@ func formatToolErrorFeedback(err error) string {
 	return fmt.Sprintf("tool_error code=%s message=%s detail=%s", code, message, detail)
 }
 
-func (s *Server) collectProviderCatalog() ([]domain.ProviderInfo, map[string]string, domain.ModelSlotConfig) {
-	out := make([]domain.ProviderInfo, 0)
-	defaults := map[string]string{}
-	active := domain.ModelSlotConfig{}
-
-	s.store.Read(func(st *repo.State) {
-		active = st.ActiveLLM
-		settingsByID := map[string]repo.ProviderSetting{}
-
-		for rawID, setting := range st.Providers {
-			id := normalizeProviderID(rawID)
-			if id == "" {
-				continue
-			}
-			normalizeProviderSetting(&setting)
-			settingsByID[id] = setting
-		}
-
-		ids := make([]string, 0, len(settingsByID))
-		for id := range settingsByID {
-			ids = append(ids, id)
-		}
-		sort.Strings(ids)
-		for _, id := range ids {
-			setting := settingsByID[id]
-			out = append(out, buildProviderInfo(id, setting))
-			defaults[id] = provider.DefaultModelID(id)
-		}
-	})
-	return out, defaults, active
-}
-
-func buildProviderInfo(providerID string, setting repo.ProviderSetting) domain.ProviderInfo {
-	normalizeProviderSetting(&setting)
-	spec := provider.ResolveProvider(providerID)
-	apiKey := resolveProviderAPIKey(providerID, setting)
-	return domain.ProviderInfo{
-		ID:                 providerID,
-		Name:               spec.Name,
-		DisplayName:        resolveProviderDisplayName(setting, spec.Name),
-		OpenAICompatible:   provider.ResolveAdapter(providerID) == provider.AdapterOpenAICompatible,
-		APIKeyPrefix:       spec.APIKeyPrefix,
-		Models:             provider.ResolveModels(providerID, setting.ModelAliases),
-		ReasoningEffort:    setting.ReasoningEffort,
-		Headers:            sanitizeStringMap(setting.Headers),
-		TimeoutMS:          setting.TimeoutMS,
-		ModelAliases:       sanitizeStringMap(setting.ModelAliases),
-		AllowCustomBaseURL: spec.AllowCustomBaseURL,
-		Enabled:            providerEnabled(setting),
-		HasAPIKey:          strings.TrimSpace(apiKey) != "",
-		CurrentAPIKey:      maskKey(apiKey),
-		CurrentBaseURL:     resolveProviderBaseURL(providerID, setting),
-	}
-}
-
-func resolveProviderAPIKey(providerID string, setting repo.ProviderSetting) string {
-	if key := strings.TrimSpace(setting.APIKey); key != "" {
-		return key
-	}
-	return strings.TrimSpace(os.Getenv(providerEnvPrefix(providerID) + "_API_KEY"))
-}
-
-func resolveProviderBaseURL(providerID string, setting repo.ProviderSetting) string {
-	if baseURL := strings.TrimSpace(setting.BaseURL); baseURL != "" {
-		return baseURL
-	}
-	if envBaseURL := strings.TrimSpace(os.Getenv(providerEnvPrefix(providerID) + "_BASE_URL")); envBaseURL != "" {
-		return envBaseURL
-	}
-	return provider.ResolveProvider(providerID).DefaultBaseURL
-}
-
-func resolveProviderDisplayName(setting repo.ProviderSetting, defaultName string) string {
-	if displayName := strings.TrimSpace(setting.DisplayName); displayName != "" {
-		return displayName
-	}
-	return strings.TrimSpace(defaultName)
-}
-
-func providerEnvPrefix(providerID string) string {
-	return provider.EnvPrefix(providerID)
-}
-
-func normalizeProviderID(providerID string) string {
-	return strings.ToLower(strings.TrimSpace(providerID))
-}
-
-func providerEnabled(setting repo.ProviderSetting) bool {
-	if setting.Enabled == nil {
-		return true
-	}
-	return *setting.Enabled
-}
-
-func normalizeProviderSetting(setting *repo.ProviderSetting) {
-	if setting == nil {
-		return
-	}
-	setting.DisplayName = strings.TrimSpace(setting.DisplayName)
-	setting.APIKey = strings.TrimSpace(setting.APIKey)
-	setting.BaseURL = strings.TrimSpace(setting.BaseURL)
-	setting.ReasoningEffort = strings.ToLower(strings.TrimSpace(setting.ReasoningEffort))
-	if setting.Enabled == nil {
-		enabled := true
-		setting.Enabled = &enabled
-	}
-	if setting.Headers == nil {
-		setting.Headers = map[string]string{}
-	}
-	if setting.ModelAliases == nil {
-		setting.ModelAliases = map[string]string{}
-	}
-}
-
-func sanitizeStringMap(in map[string]string) map[string]string {
-	out := map[string]string{}
-	for key, value := range in {
-		k := strings.TrimSpace(key)
-		v := strings.TrimSpace(value)
-		if k == "" || v == "" {
-			continue
-		}
-		out[k] = v
-	}
-	return out
-}
-
-func sanitizeModelAliases(raw *map[string]string) (map[string]string, error) {
-	if raw == nil {
-		return nil, nil
-	}
-	out := map[string]string{}
-	for key, value := range *raw {
-		alias := strings.TrimSpace(key)
-		modelID := strings.TrimSpace(value)
-		if alias == "" || modelID == "" {
-			return nil, errors.New("model_aliases requires non-empty key and value")
-		}
-		out[alias] = modelID
-	}
-	return out, nil
-}
-
-func getProviderSettingByID(st *repo.State, providerID string) repo.ProviderSetting {
-	if setting, ok := findProviderSettingByID(st, providerID); ok {
-		return setting
-	}
-	setting := repo.ProviderSetting{}
-	normalizeProviderSetting(&setting)
-	return setting
-}
-
-func findProviderSettingByID(st *repo.State, providerID string) (repo.ProviderSetting, bool) {
-	if st == nil {
-		return repo.ProviderSetting{}, false
-	}
-	if setting, ok := st.Providers[providerID]; ok {
-		return setting, true
-	}
-	for key, setting := range st.Providers {
-		if normalizeProviderID(key) == providerID {
-			return setting, true
-		}
-	}
-	return repo.ProviderSetting{}, false
-}
-
 func writeJSON(w http.ResponseWriter, code int, data interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
@@ -1404,16 +1243,6 @@ func nowISO() string {
 
 func newID(prefix string) string {
 	return fmt.Sprintf("%s-%d", prefix, time.Now().UnixNano())
-}
-
-func maskKey(s string) string {
-	if s == "" {
-		return ""
-	}
-	if len(s) <= 6 {
-		return "***"
-	}
-	return s[:3] + "***" + s[len(s)-3:]
 }
 
 func safeMap(v map[string]interface{}) map[string]interface{} {
@@ -1456,9 +1285,6 @@ func (s *Server) buildCodexSystemLayers(runtime TurnRuntimeSnapshot) ([]systemPr
 	if layers, err = appendCodexReviewHistoryLayersIfNeeded(layers, runtime); err != nil {
 		return nil, err
 	}
-	if layers, err = appendCodexCollaborationLayer(layers, runtime); err != nil {
-		return nil, err
-	}
 	if layers, err = appendCodexCompactLayersIfNeeded(layers, runtime); err != nil {
 		return nil, err
 	}
@@ -1475,36 +1301,6 @@ func (s *Server) buildCodexSystemLayers(runtime TurnRuntimeSnapshot) ([]systemPr
 		return nil, err
 	}
 	return layers, nil
-}
-
-func appendCodexCollaborationLayer(
-	layers []systemPromptLayer,
-	runtime TurnRuntimeSnapshot,
-) ([]systemPromptLayer, error) {
-	modeName := normalizeCollaborationModeName(runtime.Mode.CollaborationMode)
-	if modeName == collaborationModePlanName {
-		return appendCodexOptionalLayer(layers, "codex_collaboration_plan_system", codexCollabPlanRelativePath, nil)
-	}
-	if modeName == collaborationModeExecuteName {
-		return appendCodexOptionalLayer(layers, "codex_collaboration_execute_system", codexCollabExecuteRelativePath, nil)
-	}
-	if modeName == collaborationModePairProgrammingName {
-		return appendCodexOptionalLayer(
-			layers,
-			"codex_collaboration_pair_programming_system",
-			codexCollabPairProgrammingPath,
-			nil,
-		)
-	}
-
-	templateVars := buildCodexTemplateVars(runtime)
-	return appendCodexOptionalTemplateLayer(
-		layers,
-		"codex_collaboration_default_system",
-		codexCollabDefaultRelativePath,
-		templateVars,
-		[]string{"KNOWN_MODE_NAMES", "TURN_MODE", "REQUEST_USER_INPUT_AVAILABLE"},
-	)
 }
 
 func appendCodexReviewPromptLayerIfNeeded(

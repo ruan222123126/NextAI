@@ -73,14 +73,6 @@ func TestBuildSystemLayersForModeWithOptionsCompilesDeterministicHashFromSnapsho
 	}
 
 	runtime.Mode.ReviewTask = false
-	runtime.Mode.CollaborationEvent = collaborationEventSetPlan
-	eventChanged, err := srv.buildSystemLayersForModeWithOptions(runtime)
-	if err != nil {
-		t.Fatalf("event changed compile failed: %v", err)
-	}
-	if eventChanged.Hash == first.Hash {
-		t.Fatalf("expected compiler hash to change when collaboration_event changes, hash=%q", eventChanged.Hash)
-	}
 }
 
 func TestGetAgentSystemLayersRejectsUnsupportedCodexPromptMode(t *testing.T) {
@@ -141,8 +133,6 @@ func TestBuildTurnRuntimeSnapshotForInputCapturesUnifiedRuntimeState(t *testing.
 			},
 		},
 		"session-runtime-snapshot",
-		collaborationModePlanName,
-		collaborationEventSetPlan,
 	)
 
 	if snapshot.Mode.PromptMode != promptModeDefault {
